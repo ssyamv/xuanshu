@@ -2,4 +2,4 @@ import os
 
 
 def pytest_sessionstart(session) -> None:
-    os.environ.setdefault("XUANSHU_ENV", "test")
+    os.environ["XUANSHU_ENV"] = "test"
