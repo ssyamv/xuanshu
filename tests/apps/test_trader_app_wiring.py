@@ -131,7 +131,13 @@ def test_trader_runtime_checks_checkpoint_before_waiting(monkeypatch) -> None:
         client_order_id_builder=runtime.components.client_order_id_builder,
     )
 
-    asyncio.run(trader_app._run_trader(runtime))
+    async def _run_and_close_runtime() -> None:
+        try:
+            await trader_app._run_trader(runtime)
+        finally:
+            await runtime.components.aclose()
+
+    asyncio.run(_run_and_close_runtime())
 
     assert seen_can_open == [False]
 

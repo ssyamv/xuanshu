@@ -95,7 +95,9 @@ async def _wait_forever() -> None:
 
 
 async def _run_trader(runtime: TraderRuntime) -> None:
-    runtime.components.checkpoint_service.can_open_new_risk(runtime.startup_checkpoint)
+    can_open_new_risk = runtime.components.checkpoint_service.can_open_new_risk(runtime.startup_checkpoint)
+    if not can_open_new_risk:
+        return
     await _wait_forever()
 
 
