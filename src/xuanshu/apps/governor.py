@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 
 from xuanshu.config.settings import GovernorRuntimeSettings
@@ -17,6 +17,7 @@ class GovernorRuntime:
     service: GovernorService
     governor_client: GovernorClient
     last_snapshot: StrategyConfigSnapshot
+    published_snapshots: list[StrategyConfigSnapshot] = field(default_factory=list)
 
 
 def build_governor_service() -> GovernorService:
@@ -70,7 +71,7 @@ async def _run_governor(runtime: GovernorRuntime) -> None:
         state_summary={"scope": "governor"},
         last_snapshot=runtime.last_snapshot,
         governor_client=runtime.governor_client,
-        publish_snapshot=lambda item: None,
+        publish_snapshot=runtime.published_snapshots.append,
     )
     await _wait_forever()
 
