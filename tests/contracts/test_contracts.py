@@ -44,6 +44,51 @@ def test_strategy_snapshot_and_expert_opinion_are_stable_contracts() -> None:
     assert opinion.expert_type == "risk"
 
 
+@pytest.mark.parametrize(
+    ("env_value", "expected"),
+    [
+        ("BTC-USDT-SWAP,ETH-USDT-SWAP", ("BTC-USDT-SWAP", "ETH-USDT-SWAP")),
+        ("BTC-USDT-SWAP, ETH-USDT-SWAP", ("BTC-USDT-SWAP", "ETH-USDT-SWAP")),
+    ],
+)
+def test_settings_load_okx_symbols_from_csv_env(monkeypatch: pytest.MonkeyPatch, env_value: str, expected: tuple[str, ...]) -> None:
+    monkeypatch.setenv("REDIS_URL", "redis://localhost:6379/0")
+    monkeypatch.setenv("POSTGRES_DSN", "postgresql://xuanshu:xuanshu@localhost:5432/xuanshu")
+    monkeypatch.setenv("QDRANT_URL", "http://localhost:6333")
+    monkeypatch.setenv("XUANSHU_OKX_SYMBOLS", env_value)
+
+    settings = Settings()
+
+    assert settings.okx_symbols == expected
+
+
+@pytest.mark.parametrize(
+    ("field_name", "empty_value"),
+    [
+        ("opinion_id", ""),
+        ("expert_type", ""),
+        ("symbol_scope", []),
+        ("decision", ""),
+    ],
+)
+def test_expert_opinion_rejects_empty_key_fields(field_name: str, empty_value: object) -> None:
+    payload = {
+        "opinion_id": "op-001",
+        "expert_type": "risk",
+        "generated_at": datetime.now(UTC),
+        "symbol_scope": ["BTC-USDT-SWAP"],
+        "decision": "tighten_risk",
+        "confidence": 0.8,
+        "supporting_facts": ["recent risk events rising"],
+        "risk_flags": ["drawdown_watch"],
+        "ttl_sec": 300,
+    }
+    payload[field_name] = empty_value
+
+    with pytest.raises(ValidationError):
+        ExpertOpinion(**payload)
+
+
 def test_taxonomy_and_numeric_bounds_reject_invalid_contracts() -> None:
     with pytest.raises(ValidationError):
         CandidateSignal(
