@@ -1,26 +1,31 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import dataclass
 
 from xuanshu.core.enums import RunMode
-from xuanshu.notifier.service import format_mode_change
 
 
-def build_notifier_preview(mode: RunMode | str) -> str:
-    return format_mode_change(mode if isinstance(mode, RunMode) else RunMode(mode))
+@dataclass(frozen=True, slots=True)
+class NotifierRuntime:
+    mode: RunMode
+
+
+def build_notifier_runtime(mode: RunMode | str = RunMode.NORMAL) -> NotifierRuntime:
+    return NotifierRuntime(mode=mode if isinstance(mode, RunMode) else RunMode(mode))
 
 
 async def _wait_forever() -> None:
     await asyncio.Event().wait()
 
 
-async def _run_notifier(preview: str) -> None:
-    print(preview)
+async def _run_notifier(runtime: NotifierRuntime) -> None:
+    _ = runtime.mode
     await _wait_forever()
 
 
 def main() -> int:
-    asyncio.run(_run_notifier(build_notifier_preview(RunMode.NORMAL)))
+    asyncio.run(_run_notifier(build_notifier_runtime()))
     return 0
 
 

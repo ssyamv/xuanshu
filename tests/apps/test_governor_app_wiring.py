@@ -1,15 +1,21 @@
 import xuanshu.apps.governor as governor_app
-from xuanshu.apps.governor import build_governor_service
 
 
-def test_governor_entrypoint_builds_service(monkeypatch) -> None:
-    original_build_governor_service = build_governor_service
+def test_governor_entrypoint_keeps_service_in_runtime(monkeypatch) -> None:
     build_called = 0
+    seen_runtime = None
 
     async def _noop_wait_forever() -> None:
         return None
 
-    monkeypatch.setattr(governor_app, "_wait_forever", _noop_wait_forever)
+    async def fake_run_governor(runtime: governor_app.GovernorRuntime) -> None:
+        nonlocal seen_runtime
+        seen_runtime = runtime
+        await _noop_wait_forever()
+
+    monkeypatch.setattr(governor_app, "_run_governor", fake_run_governor)
+
+    original_build_governor_service = governor_app.build_governor_service
 
     def fake_build_governor_service():
         nonlocal build_called
@@ -19,5 +25,6 @@ def test_governor_entrypoint_builds_service(monkeypatch) -> None:
     monkeypatch.setattr(governor_app, "build_governor_service", fake_build_governor_service)
 
     assert governor_app.main() == 0
-    assert original_build_governor_service().__class__.__name__ == "GovernorService"
     assert build_called == 1
+    assert seen_runtime is not None
+    assert seen_runtime.service.__class__.__name__ == "GovernorService"

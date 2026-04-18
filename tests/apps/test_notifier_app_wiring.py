@@ -1,27 +1,34 @@
 import xuanshu.apps.notifier as notifier_app
-from xuanshu.apps.notifier import build_notifier_preview
 from xuanshu.core.enums import RunMode
 
 
-def test_notifier_entrypoint_emits_preview(monkeypatch, capsys) -> None:
-    original_build_notifier_preview = build_notifier_preview
+def test_notifier_entrypoint_keeps_runtime_boundary_silent(monkeypatch, capsys) -> None:
     build_called = 0
+    seen_runtime = None
 
     async def _noop_wait_forever() -> None:
         return None
 
-    monkeypatch.setattr(notifier_app, "_wait_forever", _noop_wait_forever)
+    async def fake_run_notifier(runtime: notifier_app.NotifierRuntime) -> None:
+        nonlocal seen_runtime
+        seen_runtime = runtime
+        await _noop_wait_forever()
 
-    def fake_build_notifier_preview(mode: RunMode) -> str:
+    monkeypatch.setattr(notifier_app, "_run_notifier", fake_run_notifier)
+
+    original_build_notifier_runtime = notifier_app.build_notifier_runtime
+
+    def fake_build_notifier_runtime(mode: RunMode = RunMode.NORMAL) -> notifier_app.NotifierRuntime:
         nonlocal build_called
         build_called += 1
-        return original_build_notifier_preview(mode)
+        return original_build_notifier_runtime(mode)
 
-    monkeypatch.setattr(notifier_app, "build_notifier_preview", fake_build_notifier_preview)
+    monkeypatch.setattr(notifier_app, "build_notifier_runtime", fake_build_notifier_runtime)
 
     assert notifier_app.main() == 0
 
     captured = capsys.readouterr()
-    assert captured.out == "Mode changed to normal trading\n"
-    assert original_build_notifier_preview(RunMode.NORMAL) == "Mode changed to normal trading"
+    assert captured.out == ""
     assert build_called == 1
+    assert seen_runtime is not None
+    assert seen_runtime.mode == RunMode.NORMAL
