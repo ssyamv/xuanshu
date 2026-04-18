@@ -45,11 +45,13 @@ class VolatilityState(StrEnum):
 class OrderSide(StrEnum):
     BUY = "buy"
     SELL = "sell"
+    FLAT = "flat"
 
 
 class EntryType(StrEnum):
     MARKET = "market"
     LIMIT = "limit"
+    NONE = "none"
 
 
 class SignalUrgency(StrEnum):

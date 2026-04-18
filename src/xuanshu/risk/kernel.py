@@ -5,7 +5,7 @@ from uuid import uuid4
 
 from xuanshu.contracts.risk import CandidateSignal, RiskDecision
 from xuanshu.contracts.strategy import StrategyConfigSnapshot
-from xuanshu.core.enums import RunMode, StrategyId
+from xuanshu.core.enums import OrderSide, RunMode, StrategyId
 
 
 class RiskKernel:
@@ -13,12 +13,15 @@ class RiskKernel:
         self.nav = nav
 
     def evaluate(self, signal: CandidateSignal, snapshot: StrategyConfigSnapshot) -> RiskDecision:
-        allow_open = signal.strategy_id != StrategyId.RISK_PAUSE
+        allow_open = signal.strategy_id != StrategyId.RISK_PAUSE and signal.side != OrderSide.FLAT
         reason_codes: list[str] = []
 
         if snapshot.market_mode in {RunMode.REDUCE_ONLY, RunMode.HALTED}:
             allow_open = False
             reason_codes.append("mode_blocks_open")
+
+        if signal.side == OrderSide.FLAT:
+            reason_codes.append("pause_signal")
 
         max_position = self.nav * snapshot.per_symbol_max_position * snapshot.risk_multiplier
         return RiskDecision(

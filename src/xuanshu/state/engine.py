@@ -5,7 +5,7 @@ from datetime import UTC, datetime
 from uuid import uuid4
 
 from xuanshu.contracts.market import MarketStateSnapshot
-from xuanshu.core.enums import RunMode, VolatilityState
+from xuanshu.core.enums import MarketRegime, RunMode, VolatilityState
 from xuanshu.strategies.regime_router import classify_regime
 
 
@@ -28,10 +28,13 @@ class StateEngine:
 
     def on_trade(self, symbol: str, price: float, size: float, side: str) -> None:
         state = self.symbols.setdefault(symbol, SymbolState())
-        if side.lower() == "buy":
+        normalized_side = side.lower()
+        if normalized_side == "buy":
             state.buy_volume += size
-        else:
+        elif normalized_side == "sell":
             state.sell_volume += size
+        else:
+            raise ValueError(f"unsupported trade side: {side}")
 
     def snapshot(self, symbol: str) -> MarketStateSnapshot:
         state = self.symbols[symbol]
@@ -49,12 +52,12 @@ class StateEngine:
             imbalance=recent_trade_bias,
             recent_trade_bias=recent_trade_bias,
             volatility_state=VolatilityState.NORMAL,
-            regime="unknown",
+            regime=MarketRegime.UNKNOWN,
             current_position=0.0,
             current_mode=RunMode.NORMAL,
             risk_budget_remaining=1.0,
         )
 
-        snapshot.volatility_state = "expanding" if spread >= 0.2 else "contained"
+        snapshot.volatility_state = VolatilityState.HOT if spread >= 0.2 else VolatilityState.NORMAL
         snapshot.regime = classify_regime(snapshot)
         return snapshot
