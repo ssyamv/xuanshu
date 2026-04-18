@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import os
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 from xuanshu.config.settings import GovernorRuntimeSettings
 from xuanshu.contracts.strategy import StrategyConfigSnapshot
@@ -36,7 +38,8 @@ def build_governor_client(settings: GovernorRuntimeSettings) -> GovernorClient:
 
 
 def build_snapshot_store(settings: GovernorRuntimeSettings) -> SnapshotStore:
-    return RedisSnapshotStore()
+    shared_state_dir = Path(os.getenv("XUANSHU_SHARED_STATE_DIR", ".xuanshu-state"))
+    return RedisSnapshotStore(shared_state_dir)
 
 
 def _build_bootstrap_snapshot() -> StrategyConfigSnapshot:
