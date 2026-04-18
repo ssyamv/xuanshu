@@ -5,14 +5,25 @@ from dataclasses import dataclass
 
 from xuanshu.config.settings import NotifierRuntimeSettings
 from xuanshu.core.enums import RunMode
-from xuanshu.infra.notifier.telegram import TelegramNotifier
+from xuanshu.infra.notifier.telegram import TelegramNotifier, TextMessagePayload
 
 
 @dataclass(frozen=True, slots=True)
 class NotifierRuntime:
     mode: RunMode
     settings: NotifierRuntimeSettings
-    notifier: TelegramNotifier
+    adapter: TelegramNotifier
+
+    @property
+    def notifier(self) -> TelegramNotifier:
+        return self.adapter
+
+
+def build_notifier_adapter(settings: NotifierRuntimeSettings) -> TelegramNotifier:
+    return TelegramNotifier(
+        bot_token=settings.telegram_bot_token,
+        chat_id=settings.telegram_chat_id,
+    )
 
 
 def build_notifier_runtime(mode: RunMode | str = RunMode.NORMAL) -> NotifierRuntime:
@@ -20,10 +31,7 @@ def build_notifier_runtime(mode: RunMode | str = RunMode.NORMAL) -> NotifierRunt
     return NotifierRuntime(
         mode=mode if isinstance(mode, RunMode) else RunMode(mode),
         settings=settings,
-        notifier=TelegramNotifier(
-            bot_token=settings.telegram_bot_token,
-            chat_id=settings.telegram_chat_id,
-        ),
+        adapter=build_notifier_adapter(settings),
     )
 
 
@@ -32,7 +40,7 @@ async def _wait_forever() -> None:
 
 
 async def _run_notifier(runtime: NotifierRuntime) -> None:
-    _ = runtime.mode
+    await runtime.adapter.send_text(TextMessagePayload(text="Notifier runtime started"))
     await _wait_forever()
 
 

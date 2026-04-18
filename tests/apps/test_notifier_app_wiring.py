@@ -1,3 +1,5 @@
+import asyncio
+
 import pytest
 from pydantic import ValidationError
 
@@ -80,3 +82,25 @@ def test_notifier_entrypoint_fails_fast_without_telegram_wiring(monkeypatch) -> 
 
     with pytest.raises(ValidationError):
         notifier_app.main()
+
+
+def test_notifier_runtime_sends_payload_via_adapter(monkeypatch) -> None:
+    _set_required_settings_env(monkeypatch)
+    _clear_unrelated_settings_env(monkeypatch)
+
+    delivered = []
+
+    class _Adapter:
+        async def send_text(self, payload):
+            delivered.append(payload.text)
+
+    async def _noop_wait_forever() -> None:
+        return None
+
+    monkeypatch.setattr(notifier_app, "_wait_forever", _noop_wait_forever)
+    monkeypatch.setattr(notifier_app, "build_notifier_adapter", lambda settings: _Adapter())
+
+    runtime = notifier_app.build_notifier_runtime()
+    asyncio.run(notifier_app._run_notifier(runtime))
+
+    assert delivered == ["Notifier runtime started"]

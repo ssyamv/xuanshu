@@ -20,3 +20,6 @@ class TelegramNotifier:
 
     def build_text_message(self, text: str) -> TextMessagePayload:
         return render_text_message(text)
+
+    async def send_text(self, payload: TextMessagePayload) -> None:
+        return None
