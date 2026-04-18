@@ -1,4 +1,6 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+
+import httpx
 
 from pydantic import SecretStr
 
@@ -13,11 +15,17 @@ def render_text_message(text: str) -> TextMessagePayload:
     return TextMessagePayload(text=text)
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(slots=True)
 class TelegramNotifier:
     bot_token: SecretStr
     chat_id: str
+    client: httpx.AsyncClient = field(default_factory=httpx.AsyncClient)
 
     async def send_text(self, payload: TextMessagePayload) -> None:
-        _ = payload
-        return None
+        body = {"chat_id": self.chat_id, "text": payload.text}
+        if payload.parse_mode is not None:
+            body["parse_mode"] = payload.parse_mode
+        await self.client.post(
+            f"https://api.telegram.org/bot{self.bot_token.get_secret_value()}/sendMessage",
+            json=body,
+        )
