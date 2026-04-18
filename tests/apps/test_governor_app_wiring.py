@@ -106,3 +106,44 @@ def test_governor_runtime_runs_one_cycle_and_publishes_snapshot(monkeypatch) -> 
 
     assert runtime.last_snapshot.version_id == "snap-new"
     assert [snapshot.version_id for snapshot in runtime.published_snapshots] == ["snap-new"]
+
+
+def test_governor_runtime_publishes_snapshot_to_shared_store(monkeypatch) -> None:
+    _set_required_settings_env(monkeypatch)
+    _clear_unrelated_settings_env(monkeypatch)
+
+    stored = []
+
+    class _Store:
+        def set_latest_snapshot(self, version_id: str, snapshot) -> None:
+            stored.append((version_id, snapshot.version_id))
+
+    class _Runner:
+        async def run(self, state_summary):
+            return {
+                "version_id": "snap-shared",
+                "generated_at": "2026-04-18T00:00:00Z",
+                "effective_from": "2026-04-18T00:00:00Z",
+                "expires_at": "2026-04-18T00:05:00Z",
+                "symbol_whitelist": ["BTC-USDT-SWAP"],
+                "strategy_enable_flags": {"breakout": True, "mean_reversion": False, "risk_pause": True},
+                "risk_multiplier": 0.5,
+                "per_symbol_max_position": 0.12,
+                "max_leverage": 3,
+                "market_mode": RunMode.NORMAL,
+                "approval_state": ApprovalState.APPROVED,
+                "source_reason": "cycle",
+                "ttl_sec": 300,
+            }
+
+    async def _noop_wait_forever() -> None:
+        return None
+
+    monkeypatch.setattr(governor_app, "_wait_forever", _noop_wait_forever)
+    monkeypatch.setattr(governor_app, "build_governor_client", lambda settings: GovernorClient(_Runner()))
+    monkeypatch.setattr(governor_app, "build_snapshot_store", lambda settings: _Store(), raising=False)
+
+    runtime = governor_app.build_governor_runtime()
+    asyncio.run(governor_app._run_governor(runtime))
+
+    assert stored == [("snap-shared", "snap-shared")]

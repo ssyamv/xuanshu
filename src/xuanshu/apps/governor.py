@@ -9,6 +9,7 @@ from xuanshu.contracts.strategy import StrategyConfigSnapshot
 from xuanshu.core.enums import ApprovalState, RunMode
 from xuanshu.governor.service import GovernorService
 from xuanshu.infra.ai.governor_client import ConfiguredGovernorAgentRunner, GovernorClient
+from xuanshu.infra.storage.redis_store import RedisSnapshotStore
 
 
 @dataclass(slots=True)
@@ -16,6 +17,7 @@ class GovernorRuntime:
     settings: GovernorRuntimeSettings
     service: GovernorService
     governor_client: GovernorClient
+    snapshot_store: RedisSnapshotStore
     last_snapshot: StrategyConfigSnapshot
     published_snapshots: list[StrategyConfigSnapshot] = field(default_factory=list)
 
@@ -31,6 +33,10 @@ def build_governor_client(settings: GovernorRuntimeSettings) -> GovernorClient:
             timeout_sec=settings.ai_timeout_sec,
         )
     )
+
+
+def build_snapshot_store(settings: GovernorRuntimeSettings) -> RedisSnapshotStore:
+    return RedisSnapshotStore()
 
 
 def _build_bootstrap_snapshot() -> StrategyConfigSnapshot:
@@ -58,6 +64,7 @@ def build_governor_runtime() -> GovernorRuntime:
         settings=settings,
         service=build_governor_service(),
         governor_client=build_governor_client(settings),
+        snapshot_store=build_snapshot_store(settings),
         last_snapshot=_build_bootstrap_snapshot(),
     )
 
@@ -67,11 +74,15 @@ async def _wait_forever() -> None:
 
 
 async def _run_governor(runtime: GovernorRuntime) -> None:
+    def _publish_snapshot(snapshot: StrategyConfigSnapshot) -> None:
+        runtime.snapshot_store.set_latest_snapshot(snapshot.version_id, snapshot)
+        runtime.published_snapshots.append(snapshot)
+
     runtime.last_snapshot = await runtime.service.run_cycle(
         state_summary={"scope": "governor"},
         last_snapshot=runtime.last_snapshot,
         governor_client=runtime.governor_client,
-        publish_snapshot=runtime.published_snapshots.append,
+        publish_snapshot=_publish_snapshot,
     )
     await _wait_forever()
 

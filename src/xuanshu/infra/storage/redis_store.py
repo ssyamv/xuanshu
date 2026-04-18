@@ -19,3 +19,11 @@ class RedisKeys:
         if not RedisKeys._SYMBOL_PATTERN.fullmatch(symbol):
             raise ValueError(f"invalid runtime symbol: {symbol!r}")
         return f"xuanshu:runtime:symbol:{symbol}"
+
+
+class RedisSnapshotStore:
+    def __init__(self) -> None:
+        self.snapshots: dict[str, object] = {}
+
+    def set_latest_snapshot(self, version_id: str, snapshot: object) -> None:
+        self.snapshots[version_id] = snapshot
