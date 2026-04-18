@@ -1,4 +1,4 @@
-POSTGRES_TABLES = {
+POSTGRES_TABLES = (
     "orders",
     "fills",
     "positions",
@@ -8,4 +8,4 @@ POSTGRES_TABLES = {
     "expert_opinions",
     "governor_runs",
     "notification_events",
-}
+)
