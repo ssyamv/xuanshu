@@ -39,11 +39,10 @@ class TraderRuntime:
     starting_nav: float
 
 
-def build_trader_components(starting_nav: float) -> TraderComponents:
-    settings = TraderRuntimeSettings()
+def build_trader_components(settings: TraderRuntimeSettings) -> TraderComponents:
     return TraderComponents(
         state_engine=StateEngine(),
-        risk_kernel=RiskKernel(nav=starting_nav),
+        risk_kernel=RiskKernel(nav=settings.trader_starting_nav),
         checkpoint_service=CheckpointService(),
         okx_rest_client=OkxRestClient(
             base_url=_OKX_REST_BASE_URL,
@@ -61,7 +60,7 @@ def build_trader_runtime() -> TraderRuntime:
     settings = TraderRuntimeSettings()
     return TraderRuntime(
         settings=settings,
-        components=build_trader_components(starting_nav=settings.trader_starting_nav),
+        components=build_trader_components(settings),
         starting_nav=settings.trader_starting_nav,
     )
 

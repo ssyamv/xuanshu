@@ -61,13 +61,14 @@ def test_trader_entrypoint_loads_settings_and_threads_it_into_components(monkeyp
     assert seen_components.components.okx_private_stream.url.endswith("/private")
 
 
-def test_trader_entrypoint_loads_runtime_from_dotenv_startup_path(monkeypatch, tmp_path) -> None:
+def test_trader_entrypoint_loads_runtime_from_temp_dotenv(monkeypatch, tmp_path) -> None:
     _clear_runtime_env(monkeypatch)
     monkeypatch.chdir(tmp_path)
     Path(".env").write_text(
         "\n".join(
             [
                 "XUANSHU_OKX_SYMBOLS=BTC-USDT-SWAP,ETH-USDT-SWAP",
+                "XUANSHU_TRADER_STARTING_NAV=333333",
                 "OKX_API_KEY=api-key",
                 "OKX_API_SECRET=api-secret",
                 "OKX_API_PASSPHRASE=api-passphrase",
@@ -78,7 +79,8 @@ def test_trader_entrypoint_loads_runtime_from_dotenv_startup_path(monkeypatch, t
     )
 
     async def fake_run_trader(runtime: trader_app.TraderRuntime) -> None:
-        assert runtime.starting_nav == 250_000.0
+        assert runtime.starting_nav == 333_333.0
+        assert runtime.settings.trader_starting_nav == 333_333.0
         await runtime.components.okx_rest_client.aclose()
 
     monkeypatch.setattr(trader_app, "_run_trader", fake_run_trader)
