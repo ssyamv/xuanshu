@@ -108,15 +108,9 @@ def test_governor_runtime_runs_one_cycle_and_publishes_snapshot(monkeypatch) -> 
     assert [snapshot.version_id for snapshot in runtime.published_snapshots] == ["snap-new"]
 
 
-def test_governor_runtime_publishes_snapshot_to_shared_store(monkeypatch) -> None:
+def test_governor_runtime_publishes_snapshot_to_shared_file_store(monkeypatch, tmp_path) -> None:
     _set_required_settings_env(monkeypatch)
     _clear_unrelated_settings_env(monkeypatch)
-
-    stored = []
-
-    class _Store:
-        def set_latest_snapshot(self, version_id: str, snapshot) -> None:
-            stored.append((version_id, snapshot.version_id))
 
     class _Runner:
         async def run(self, state_summary):
@@ -139,11 +133,13 @@ def test_governor_runtime_publishes_snapshot_to_shared_store(monkeypatch) -> Non
     async def _noop_wait_forever() -> None:
         return None
 
+    monkeypatch.setenv("XUANSHU_SHARED_STATE_DIR", str(tmp_path))
     monkeypatch.setattr(governor_app, "_wait_forever", _noop_wait_forever)
     monkeypatch.setattr(governor_app, "build_governor_client", lambda settings: GovernorClient(_Runner()))
-    monkeypatch.setattr(governor_app, "build_snapshot_store", lambda settings: _Store(), raising=False)
 
     runtime = governor_app.build_governor_runtime()
     asyncio.run(governor_app._run_governor(runtime))
 
-    assert stored == [("snap-shared", "snap-shared")]
+    stored = runtime.snapshot_store.get_latest_snapshot()
+    assert stored is not None
+    assert stored.version_id == "snap-shared"

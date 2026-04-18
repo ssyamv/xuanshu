@@ -106,6 +106,19 @@ def test_trader_runtime_loads_starting_nav_from_settings(monkeypatch) -> None:
     assert runtime.starting_nav == 250000.0
 
 
+def test_trader_runtime_reads_latest_snapshot_from_shared_store(monkeypatch, tmp_path) -> None:
+    _set_required_settings_env(monkeypatch)
+    monkeypatch.setenv("XUANSHU_SHARED_STATE_DIR", str(tmp_path))
+
+    runtime = trader_app.build_trader_runtime()
+    runtime.snapshot_store.set_latest_snapshot(
+        "snap-shared",
+        runtime.startup_snapshot.model_copy(update={"version_id": "snap-shared"}),
+    )
+
+    assert runtime.snapshot_store.get_latest_snapshot().version_id == "snap-shared"
+
+
 def test_trader_runtime_checks_checkpoint_before_waiting(monkeypatch) -> None:
     seen_can_open = []
 

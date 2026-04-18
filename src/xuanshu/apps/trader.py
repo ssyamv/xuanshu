@@ -1,18 +1,20 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import UTC, datetime
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 
 from xuanshu.checkpoints.service import CheckpointService
 from xuanshu.config.settings import TraderRuntimeSettings
-from xuanshu.execution.engine import build_client_order_id
+from xuanshu.core.enums import ApprovalState, RunMode
 from xuanshu.contracts.checkpoint import CheckpointBudgetState, ExecutionCheckpoint
-from xuanshu.core.enums import RunMode
+from xuanshu.contracts.strategy import StrategyConfigSnapshot
+from xuanshu.execution.engine import build_client_order_id
 from xuanshu.infra.okx.private_ws import OkxPrivateStream
 from xuanshu.infra.okx.public_ws import OkxPublicStream
 from xuanshu.infra.okx.rest import OkxRestClient
+from xuanshu.infra.storage.redis_store import RedisSnapshotStore, SnapshotStore
 from xuanshu.risk.kernel import RiskKernel
 from xuanshu.state.engine import StateEngine
 
@@ -39,16 +41,37 @@ class TraderComponents:
 class TraderRuntime:
     settings: TraderRuntimeSettings
     components: TraderComponents
+    snapshot_store: SnapshotStore
     starting_nav: float
+    startup_snapshot: StrategyConfigSnapshot
     startup_checkpoint: ExecutionCheckpoint
     opening_allowed: bool = True
 
 
-def _build_startup_checkpoint() -> ExecutionCheckpoint:
+def _build_startup_snapshot() -> StrategyConfigSnapshot:
+    generated_at = datetime.now(UTC)
+    return StrategyConfigSnapshot(
+        version_id="bootstrap",
+        generated_at=generated_at,
+        effective_from=generated_at,
+        expires_at=generated_at + timedelta(minutes=5),
+        symbol_whitelist=["BTC-USDT-SWAP"],
+        strategy_enable_flags={"breakout": True, "mean_reversion": False, "risk_pause": True},
+        risk_multiplier=0.5,
+        per_symbol_max_position=0.12,
+        max_leverage=3,
+        market_mode=RunMode.NORMAL,
+        approval_state=ApprovalState.APPROVED,
+        source_reason="bootstrap",
+        ttl_sec=300,
+    )
+
+
+def _build_startup_checkpoint(startup_snapshot: StrategyConfigSnapshot) -> ExecutionCheckpoint:
     return ExecutionCheckpoint(
         checkpoint_id="startup",
         created_at=datetime.now(UTC),
-        active_snapshot_version="bootstrap",
+        active_snapshot_version=startup_snapshot.version_id,
         current_mode=RunMode.NORMAL,
         positions_snapshot=[],
         open_orders_snapshot=[],
@@ -83,11 +106,18 @@ def build_trader_components(settings: TraderRuntimeSettings) -> TraderComponents
 
 def build_trader_runtime() -> TraderRuntime:
     settings = TraderRuntimeSettings()
+    snapshot_store = RedisSnapshotStore()
+    startup_snapshot = _build_startup_snapshot()
+    latest_snapshot = snapshot_store.get_latest_snapshot()
+    if latest_snapshot is not None:
+        startup_snapshot = latest_snapshot
     return TraderRuntime(
         settings=settings,
         components=build_trader_components(settings),
+        snapshot_store=snapshot_store,
         starting_nav=settings.trader_starting_nav,
-        startup_checkpoint=_build_startup_checkpoint(),
+        startup_snapshot=startup_snapshot,
+        startup_checkpoint=_build_startup_checkpoint(startup_snapshot),
     )
 
 
@@ -96,6 +126,10 @@ async def _wait_forever() -> None:
 
 
 async def _run_trader(runtime: TraderRuntime) -> None:
+    latest_snapshot = runtime.snapshot_store.get_latest_snapshot()
+    if latest_snapshot is not None:
+        runtime.startup_snapshot = latest_snapshot
+        runtime.startup_checkpoint.active_snapshot_version = latest_snapshot.version_id
     runtime.opening_allowed = runtime.components.checkpoint_service.can_open_new_risk(runtime.startup_checkpoint)
     await _wait_forever()
 
