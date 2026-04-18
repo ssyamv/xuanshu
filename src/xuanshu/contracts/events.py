@@ -1,7 +1,7 @@
 from datetime import UTC, datetime
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, Field, StringConstraints, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints, field_validator, model_validator
 
 from xuanshu.core.enums import TraderEventType
 
@@ -10,6 +10,8 @@ SequenceId = NormalizedStr
 
 
 class _TraderEvent(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     event_type: TraderEventType
     exchange: NormalizedStr
     generated_at: datetime
@@ -58,6 +60,12 @@ class OrderUpdateEvent(_TraderEvent):
     size: float = Field(gt=0.0)
     filled_size: float = Field(ge=0.0)
     status: NormalizedStr
+
+    @model_validator(mode="after")
+    def validate_filled_size(self) -> "OrderUpdateEvent":
+        if self.filled_size > self.size:
+            raise ValueError("filled_size must be <= size")
+        return self
 
 
 class PositionUpdateEvent(_TraderEvent):

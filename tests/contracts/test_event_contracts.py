@@ -176,3 +176,56 @@ def test_trader_event_contracts_reject_invalid_prices() -> None:
             bid_size=5.0,
             ask_size=6.0,
         )
+
+
+def test_trader_event_contracts_reject_unknown_fields() -> None:
+    generated_at = datetime.now(UTC)
+
+    with pytest.raises(ValidationError):
+        OrderbookTopEvent(
+            event_type=TraderEventType.ORDERBOOK_TOP,
+            symbol="BTC-USDT-SWAP",
+            exchange="okx",
+            generated_at=generated_at,
+            public_sequence="pub-1",
+            bid_price=100.0,
+            ask_price=100.1,
+            bid_size=5.0,
+            ask_size=6.0,
+            unexpected_field="nope",
+        )
+
+
+def test_order_update_event_rejects_filled_size_over_size() -> None:
+    generated_at = datetime.now(UTC)
+
+    with pytest.raises(ValidationError):
+        OrderUpdateEvent(
+            event_type=TraderEventType.ORDER_UPDATE,
+            symbol="BTC-USDT-SWAP",
+            exchange="okx",
+            generated_at=generated_at,
+            private_sequence="pri-1",
+            order_id="123",
+            client_order_id="btc-breakout-000001",
+            side="buy",
+            price=100.2,
+            size=1.0,
+            filled_size=1.1,
+            status="live",
+        )
+
+
+def test_trader_event_contracts_reject_naive_generated_at() -> None:
+    with pytest.raises(ValidationError):
+        OrderbookTopEvent(
+            event_type=TraderEventType.ORDERBOOK_TOP,
+            symbol="BTC-USDT-SWAP",
+            exchange="okx",
+            generated_at=datetime.now(),
+            public_sequence="pub-1",
+            bid_price=100.0,
+            ask_price=100.1,
+            bid_size=5.0,
+            ask_size=6.0,
+        )
