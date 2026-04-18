@@ -50,6 +50,28 @@ def test_execution_ids_and_recovery_guard_are_deterministic() -> None:
     assert CheckpointService().can_open_new_risk(healthy_checkpoint) is True
 
 
+def test_checkpoint_blocks_new_risk_when_budget_is_exhausted() -> None:
+    exhausted_checkpoint = ExecutionCheckpoint(
+        checkpoint_id="cp-003",
+        created_at=datetime.now(UTC),
+        active_snapshot_version="snap-003",
+        current_mode=RunMode.NORMAL,
+        positions_snapshot=[],
+        open_orders_snapshot=[],
+        budget_state=CheckpointBudgetState(
+            max_daily_loss=100.0,
+            remaining_daily_loss=0.0,
+            remaining_notional=0.0,
+            remaining_order_count=0,
+        ),
+        last_public_stream_marker="pub-3",
+        last_private_stream_marker="pri-3",
+        needs_reconcile=False,
+    )
+
+    assert CheckpointService().can_open_new_risk(exhausted_checkpoint) is False
+
+
 @pytest.mark.parametrize(
     ("symbol", "strategy_id", "sequence"),
     [
