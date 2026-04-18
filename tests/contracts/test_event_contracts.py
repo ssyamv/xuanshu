@@ -106,6 +106,30 @@ def test_trader_event_contracts_reject_invalid_sequences_and_prices() -> None:
         )
 
     with pytest.raises(ValidationError):
+        OrderbookTopEvent(
+            event_type=TraderEventType.ORDERBOOK_TOP,
+            symbol="BTC-USDT-SWAP",
+            exchange="okx",
+            generated_at=generated_at,
+            public_sequence=" ",
+            bid_price=100.0,
+            ask_price=100.1,
+            bid_size=5.0,
+            ask_size=6.0,
+        )
+
+    with pytest.raises(ValidationError):
+        AccountSnapshotEvent(
+            event_type=TraderEventType.ACCOUNT_SNAPSHOT,
+            exchange="okx",
+            generated_at=generated_at,
+            private_sequence=" ",
+            equity=1000.0,
+            available_balance=800.0,
+            margin_ratio=0.15,
+        )
+
+    with pytest.raises(ValidationError):
         PositionUpdateEvent(
             event_type=TraderEventType.POSITION_UPDATE,
             symbol="BTC-USDT-SWAP",

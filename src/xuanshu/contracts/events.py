@@ -1,9 +1,11 @@
 from datetime import UTC, datetime
-from typing import Literal
+from typing import Annotated, Literal
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, Field, StringConstraints, field_validator, model_validator
 
 from xuanshu.core.enums import TraderEventType
+
+SequenceId = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
 
 
 class _TraderEvent(BaseModel):
@@ -22,7 +24,7 @@ class _TraderEvent(BaseModel):
 class OrderbookTopEvent(_TraderEvent):
     event_type: Literal[TraderEventType.ORDERBOOK_TOP]
     symbol: str = Field(min_length=1)
-    public_sequence: str = Field(min_length=1)
+    public_sequence: SequenceId
     bid_price: float = Field(ge=0.0)
     ask_price: float = Field(ge=0.0)
     bid_size: float = Field(ge=0.0)
@@ -38,7 +40,7 @@ class OrderbookTopEvent(_TraderEvent):
 class MarketTradeEvent(_TraderEvent):
     event_type: Literal[TraderEventType.MARKET_TRADE]
     symbol: str = Field(min_length=1)
-    public_sequence: str = Field(min_length=1)
+    public_sequence: SequenceId
     price: float = Field(ge=0.0)
     size: float = Field(gt=0.0)
     side: Literal["buy", "sell"]
@@ -47,7 +49,7 @@ class MarketTradeEvent(_TraderEvent):
 class OrderUpdateEvent(_TraderEvent):
     event_type: Literal[TraderEventType.ORDER_UPDATE]
     symbol: str = Field(min_length=1)
-    private_sequence: str = Field(min_length=1)
+    private_sequence: SequenceId
     order_id: str = Field(min_length=1)
     client_order_id: str = Field(min_length=1)
     side: Literal["buy", "sell"]
@@ -60,7 +62,7 @@ class OrderUpdateEvent(_TraderEvent):
 class PositionUpdateEvent(_TraderEvent):
     event_type: Literal[TraderEventType.POSITION_UPDATE]
     symbol: str = Field(min_length=1)
-    private_sequence: str = Field(min_length=1)
+    private_sequence: SequenceId
     net_quantity: float
     average_price: float = Field(ge=0.0)
     mark_price: float = Field(ge=0.0)
@@ -69,7 +71,7 @@ class PositionUpdateEvent(_TraderEvent):
 
 class AccountSnapshotEvent(_TraderEvent):
     event_type: Literal[TraderEventType.ACCOUNT_SNAPSHOT]
-    private_sequence: str = Field(min_length=1)
+    private_sequence: SequenceId
     equity: float = Field(ge=0.0)
     available_balance: float = Field(ge=0.0)
     margin_ratio: float = Field(ge=0.0)
