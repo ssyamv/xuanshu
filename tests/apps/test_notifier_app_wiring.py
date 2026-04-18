@@ -5,6 +5,7 @@ from pydantic import ValidationError
 
 import xuanshu.apps.notifier as notifier_app
 from xuanshu.core.enums import RunMode
+from xuanshu.infra.notifier.telegram import TextMessagePayload
 
 
 def _set_required_settings_env(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -88,8 +89,8 @@ def test_notifier_runtime_sends_payload_via_adapter(monkeypatch) -> None:
     delivered = []
 
     class _Adapter:
-        async def send_text(self, text):
-            delivered.append(text)
+        async def send_text(self, payload: TextMessagePayload):
+            delivered.append(payload.text)
 
     async def _noop_wait_forever() -> None:
         return None

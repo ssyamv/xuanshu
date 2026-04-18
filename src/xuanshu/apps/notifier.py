@@ -6,10 +6,11 @@ from typing import Protocol
 
 from xuanshu.config.settings import NotifierRuntimeSettings
 from xuanshu.core.enums import RunMode
+from xuanshu.infra.notifier.telegram import TextMessagePayload
 
 
 class NotifierAdapter(Protocol):
-    async def send_text(self, text: str) -> None:
+    async def send_text(self, payload: TextMessagePayload) -> None:
         ...
 
 
@@ -43,7 +44,7 @@ async def _wait_forever() -> None:
 
 
 async def _run_notifier(runtime: NotifierRuntime) -> None:
-    await runtime.adapter.send_text("Notifier runtime started")
+    await runtime.adapter.send_text(TextMessagePayload(text="Notifier runtime started"))
     await _wait_forever()
 
 
