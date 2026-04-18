@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class ExpertOpinion(BaseModel):
@@ -13,3 +13,10 @@ class ExpertOpinion(BaseModel):
     supporting_facts: list[str]
     risk_flags: list[str]
     ttl_sec: int = Field(gt=0)
+
+    @field_validator("symbol_scope")
+    @classmethod
+    def validate_symbol_scope(cls, value: list[str]) -> list[str]:
+        if any(not symbol.strip() for symbol in value):
+            raise ValueError("symbol_scope must not contain blank symbols")
+        return value

@@ -45,6 +45,34 @@ def test_strategy_snapshot_and_expert_opinion_are_stable_contracts() -> None:
 
 
 @pytest.mark.parametrize(
+    "symbol_whitelist",
+    [
+        [""],
+        ["BTC-USDT-SWAP", " "],
+    ],
+)
+def test_strategy_snapshot_rejects_blank_symbol_whitelist_entries(symbol_whitelist: list[str]) -> None:
+    payload = {
+        "version_id": "snap-001",
+        "generated_at": datetime.now(UTC),
+        "effective_from": datetime.now(UTC),
+        "expires_at": datetime.now(UTC) + timedelta(minutes=5),
+        "symbol_whitelist": symbol_whitelist,
+        "strategy_enable_flags": {"breakout": True},
+        "risk_multiplier": 0.8,
+        "per_symbol_max_position": 0.12,
+        "max_leverage": 3,
+        "market_mode": RunMode.NORMAL,
+        "approval_state": "approved",
+        "source_reason": "committee result",
+        "ttl_sec": 300,
+    }
+
+    with pytest.raises(ValidationError):
+        StrategyConfigSnapshot(**payload)
+
+
+@pytest.mark.parametrize(
     ("env_value", "expected"),
     [
         ("BTC-USDT-SWAP,ETH-USDT-SWAP", ("BTC-USDT-SWAP", "ETH-USDT-SWAP")),
@@ -84,6 +112,30 @@ def test_expert_opinion_rejects_empty_key_fields(field_name: str, empty_value: o
         "ttl_sec": 300,
     }
     payload[field_name] = empty_value
+
+    with pytest.raises(ValidationError):
+        ExpertOpinion(**payload)
+
+
+@pytest.mark.parametrize(
+    "symbol_scope",
+    [
+        [""],
+        ["BTC-USDT-SWAP", " "],
+    ],
+)
+def test_expert_opinion_rejects_blank_symbol_scope_entries(symbol_scope: list[str]) -> None:
+    payload = {
+        "opinion_id": "op-001",
+        "expert_type": "risk",
+        "generated_at": datetime.now(UTC),
+        "symbol_scope": symbol_scope,
+        "decision": "tighten_risk",
+        "confidence": 0.8,
+        "supporting_facts": ["recent risk events rising"],
+        "risk_flags": ["drawdown_watch"],
+        "ttl_sec": 300,
+    }
 
     with pytest.raises(ValidationError):
         ExpertOpinion(**payload)

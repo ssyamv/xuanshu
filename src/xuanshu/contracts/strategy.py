@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from xuanshu.core.enums import ApprovalState, RunMode
 
@@ -28,3 +28,10 @@ class StrategyConfigSnapshot(BaseModel):
         if self.expires_at <= self.effective_from:
             raise ValueError("expires_at must be after effective_from")
         return self
+
+    @field_validator("symbol_whitelist")
+    @classmethod
+    def validate_symbol_whitelist(cls, value: list[str]) -> list[str]:
+        if any(not symbol.strip() for symbol in value):
+            raise ValueError("symbol_whitelist must not contain blank symbols")
+        return value
