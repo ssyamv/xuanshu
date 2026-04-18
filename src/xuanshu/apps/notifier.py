@@ -14,9 +14,13 @@ async def _wait_forever() -> None:
     await asyncio.Event().wait()
 
 
+async def _run_notifier(preview: str) -> None:
+    print(preview)
+    await _wait_forever()
+
+
 def main() -> int:
-    build_notifier_preview(RunMode.NORMAL)
-    asyncio.run(_wait_forever())
+    asyncio.run(_run_notifier(build_notifier_preview(RunMode.NORMAL)))
     return 0
 
 
