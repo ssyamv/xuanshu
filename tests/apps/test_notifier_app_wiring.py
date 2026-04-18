@@ -11,8 +11,22 @@ def _set_required_settings_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("TELEGRAM_CHAT_ID", "123456")
 
 
+def _clear_unrelated_settings_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    for name in (
+        "REDIS_URL",
+        "POSTGRES_DSN",
+        "QDRANT_URL",
+        "OPENAI_API_KEY",
+        "OKX_API_KEY",
+        "OKX_API_SECRET",
+        "OKX_API_PASSPHRASE",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+
 def test_notifier_entrypoint_loads_settings_and_threads_it_into_runtime(monkeypatch, capsys) -> None:
     _set_required_settings_env(monkeypatch)
+    _clear_unrelated_settings_env(monkeypatch)
 
     seen_runtime = None
 
@@ -43,6 +57,7 @@ def test_notifier_entrypoint_fails_fast_without_required_settings(monkeypatch) -
     _set_required_settings_env(monkeypatch)
     monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "")
     monkeypatch.setenv("TELEGRAM_CHAT_ID", "")
+    _clear_unrelated_settings_env(monkeypatch)
 
     async def unexpected_run_notifier(_: notifier_app.NotifierRuntime) -> None:
         raise AssertionError("notifier runtime should not start when settings are invalid")
@@ -56,6 +71,7 @@ def test_notifier_entrypoint_fails_fast_without_required_settings(monkeypatch) -
 def test_notifier_entrypoint_fails_fast_without_telegram_wiring(monkeypatch) -> None:
     _set_required_settings_env(monkeypatch)
     monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "")
+    _clear_unrelated_settings_env(monkeypatch)
 
     async def unexpected_run_notifier(_: notifier_app.NotifierRuntime) -> None:
         raise AssertionError("notifier runtime should not start when Telegram wiring is invalid")

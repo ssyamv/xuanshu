@@ -58,7 +58,7 @@ class StrategyConfigSnapshot(BaseModel):
     @field_validator("symbol_whitelist")
     @classmethod
     def validate_symbol_whitelist(cls, value: list[str]) -> list[str]:
-        if any(not symbol.strip() for symbol in value):
+        if _has_blank_symbol_entries(value):
             raise ValueError("symbol_whitelist must not contain blank symbols")
         return value
 
@@ -67,3 +67,7 @@ class StrategyConfigSnapshot(BaseModel):
         if reference_time.tzinfo is None or reference_time.utcoffset() is None:
             raise ValueError("reference_time must be timezone-aware")
         return reference_time.astimezone(UTC)
+
+
+def _has_blank_symbol_entries(symbols: list[str]) -> bool:
+    return any(not symbol.strip() for symbol in symbols)

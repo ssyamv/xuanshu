@@ -12,8 +12,23 @@ def _set_required_settings_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("OPENAI_API_KEY", "openai-key")
 
 
+def _clear_unrelated_settings_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    for name in (
+        "REDIS_URL",
+        "POSTGRES_DSN",
+        "QDRANT_URL",
+        "TELEGRAM_BOT_TOKEN",
+        "TELEGRAM_CHAT_ID",
+        "OKX_API_KEY",
+        "OKX_API_SECRET",
+        "OKX_API_PASSPHRASE",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+
 def test_governor_entrypoint_loads_settings_and_threads_it_into_runtime(monkeypatch) -> None:
     _set_required_settings_env(monkeypatch)
+    _clear_unrelated_settings_env(monkeypatch)
 
     seen_runtime = None
 
@@ -41,6 +56,7 @@ def test_governor_entrypoint_loads_settings_and_threads_it_into_runtime(monkeypa
 
 def test_governor_entrypoint_fails_fast_without_required_settings(monkeypatch) -> None:
     monkeypatch.setenv("OPENAI_API_KEY", "")
+    _clear_unrelated_settings_env(monkeypatch)
 
     async def unexpected_run_governor(_: governor_app.GovernorRuntime) -> None:
         raise AssertionError("governor runtime should not start when settings are invalid")
@@ -53,6 +69,7 @@ def test_governor_entrypoint_fails_fast_without_required_settings(monkeypatch) -
 
 def test_governor_runtime_runs_one_cycle_and_publishes_snapshot(monkeypatch) -> None:
     _set_required_settings_env(monkeypatch)
+    _clear_unrelated_settings_env(monkeypatch)
 
     class _Runner:
         async def run(self, state_summary):

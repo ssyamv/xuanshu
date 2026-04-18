@@ -17,6 +17,10 @@ class ExpertOpinion(BaseModel):
     @field_validator("symbol_scope")
     @classmethod
     def validate_symbol_scope(cls, value: list[str]) -> list[str]:
-        if any(not symbol.strip() for symbol in value):
+        if _has_blank_symbol_entries(value):
             raise ValueError("symbol_scope must not contain blank symbols")
         return value
+
+
+def _has_blank_symbol_entries(symbols: list[str]) -> bool:
+    return any(not symbol.strip() for symbol in symbols)

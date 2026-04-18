@@ -60,6 +60,13 @@ class _XuanshuBaseSettings(BaseSettings):
             return stripped or None
         return value
 
+    @field_validator("okx_symbols", mode="after", check_fields=False)
+    @classmethod
+    def reject_blank_okx_symbols(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        if any(not symbol.strip() for symbol in value):
+            raise ValueError("okx_symbols must not contain blank symbols")
+        return value
+
     @classmethod
     def settings_customise_sources(
         cls,

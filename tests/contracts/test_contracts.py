@@ -3,7 +3,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from pydantic import ValidationError
 
-from xuanshu.config.settings import Settings
+from xuanshu.config.settings import Settings, TraderRuntimeSettings
 from xuanshu.contracts.checkpoint import CheckpointBudgetState, CheckpointOrder, CheckpointPosition, ExecutionCheckpoint
 from xuanshu.contracts.risk import CandidateSignal
 from xuanshu.contracts.market import MarketStateSnapshot
@@ -132,6 +132,38 @@ def test_settings_load_okx_symbols_from_csv_env(monkeypatch: pytest.MonkeyPatch,
     settings = Settings()
 
     assert settings.okx_symbols == expected
+
+
+@pytest.mark.parametrize(
+    "settings_type",
+    [Settings, TraderRuntimeSettings],
+)
+def test_runtime_settings_reject_blank_okx_symbols(
+    settings_type: type[Settings] | type[TraderRuntimeSettings],
+) -> None:
+    payload = {
+        "okx_symbols": [" "],
+        "REDIS_URL": "redis://localhost:6379/0",
+        "POSTGRES_DSN": "postgresql://xuanshu:xuanshu@localhost:5432/xuanshu",
+        "QDRANT_URL": "http://localhost:6333",
+        "OKX_API_KEY": "okx-key",
+        "OKX_API_SECRET": "okx-secret",
+        "OKX_API_PASSPHRASE": "okx-passphrase",
+    }
+
+    if settings_type is Settings:
+        with pytest.raises(ValidationError):
+            settings_type.model_validate(payload)
+    else:
+        with pytest.raises(ValidationError):
+            settings_type.model_validate(
+                {
+                    "okx_symbols": [" "],
+                    "OKX_API_KEY": "okx-key",
+                    "OKX_API_SECRET": "okx-secret",
+                    "OKX_API_PASSPHRASE": "okx-passphrase",
+                }
+            )
 
 
 @pytest.mark.parametrize(
