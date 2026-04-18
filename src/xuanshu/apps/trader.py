@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import UTC, datetime
 from collections.abc import Callable
 from dataclasses import dataclass
 
 from xuanshu.checkpoints.service import CheckpointService
 from xuanshu.config.settings import TraderRuntimeSettings
 from xuanshu.execution.engine import build_client_order_id
+from xuanshu.contracts.checkpoint import CheckpointBudgetState, ExecutionCheckpoint
+from xuanshu.core.enums import RunMode
 from xuanshu.infra.okx.private_ws import OkxPrivateStream
 from xuanshu.infra.okx.public_ws import OkxPublicStream
 from xuanshu.infra.okx.rest import OkxRestClient
@@ -32,11 +35,32 @@ class TraderComponents:
         await self.okx_rest_client.aclose()
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(slots=True)
 class TraderRuntime:
     settings: TraderRuntimeSettings
     components: TraderComponents
     starting_nav: float
+    startup_checkpoint: ExecutionCheckpoint
+
+
+def _build_startup_checkpoint() -> ExecutionCheckpoint:
+    return ExecutionCheckpoint(
+        checkpoint_id="startup",
+        created_at=datetime.now(UTC),
+        active_snapshot_version="bootstrap",
+        current_mode=RunMode.NORMAL,
+        positions_snapshot=[],
+        open_orders_snapshot=[],
+        budget_state=CheckpointBudgetState(
+            max_daily_loss=100.0,
+            remaining_daily_loss=100.0,
+            remaining_notional=100.0,
+            remaining_order_count=10,
+        ),
+        last_public_stream_marker=None,
+        last_private_stream_marker=None,
+        needs_reconcile=False,
+    )
 
 
 def build_trader_components(settings: TraderRuntimeSettings) -> TraderComponents:
@@ -62,6 +86,7 @@ def build_trader_runtime() -> TraderRuntime:
         settings=settings,
         components=build_trader_components(settings),
         starting_nav=settings.trader_starting_nav,
+        startup_checkpoint=_build_startup_checkpoint(),
     )
 
 
@@ -70,7 +95,7 @@ async def _wait_forever() -> None:
 
 
 async def _run_trader(runtime: TraderRuntime) -> None:
-    _ = runtime.components
+    runtime.components.checkpoint_service.can_open_new_risk(runtime.startup_checkpoint)
     await _wait_forever()
 
 

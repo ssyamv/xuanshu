@@ -1,3 +1,4 @@
+import asyncio
 from pathlib import Path
 
 import pytest
@@ -103,6 +104,36 @@ def test_trader_runtime_loads_starting_nav_from_settings(monkeypatch) -> None:
     monkeypatch.setenv("OKX_API_PASSPHRASE", "api-passphrase")
     runtime = trader_app.build_trader_runtime()
     assert runtime.starting_nav == 250000.0
+
+
+def test_trader_runtime_checks_checkpoint_before_waiting(monkeypatch) -> None:
+    seen_can_open = []
+
+    async def _noop_wait_forever() -> None:
+        return None
+
+    class _CheckpointProbe:
+        def can_open_new_risk(self, checkpoint) -> bool:
+            seen_can_open.append(checkpoint.needs_reconcile)
+            return False
+
+    _set_required_settings_env(monkeypatch)
+    monkeypatch.setattr(trader_app, "_wait_forever", _noop_wait_forever)
+
+    runtime = trader_app.build_trader_runtime()
+    runtime.components = trader_app.TraderComponents(
+        state_engine=runtime.components.state_engine,
+        risk_kernel=runtime.components.risk_kernel,
+        checkpoint_service=_CheckpointProbe(),
+        okx_rest_client=runtime.components.okx_rest_client,
+        okx_public_stream=runtime.components.okx_public_stream,
+        okx_private_stream=runtime.components.okx_private_stream,
+        client_order_id_builder=runtime.components.client_order_id_builder,
+    )
+
+    asyncio.run(trader_app._run_trader(runtime))
+
+    assert seen_can_open == [False]
 
 
 def test_trader_entrypoint_fails_fast_without_required_settings(monkeypatch) -> None:
