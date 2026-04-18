@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from typing import Protocol
 
 
 class RedisKeys:
@@ -21,9 +22,16 @@ class RedisKeys:
         return f"xuanshu:runtime:symbol:{symbol}"
 
 
+class SnapshotStore(Protocol):
+    def set_latest_snapshot(self, version_id: str, snapshot: object) -> None:
+        ...
+
+
 class RedisSnapshotStore:
     def __init__(self) -> None:
-        self.snapshots: dict[str, object] = {}
+        self.latest_version_id: str | None = None
+        self.latest_snapshot: object | None = None
 
     def set_latest_snapshot(self, version_id: str, snapshot: object) -> None:
-        self.snapshots[version_id] = snapshot
+        self.latest_version_id = version_id
+        self.latest_snapshot = snapshot

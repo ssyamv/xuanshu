@@ -9,7 +9,7 @@ from xuanshu.contracts.strategy import StrategyConfigSnapshot
 from xuanshu.core.enums import ApprovalState, RunMode
 from xuanshu.governor.service import GovernorService
 from xuanshu.infra.ai.governor_client import ConfiguredGovernorAgentRunner, GovernorClient
-from xuanshu.infra.storage.redis_store import RedisSnapshotStore
+from xuanshu.infra.storage.redis_store import RedisSnapshotStore, SnapshotStore
 
 
 @dataclass(slots=True)
@@ -17,7 +17,7 @@ class GovernorRuntime:
     settings: GovernorRuntimeSettings
     service: GovernorService
     governor_client: GovernorClient
-    snapshot_store: RedisSnapshotStore
+    snapshot_store: SnapshotStore
     last_snapshot: StrategyConfigSnapshot
     published_snapshots: list[StrategyConfigSnapshot] = field(default_factory=list)
 
@@ -35,7 +35,7 @@ def build_governor_client(settings: GovernorRuntimeSettings) -> GovernorClient:
     )
 
 
-def build_snapshot_store(settings: GovernorRuntimeSettings) -> RedisSnapshotStore:
+def build_snapshot_store(settings: GovernorRuntimeSettings) -> SnapshotStore:
     return RedisSnapshotStore()
 
 
