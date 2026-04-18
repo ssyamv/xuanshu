@@ -28,10 +28,10 @@ class OrderbookTopEvent(_TraderEvent):
     event_type: Literal[TraderEventType.ORDERBOOK_TOP]
     symbol: NormalizedStr
     public_sequence: SequenceId
-    bid_price: float = Field(ge=0.0)
-    ask_price: float = Field(ge=0.0)
-    bid_size: float = Field(ge=0.0)
-    ask_size: float = Field(ge=0.0)
+    bid_price: float = Field(ge=0.0, allow_inf_nan=False)
+    ask_price: float = Field(ge=0.0, allow_inf_nan=False)
+    bid_size: float = Field(ge=0.0, allow_inf_nan=False)
+    ask_size: float = Field(ge=0.0, allow_inf_nan=False)
 
     @model_validator(mode="after")
     def validate_prices(self) -> "OrderbookTopEvent":
@@ -44,8 +44,8 @@ class MarketTradeEvent(_TraderEvent):
     event_type: Literal[TraderEventType.MARKET_TRADE]
     symbol: NormalizedStr
     public_sequence: SequenceId
-    price: float = Field(ge=0.0)
-    size: float = Field(gt=0.0)
+    price: float = Field(ge=0.0, allow_inf_nan=False)
+    size: float = Field(gt=0.0, allow_inf_nan=False)
     side: Literal["buy", "sell"]
 
 
@@ -56,9 +56,9 @@ class OrderUpdateEvent(_TraderEvent):
     order_id: NormalizedStr
     client_order_id: NormalizedStr
     side: Literal["buy", "sell"]
-    price: float = Field(ge=0.0)
-    size: float = Field(gt=0.0)
-    filled_size: float = Field(ge=0.0)
+    price: float = Field(ge=0.0, allow_inf_nan=False)
+    size: float = Field(gt=0.0, allow_inf_nan=False)
+    filled_size: float = Field(ge=0.0, allow_inf_nan=False)
     status: NormalizedStr
 
     @model_validator(mode="after")
@@ -72,18 +72,18 @@ class PositionUpdateEvent(_TraderEvent):
     event_type: Literal[TraderEventType.POSITION_UPDATE]
     symbol: NormalizedStr
     private_sequence: SequenceId
-    net_quantity: float
-    average_price: float = Field(ge=0.0)
-    mark_price: float = Field(ge=0.0)
-    unrealized_pnl: float
+    net_quantity: float = Field(allow_inf_nan=False)
+    average_price: float = Field(ge=0.0, allow_inf_nan=False)
+    mark_price: float = Field(ge=0.0, allow_inf_nan=False)
+    unrealized_pnl: float = Field(allow_inf_nan=False)
 
 
 class AccountSnapshotEvent(_TraderEvent):
     event_type: Literal[TraderEventType.ACCOUNT_SNAPSHOT]
     private_sequence: SequenceId
-    equity: float = Field(ge=0.0)
-    available_balance: float = Field(ge=0.0)
-    margin_ratio: float = Field(ge=0.0)
+    equity: float = Field(ge=0.0, allow_inf_nan=False)
+    available_balance: float = Field(ge=0.0, allow_inf_nan=False)
+    margin_ratio: float = Field(ge=0.0, allow_inf_nan=False)
 
 
 class FaultEvent(_TraderEvent):

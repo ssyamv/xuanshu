@@ -1,4 +1,5 @@
 from datetime import UTC, datetime
+from math import inf, nan
 
 import pytest
 from pydantic import ValidationError
@@ -229,3 +230,89 @@ def test_trader_event_contracts_reject_naive_generated_at() -> None:
             bid_size=5.0,
             ask_size=6.0,
         )
+
+
+@pytest.mark.parametrize(
+    ("model", "field", "base_kwargs"),
+    [
+        (
+            OrderbookTopEvent,
+            "bid_price",
+            dict(
+                event_type=TraderEventType.ORDERBOOK_TOP,
+                symbol="BTC-USDT-SWAP",
+                exchange="okx",
+                generated_at=datetime.now(UTC),
+                public_sequence="pub-1",
+                ask_price=100.1,
+                bid_size=5.0,
+                ask_size=6.0,
+            ),
+        ),
+        (
+            MarketTradeEvent,
+            "price",
+            dict(
+                event_type=TraderEventType.MARKET_TRADE,
+                symbol="BTC-USDT-SWAP",
+                exchange="okx",
+                generated_at=datetime.now(UTC),
+                public_sequence="pub-2",
+                size=1.5,
+                side="buy",
+            ),
+        ),
+        (
+            OrderUpdateEvent,
+            "filled_size",
+            dict(
+                event_type=TraderEventType.ORDER_UPDATE,
+                symbol="BTC-USDT-SWAP",
+                exchange="okx",
+                generated_at=datetime.now(UTC),
+                private_sequence="pri-1",
+                order_id="123",
+                client_order_id="btc-breakout-000001",
+                side="buy",
+                price=100.2,
+                size=1.0,
+                status="live",
+            ),
+        ),
+        (
+            PositionUpdateEvent,
+            "unrealized_pnl",
+            dict(
+                event_type=TraderEventType.POSITION_UPDATE,
+                symbol="BTC-USDT-SWAP",
+                exchange="okx",
+                generated_at=datetime.now(UTC),
+                private_sequence="pri-2",
+                net_quantity=1.0,
+                average_price=100.2,
+                mark_price=100.4,
+            ),
+        ),
+        (
+            AccountSnapshotEvent,
+            "margin_ratio",
+            dict(
+                event_type=TraderEventType.ACCOUNT_SNAPSHOT,
+                exchange="okx",
+                generated_at=datetime.now(UTC),
+                private_sequence="pri-3",
+                equity=1000.0,
+                available_balance=800.0,
+            ),
+        ),
+    ],
+)
+@pytest.mark.parametrize("bad_value", [inf, -inf, nan])
+def test_trader_event_contracts_reject_non_finite_numeric_values(
+    model: type[object],
+    field: str,
+    base_kwargs: dict[str, object],
+    bad_value: float,
+) -> None:
+    with pytest.raises(ValidationError):
+        model(**base_kwargs, **{field: bad_value})
