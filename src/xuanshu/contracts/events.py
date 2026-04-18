@@ -5,12 +5,13 @@ from pydantic import BaseModel, Field, StringConstraints, field_validator, model
 
 from xuanshu.core.enums import TraderEventType
 
-SequenceId = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
+NormalizedStr = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
+SequenceId = NormalizedStr
 
 
 class _TraderEvent(BaseModel):
     event_type: TraderEventType
-    exchange: str = Field(min_length=1)
+    exchange: NormalizedStr
     generated_at: datetime
 
     @field_validator("generated_at")
@@ -23,7 +24,7 @@ class _TraderEvent(BaseModel):
 
 class OrderbookTopEvent(_TraderEvent):
     event_type: Literal[TraderEventType.ORDERBOOK_TOP]
-    symbol: str = Field(min_length=1)
+    symbol: NormalizedStr
     public_sequence: SequenceId
     bid_price: float = Field(ge=0.0)
     ask_price: float = Field(ge=0.0)
@@ -39,7 +40,7 @@ class OrderbookTopEvent(_TraderEvent):
 
 class MarketTradeEvent(_TraderEvent):
     event_type: Literal[TraderEventType.MARKET_TRADE]
-    symbol: str = Field(min_length=1)
+    symbol: NormalizedStr
     public_sequence: SequenceId
     price: float = Field(ge=0.0)
     size: float = Field(gt=0.0)
@@ -48,20 +49,20 @@ class MarketTradeEvent(_TraderEvent):
 
 class OrderUpdateEvent(_TraderEvent):
     event_type: Literal[TraderEventType.ORDER_UPDATE]
-    symbol: str = Field(min_length=1)
+    symbol: NormalizedStr
     private_sequence: SequenceId
-    order_id: str = Field(min_length=1)
-    client_order_id: str = Field(min_length=1)
+    order_id: NormalizedStr
+    client_order_id: NormalizedStr
     side: Literal["buy", "sell"]
     price: float = Field(ge=0.0)
     size: float = Field(gt=0.0)
     filled_size: float = Field(ge=0.0)
-    status: str = Field(min_length=1)
+    status: NormalizedStr
 
 
 class PositionUpdateEvent(_TraderEvent):
     event_type: Literal[TraderEventType.POSITION_UPDATE]
-    symbol: str = Field(min_length=1)
+    symbol: NormalizedStr
     private_sequence: SequenceId
     net_quantity: float
     average_price: float = Field(ge=0.0)
@@ -80,5 +81,5 @@ class AccountSnapshotEvent(_TraderEvent):
 class FaultEvent(_TraderEvent):
     event_type: Literal[TraderEventType.RUNTIME_FAULT]
     severity: Literal["info", "warn", "critical"]
-    code: str = Field(min_length=1)
-    detail: str = Field(min_length=1)
+    code: NormalizedStr
+    detail: NormalizedStr

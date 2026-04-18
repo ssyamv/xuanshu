@@ -89,7 +89,7 @@ def test_trader_event_contracts_are_stable_and_typed() -> None:
     assert fault.code == "public_ws_disconnected"
 
 
-def test_trader_event_contracts_reject_invalid_sequences_and_prices() -> None:
+def test_trader_event_contracts_reject_invalid_sequences_and_whitespace_identifiers() -> None:
     generated_at = datetime.now(UTC)
 
     with pytest.raises(ValidationError):
@@ -119,25 +119,60 @@ def test_trader_event_contracts_reject_invalid_sequences_and_prices() -> None:
         )
 
     with pytest.raises(ValidationError):
-        AccountSnapshotEvent(
-            event_type=TraderEventType.ACCOUNT_SNAPSHOT,
-            exchange="okx",
+        OrderbookTopEvent(
+            event_type=TraderEventType.ORDERBOOK_TOP,
+            symbol="BTC-USDT-SWAP",
+            exchange=" ",
             generated_at=generated_at,
-            private_sequence=" ",
-            equity=1000.0,
-            available_balance=800.0,
-            margin_ratio=0.15,
+            public_sequence="pub-1",
+            bid_price=100.0,
+            ask_price=100.1,
+            bid_size=5.0,
+            ask_size=6.0,
         )
 
     with pytest.raises(ValidationError):
-        PositionUpdateEvent(
-            event_type=TraderEventType.POSITION_UPDATE,
+        OrderbookTopEvent(
+            event_type=TraderEventType.ORDERBOOK_TOP,
+            symbol=" ",
+            exchange="okx",
+            generated_at=generated_at,
+            public_sequence="pub-1",
+            bid_price=100.0,
+            ask_price=100.1,
+            bid_size=5.0,
+            ask_size=6.0,
+        )
+
+    with pytest.raises(ValidationError):
+        OrderUpdateEvent(
+            event_type=TraderEventType.ORDER_UPDATE,
             symbol="BTC-USDT-SWAP",
             exchange="okx",
             generated_at=generated_at,
-            private_sequence="pri-2",
-            net_quantity=1.0,
-            average_price=-1.0,
-            mark_price=100.4,
-            unrealized_pnl=0.2,
+            private_sequence="pri-1",
+            order_id="123",
+            client_order_id="btc-breakout-000001",
+            side="buy",
+            price=100.2,
+            size=1.0,
+            filled_size=0.0,
+            status=" ",
+        )
+
+
+def test_trader_event_contracts_reject_invalid_prices() -> None:
+    generated_at = datetime.now(UTC)
+
+    with pytest.raises(ValidationError):
+        OrderbookTopEvent(
+            event_type=TraderEventType.ORDERBOOK_TOP,
+            symbol="BTC-USDT-SWAP",
+            exchange="okx",
+            generated_at=generated_at,
+            public_sequence="pub-1",
+            bid_price=100.0,
+            ask_price=99.9,
+            bid_size=5.0,
+            ask_size=6.0,
         )
