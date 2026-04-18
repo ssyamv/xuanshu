@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
 from collections.abc import Callable
+from dataclasses import dataclass
 
 from xuanshu.checkpoints.service import CheckpointService
 from xuanshu.config.settings import TraderRuntimeSettings
@@ -20,7 +20,6 @@ _OKX_PRIVATE_WS_URL = "wss://ws.okx.com:8443/ws/v5/private"
 
 @dataclass(frozen=True, slots=True)
 class TraderComponents:
-    settings: TraderRuntimeSettings
     state_engine: StateEngine
     risk_kernel: RiskKernel
     checkpoint_service: CheckpointService
@@ -33,12 +32,18 @@ class TraderComponents:
         await self.okx_rest_client.aclose()
 
 
-def build_trader_components() -> TraderComponents:
+@dataclass(frozen=True, slots=True)
+class TraderRuntime:
+    settings: TraderRuntimeSettings
+    components: TraderComponents
+    starting_nav: float
+
+
+def build_trader_components(starting_nav: float) -> TraderComponents:
     settings = TraderRuntimeSettings()
     return TraderComponents(
-        settings=settings,
         state_engine=StateEngine(),
-        risk_kernel=RiskKernel(nav=settings.trader_starting_nav),
+        risk_kernel=RiskKernel(nav=starting_nav),
         checkpoint_service=CheckpointService(),
         okx_rest_client=OkxRestClient(
             base_url=_OKX_REST_BASE_URL,
@@ -52,22 +57,31 @@ def build_trader_components() -> TraderComponents:
     )
 
 
+def build_trader_runtime() -> TraderRuntime:
+    settings = TraderRuntimeSettings()
+    return TraderRuntime(
+        settings=settings,
+        components=build_trader_components(starting_nav=settings.trader_starting_nav),
+        starting_nav=settings.trader_starting_nav,
+    )
+
+
 async def _wait_forever() -> None:
     await asyncio.Event().wait()
 
 
-async def _run_trader(components: TraderComponents) -> None:
-    _ = components
+async def _run_trader(runtime: TraderRuntime) -> None:
+    _ = runtime.components
     await _wait_forever()
 
 
 def main() -> int:
     async def _main() -> None:
-        components = build_trader_components()
+        runtime = build_trader_runtime()
         try:
-            await _run_trader(components)
+            await _run_trader(runtime)
         finally:
-            await components.aclose()
+            await runtime.components.aclose()
 
     asyncio.run(_main())
     return 0

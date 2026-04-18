@@ -36,9 +36,9 @@ def test_trader_entrypoint_loads_settings_and_threads_it_into_components(monkeyp
     async def _noop_wait_forever() -> None:
         return None
 
-    async def fake_run_trader(components: trader_app.TraderComponents) -> None:
+    async def fake_run_trader(runtime: trader_app.TraderRuntime) -> None:
         nonlocal seen_components
-        seen_components = components
+        seen_components = runtime
         await _noop_wait_forever()
 
     monkeypatch.setattr(trader_app, "_run_trader", fake_run_trader)
@@ -47,17 +47,18 @@ def test_trader_entrypoint_loads_settings_and_threads_it_into_components(monkeyp
 
     assert seen_components is not None
     assert seen_components.settings.okx_symbols == ("BTC-USDT-SWAP", "ETH-USDT-SWAP")
-    assert seen_components.state_engine.__class__.__name__ == "StateEngine"
-    assert seen_components.risk_kernel.nav == 250_000.0
-    assert seen_components.checkpoint_service.__class__.__name__ == "CheckpointService"
-    assert isinstance(seen_components.okx_rest_client, OkxRestClient)
-    assert isinstance(seen_components.okx_public_stream, OkxPublicStream)
-    assert isinstance(seen_components.okx_private_stream, OkxPrivateStream)
-    assert seen_components.client_order_id_builder("BTC-USDT-SWAP", "breakout", 1) == "BTC-USDT-SWAP-breakout-000001"
+    assert seen_components.starting_nav == 250_000.0
+    assert seen_components.components.state_engine.__class__.__name__ == "StateEngine"
+    assert seen_components.components.risk_kernel.nav == 250_000.0
+    assert seen_components.components.checkpoint_service.__class__.__name__ == "CheckpointService"
+    assert isinstance(seen_components.components.okx_rest_client, OkxRestClient)
+    assert isinstance(seen_components.components.okx_public_stream, OkxPublicStream)
+    assert isinstance(seen_components.components.okx_private_stream, OkxPrivateStream)
+    assert seen_components.components.client_order_id_builder("BTC-USDT-SWAP", "breakout", 1) == "BTC-USDT-SWAP-breakout-000001"
     assert seen_components.settings.okx_api_key.get_secret_value() == "api-key"
-    assert seen_components.okx_rest_client.api_key == "api-key"
-    assert seen_components.okx_public_stream.url.endswith("/public")
-    assert seen_components.okx_private_stream.url.endswith("/private")
+    assert seen_components.components.okx_rest_client.api_key == "api-key"
+    assert seen_components.components.okx_public_stream.url.endswith("/public")
+    assert seen_components.components.okx_private_stream.url.endswith("/private")
 
 
 def test_trader_entrypoint_loads_runtime_from_dotenv_startup_path(monkeypatch, tmp_path) -> None:
@@ -76,9 +77,9 @@ def test_trader_entrypoint_loads_runtime_from_dotenv_startup_path(monkeypatch, t
         encoding="utf-8",
     )
 
-    async def fake_run_trader(components: trader_app.TraderComponents) -> None:
-        assert components.risk_kernel.nav == 250_000.0
-        await components.okx_rest_client.aclose()
+    async def fake_run_trader(runtime: trader_app.TraderRuntime) -> None:
+        assert runtime.starting_nav == 250_000.0
+        await runtime.components.okx_rest_client.aclose()
 
     monkeypatch.setattr(trader_app, "_run_trader", fake_run_trader)
 
@@ -93,11 +94,20 @@ def test_trader_runtime_contract_lists_starting_nav() -> None:
     assert "XUANSHU_TRADER_STARTING_NAV:" in compose
 
 
+def test_trader_runtime_loads_starting_nav_from_settings(monkeypatch) -> None:
+    monkeypatch.setenv("XUANSHU_TRADER_STARTING_NAV", "250000")
+    monkeypatch.setenv("OKX_API_KEY", "api-key")
+    monkeypatch.setenv("OKX_API_SECRET", "api-secret")
+    monkeypatch.setenv("OKX_API_PASSPHRASE", "api-passphrase")
+    runtime = trader_app.build_trader_runtime()
+    assert runtime.starting_nav == 250000.0
+
+
 def test_trader_entrypoint_fails_fast_without_required_settings(monkeypatch) -> None:
     _set_required_settings_env(monkeypatch)
     monkeypatch.setenv("XUANSHU_TRADER_STARTING_NAV", "0")
 
-    async def unexpected_run_trader(_: trader_app.TraderComponents) -> None:
+    async def unexpected_run_trader(_: trader_app.TraderRuntime) -> None:
         raise AssertionError("trader runtime should not start when settings are invalid")
 
     monkeypatch.setattr(trader_app, "_run_trader", unexpected_run_trader)
@@ -110,7 +120,7 @@ def test_trader_entrypoint_fails_fast_without_okx_credentials(monkeypatch) -> No
     _set_required_settings_env(monkeypatch)
     monkeypatch.setenv("OKX_API_KEY", "")
 
-    async def unexpected_run_trader(_: trader_app.TraderComponents) -> None:
+    async def unexpected_run_trader(_: trader_app.TraderRuntime) -> None:
         raise AssertionError("trader runtime should not start when OKX credentials are invalid")
 
     monkeypatch.setattr(trader_app, "_run_trader", unexpected_run_trader)

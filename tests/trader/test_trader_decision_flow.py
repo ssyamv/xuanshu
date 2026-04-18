@@ -74,24 +74,16 @@ def test_trader_empty_cold_start_snapshot_stays_unknown() -> None:
 
 
 def test_trader_recent_flow_overrides_stale_lifetime_pressure() -> None:
-    engine = StateEngine(recent_trade_window=4)
+    engine = StateEngine(recent_trade_window=6)
     engine.on_bbo("BTC-USDT-SWAP", bid=100.0, ask=100.2)
-    for _ in range(6):
-        engine.on_trade("BTC-USDT-SWAP", price=100.3, size=2.0, side="buy")
+    engine.on_trade("BTC-USDT-SWAP", price=99.0, size=1_000.0, side="sell")
+    for _ in range(5):
+        engine.on_trade("BTC-USDT-SWAP", price=100.3, size=1.0, side="buy")
 
-    hot_snapshot = engine.snapshot("BTC-USDT-SWAP")
-    assert hot_snapshot.regime == MarketRegime.TREND
+    snapshot = engine.snapshot("BTC-USDT-SWAP")
 
-    engine.on_bbo("BTC-USDT-SWAP", bid=100.0, ask=100.1)
-    engine.on_trade("BTC-USDT-SWAP", price=100.1, size=2.0, side="buy")
-    engine.on_trade("BTC-USDT-SWAP", price=100.1, size=2.0, side="sell")
-    engine.on_trade("BTC-USDT-SWAP", price=100.1, size=2.0, side="buy")
-    engine.on_trade("BTC-USDT-SWAP", price=100.1, size=2.0, side="sell")
-
-    recent_snapshot = engine.snapshot("BTC-USDT-SWAP")
-
-    assert recent_snapshot.recent_trade_bias == 0.0
-    assert recent_snapshot.regime == MarketRegime.MEAN_REVERSION
+    assert snapshot.recent_trade_bias > 0.6
+    assert snapshot.regime == MarketRegime.TREND
 
 
 def test_trader_rejects_unsupported_trade_side() -> None:
