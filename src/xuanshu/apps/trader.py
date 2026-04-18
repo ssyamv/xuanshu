@@ -22,6 +22,7 @@ class TraderComponents:
 
 def build_trader_components() -> TraderComponents:
     settings = Settings()
+    settings.require_trader_runtime()
     return TraderComponents(
         settings=settings,
         state_engine=StateEngine(),

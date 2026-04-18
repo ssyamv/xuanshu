@@ -35,6 +35,18 @@ def test_trader_pause_signal_is_explicitly_non_executable() -> None:
     assert signals[0].confidence == 0.0
 
 
+def test_trader_quote_only_cold_start_does_not_generate_a_live_entry_signal() -> None:
+    engine = StateEngine()
+    engine.on_bbo("BTC-USDT-SWAP", bid=100.0, ask=100.1)
+
+    snapshot = engine.snapshot("BTC-USDT-SWAP")
+    signals = build_candidate_signals(snapshot)
+
+    assert snapshot.regime == MarketRegime.UNKNOWN
+    assert signals[0].strategy_id == StrategyId.RISK_PAUSE
+    assert signals[0].side == OrderSide.FLAT
+
+
 def test_trader_rejects_unsupported_trade_side() -> None:
     engine = StateEngine()
 

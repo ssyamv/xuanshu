@@ -1,5 +1,4 @@
-from pydantic import Field
-from pydantic import field_validator
+from pydantic import BaseModel, Field, SecretStr, field_validator
 from pydantic.networks import AnyHttpUrl, PostgresDsn, RedisDsn
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from pydantic_settings.sources import EnvSettingsSource, PydanticBaseSettingsSource
@@ -12,11 +11,32 @@ class _SettingsEnvSource(EnvSettingsSource):
         return super().prepare_field_value(field_name, field, value, value_is_complex)
 
 
+class OkxRuntimeSecrets(BaseModel):
+    api_key: SecretStr
+    api_secret: SecretStr
+    passphrase: SecretStr
+
+
+class OpenAiRuntimeSecrets(BaseModel):
+    api_key: SecretStr
+
+
+class TelegramRuntimeSecrets(BaseModel):
+    bot_token: SecretStr
+    chat_id: str = Field(min_length=1)
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_prefix="XUANSHU_", extra="ignore")
 
     env: str = Field(default="dev", min_length=1)
     okx_symbols: tuple[str, ...] = Field(default=("BTC-USDT-SWAP", "ETH-USDT-SWAP"), min_length=1)
+    okx_api_key: SecretStr | None = Field(default=None, validation_alias="OKX_API_KEY")
+    okx_api_secret: SecretStr | None = Field(default=None, validation_alias="OKX_API_SECRET")
+    okx_api_passphrase: SecretStr | None = Field(default=None, validation_alias="OKX_API_PASSPHRASE")
+    openai_api_key: SecretStr | None = Field(default=None, validation_alias="OPENAI_API_KEY")
+    telegram_bot_token: SecretStr | None = Field(default=None, validation_alias="TELEGRAM_BOT_TOKEN")
+    telegram_chat_id: str | None = Field(default=None, validation_alias="TELEGRAM_CHAT_ID")
     redis_url: RedisDsn = Field(validation_alias="REDIS_URL")
     postgres_dsn: PostgresDsn = Field(validation_alias="POSTGRES_DSN")
     qdrant_url: AnyHttpUrl = Field(validation_alias="QDRANT_URL")
@@ -28,6 +48,38 @@ class Settings(BaseSettings):
         if isinstance(value, str):
             return tuple(symbol.strip() for symbol in value.split(",") if symbol.strip())
         return value
+
+    @field_validator(
+        "okx_api_key",
+        "okx_api_secret",
+        "okx_api_passphrase",
+        "openai_api_key",
+        "telegram_bot_token",
+        "telegram_chat_id",
+        mode="before",
+    )
+    @classmethod
+    def empty_runtime_values_are_none(cls, value: object) -> object:
+        if isinstance(value, str):
+            stripped = value.strip()
+            return stripped or None
+        return value
+
+    def require_trader_runtime(self) -> OkxRuntimeSecrets:
+        return OkxRuntimeSecrets(
+            api_key=self.okx_api_key,
+            api_secret=self.okx_api_secret,
+            passphrase=self.okx_api_passphrase,
+        )
+
+    def require_governor_runtime(self) -> OpenAiRuntimeSecrets:
+        return OpenAiRuntimeSecrets(api_key=self.openai_api_key)
+
+    def require_notifier_runtime(self) -> TelegramRuntimeSecrets:
+        return TelegramRuntimeSecrets(
+            bot_token=self.telegram_bot_token,
+            chat_id=self.telegram_chat_id,
+        )
 
     @classmethod
     def settings_customise_sources(

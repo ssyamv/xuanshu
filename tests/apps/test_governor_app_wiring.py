@@ -9,6 +9,7 @@ def _set_required_settings_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("POSTGRES_DSN", "postgresql://xuanshu:xuanshu@localhost:5432/xuanshu")
     monkeypatch.setenv("QDRANT_URL", "http://localhost:6333")
     monkeypatch.setenv("XUANSHU_OKX_SYMBOLS", "BTC-USDT-SWAP, ETH-USDT-SWAP")
+    monkeypatch.setenv("OPENAI_API_KEY", "openai-key")
 
 
 def test_governor_entrypoint_loads_settings_and_threads_it_into_runtime(monkeypatch) -> None:
@@ -31,6 +32,7 @@ def test_governor_entrypoint_loads_settings_and_threads_it_into_runtime(monkeypa
     assert seen_runtime is not None
     assert seen_runtime.service.__class__.__name__ == "GovernorService"
     assert seen_runtime.settings.okx_symbols == ("BTC-USDT-SWAP", "ETH-USDT-SWAP")
+    assert seen_runtime.settings.openai_api_key.get_secret_value() == "openai-key"
 
 
 def test_governor_entrypoint_fails_fast_without_required_settings(monkeypatch) -> None:
@@ -40,6 +42,19 @@ def test_governor_entrypoint_fails_fast_without_required_settings(monkeypatch) -
 
     async def unexpected_run_governor(_: governor_app.GovernorRuntime) -> None:
         raise AssertionError("governor runtime should not start when settings are invalid")
+
+    monkeypatch.setattr(governor_app, "_run_governor", unexpected_run_governor)
+
+    with pytest.raises(ValidationError):
+        governor_app.main()
+
+
+def test_governor_entrypoint_fails_fast_without_openai_api_key(monkeypatch) -> None:
+    _set_required_settings_env(monkeypatch)
+    monkeypatch.setenv("OPENAI_API_KEY", "")
+
+    async def unexpected_run_governor(_: governor_app.GovernorRuntime) -> None:
+        raise AssertionError("governor runtime should not start when OpenAI credentials are invalid")
 
     monkeypatch.setattr(governor_app, "_run_governor", unexpected_run_governor)
 

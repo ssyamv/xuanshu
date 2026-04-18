@@ -39,7 +39,8 @@ class StateEngine:
     def snapshot(self, symbol: str) -> MarketStateSnapshot:
         state = self.symbols[symbol]
         mid_price = (state.bid + state.ask) / 2
-        total_volume = max(state.buy_volume + state.sell_volume, 1.0)
+        observed_volume = state.buy_volume + state.sell_volume
+        total_volume = max(observed_volume, 1.0)
         recent_trade_bias = (state.buy_volume - state.sell_volume) / total_volume
         spread = max(state.ask - state.bid, 0.0)
 
@@ -59,5 +60,8 @@ class StateEngine:
         )
 
         snapshot.volatility_state = VolatilityState.HOT if spread >= 0.2 else VolatilityState.NORMAL
+        if observed_volume <= 0.0:
+            snapshot.regime = MarketRegime.UNKNOWN
+            return snapshot
         snapshot.regime = classify_regime(snapshot)
         return snapshot

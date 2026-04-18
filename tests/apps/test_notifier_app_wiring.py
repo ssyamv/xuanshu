@@ -10,6 +10,8 @@ def _set_required_settings_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("POSTGRES_DSN", "postgresql://xuanshu:xuanshu@localhost:5432/xuanshu")
     monkeypatch.setenv("QDRANT_URL", "http://localhost:6333")
     monkeypatch.setenv("XUANSHU_OKX_SYMBOLS", "BTC-USDT-SWAP, ETH-USDT-SWAP")
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "telegram-token")
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "123456")
 
 
 def test_notifier_entrypoint_loads_settings_and_threads_it_into_runtime(monkeypatch, capsys) -> None:
@@ -34,6 +36,7 @@ def test_notifier_entrypoint_loads_settings_and_threads_it_into_runtime(monkeypa
     assert seen_runtime is not None
     assert seen_runtime.mode == RunMode.NORMAL
     assert seen_runtime.settings.okx_symbols == ("BTC-USDT-SWAP", "ETH-USDT-SWAP")
+    assert seen_runtime.settings.telegram_chat_id == "123456"
 
 
 def test_notifier_entrypoint_fails_fast_without_required_settings(monkeypatch) -> None:
@@ -43,6 +46,19 @@ def test_notifier_entrypoint_fails_fast_without_required_settings(monkeypatch) -
 
     async def unexpected_run_notifier(_: notifier_app.NotifierRuntime) -> None:
         raise AssertionError("notifier runtime should not start when settings are invalid")
+
+    monkeypatch.setattr(notifier_app, "_run_notifier", unexpected_run_notifier)
+
+    with pytest.raises(ValidationError):
+        notifier_app.main()
+
+
+def test_notifier_entrypoint_fails_fast_without_telegram_wiring(monkeypatch) -> None:
+    _set_required_settings_env(monkeypatch)
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "")
+
+    async def unexpected_run_notifier(_: notifier_app.NotifierRuntime) -> None:
+        raise AssertionError("notifier runtime should not start when Telegram wiring is invalid")
 
     monkeypatch.setattr(notifier_app, "_run_notifier", unexpected_run_notifier)
 

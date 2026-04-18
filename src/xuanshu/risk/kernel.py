@@ -5,7 +5,7 @@ from uuid import uuid4
 
 from xuanshu.contracts.risk import CandidateSignal, RiskDecision
 from xuanshu.contracts.strategy import StrategyConfigSnapshot
-from xuanshu.core.enums import OrderSide, RunMode, StrategyId
+from xuanshu.core.enums import ApprovalState, OrderSide, RunMode, StrategyId
 
 
 class RiskKernel:
@@ -13,8 +13,25 @@ class RiskKernel:
         self.nav = nav
 
     def evaluate(self, signal: CandidateSignal, snapshot: StrategyConfigSnapshot) -> RiskDecision:
+        reference_time = datetime.now(UTC)
         allow_open = signal.strategy_id != StrategyId.RISK_PAUSE and signal.side != OrderSide.FLAT
         reason_codes: list[str] = []
+
+        if snapshot.approval_state != ApprovalState.APPROVED:
+            allow_open = False
+            reason_codes.append("snapshot_not_approved")
+
+        if not snapshot.is_effective(reference_time) or snapshot.is_expired(reference_time):
+            allow_open = False
+            reason_codes.append("snapshot_inactive")
+
+        if not snapshot.allows_symbol(signal.symbol):
+            allow_open = False
+            reason_codes.append("symbol_not_whitelisted")
+
+        if signal.strategy_id != StrategyId.RISK_PAUSE and not snapshot.is_strategy_enabled(signal.strategy_id):
+            allow_open = False
+            reason_codes.append("strategy_disabled")
 
         if snapshot.market_mode in {RunMode.REDUCE_ONLY, RunMode.HALTED}:
             allow_open = False

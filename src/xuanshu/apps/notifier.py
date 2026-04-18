@@ -14,9 +14,11 @@ class NotifierRuntime:
 
 
 def build_notifier_runtime(mode: RunMode | str = RunMode.NORMAL) -> NotifierRuntime:
+    settings = Settings()
+    settings.require_notifier_runtime()
     return NotifierRuntime(
         mode=mode if isinstance(mode, RunMode) else RunMode(mode),
-        settings=Settings(),
+        settings=settings,
     )
 
 

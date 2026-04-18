@@ -20,8 +20,24 @@ class StrategyConfigSnapshot(BaseModel):
     source_reason: str = Field(min_length=1)
     ttl_sec: int = Field(gt=0)
 
+    def is_effective(self, reference_time: datetime) -> bool:
+        return reference_time >= self.effective_from
+
     def is_expired(self, reference_time: datetime) -> bool:
         return reference_time >= self.expires_at
+
+    def is_active(self, reference_time: datetime) -> bool:
+        return (
+            self.approval_state == ApprovalState.APPROVED
+            and self.is_effective(reference_time)
+            and not self.is_expired(reference_time)
+        )
+
+    def allows_symbol(self, symbol: str) -> bool:
+        return symbol in self.symbol_whitelist
+
+    def is_strategy_enabled(self, strategy_id: str) -> bool:
+        return self.strategy_enable_flags.get(strategy_id, False)
 
     @model_validator(mode="after")
     def validate_temporal_window(self) -> "StrategyConfigSnapshot":

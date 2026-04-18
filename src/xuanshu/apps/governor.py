@@ -18,7 +18,9 @@ def build_governor_service() -> GovernorService:
 
 
 def build_governor_runtime() -> GovernorRuntime:
-    return GovernorRuntime(settings=Settings(), service=build_governor_service())
+    settings = Settings()
+    settings.require_governor_runtime()
+    return GovernorRuntime(settings=settings, service=build_governor_service())
 
 
 async def _wait_forever() -> None:
