@@ -1,10 +1,17 @@
 from pydantic import BaseModel, Field, SecretStr, field_validator
 from pydantic.networks import AnyHttpUrl, PostgresDsn, RedisDsn
 from pydantic_settings import BaseSettings, SettingsConfigDict
-from pydantic_settings.sources import EnvSettingsSource, PydanticBaseSettingsSource
+from pydantic_settings.sources import DotEnvSettingsSource, EnvSettingsSource, PydanticBaseSettingsSource
 
 
 class _SettingsEnvSource(EnvSettingsSource):
+    def prepare_field_value(self, field_name, field, value, value_is_complex):
+        if field_name == "okx_symbols" and isinstance(value, str):
+            return tuple(symbol.strip() for symbol in value.split(",") if symbol.strip())
+        return super().prepare_field_value(field_name, field, value, value_is_complex)
+
+
+class _SettingsDotEnvSource(DotEnvSettingsSource):
     def prepare_field_value(self, field_name, field, value, value_is_complex):
         if field_name == "okx_symbols" and isinstance(value, str):
             return tuple(symbol.strip() for symbol in value.split(",") if symbol.strip())
@@ -73,7 +80,20 @@ class _XuanshuBaseSettings(BaseSettings):
             env_parse_none_str=env_settings.env_parse_none_str,
             env_parse_enums=env_settings.env_parse_enums,
         )
-        return init_settings, custom_env_settings, dotenv_settings, file_secret_settings
+        custom_dotenv_settings = _SettingsDotEnvSource(
+            settings_cls,
+            env_file=dotenv_settings.env_file,
+            env_file_encoding=dotenv_settings.env_file_encoding,
+            case_sensitive=dotenv_settings.case_sensitive,
+            env_prefix=dotenv_settings.env_prefix,
+            env_prefix_target=dotenv_settings.env_prefix_target,
+            env_nested_delimiter=dotenv_settings.env_nested_delimiter,
+            env_nested_max_split=dotenv_settings.env_nested_max_split,
+            env_ignore_empty=dotenv_settings.env_ignore_empty,
+            env_parse_none_str=dotenv_settings.env_parse_none_str,
+            env_parse_enums=dotenv_settings.env_parse_enums,
+        )
+        return init_settings, custom_env_settings, custom_dotenv_settings, file_secret_settings
 
 
 class Settings(_XuanshuBaseSettings):
@@ -109,7 +129,7 @@ class Settings(_XuanshuBaseSettings):
 
 class TraderRuntimeSettings(_XuanshuBaseSettings):
     okx_symbols: tuple[str, ...] = Field(default=("BTC-USDT-SWAP", "ETH-USDT-SWAP"), min_length=1)
-    trader_starting_nav: float = Field(gt=0.0)
+    trader_starting_nav: float = Field(default=250_000.0, gt=0.0)
     okx_api_key: SecretStr = Field(validation_alias="OKX_API_KEY")
     okx_api_secret: SecretStr = Field(validation_alias="OKX_API_SECRET")
     okx_api_passphrase: SecretStr = Field(validation_alias="OKX_API_PASSPHRASE")
@@ -117,6 +137,7 @@ class TraderRuntimeSettings(_XuanshuBaseSettings):
 
 class GovernorRuntimeSettings(_XuanshuBaseSettings):
     openai_api_key: SecretStr = Field(validation_alias="OPENAI_API_KEY")
+    ai_timeout_sec: int = Field(default=12, gt=0, le=300)
 
 
 class NotifierRuntimeSettings(_XuanshuBaseSettings):

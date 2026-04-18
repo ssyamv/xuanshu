@@ -2,6 +2,7 @@ import pytest
 from pydantic import ValidationError
 
 import xuanshu.apps.governor as governor_app
+from xuanshu.infra.ai.governor_client import ConfiguredGovernorAgentRunner, GovernorClient
 
 
 def _set_required_settings_env(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -28,6 +29,10 @@ def test_governor_entrypoint_loads_settings_and_threads_it_into_runtime(monkeypa
     assert seen_runtime is not None
     assert seen_runtime.service.__class__.__name__ == "GovernorService"
     assert seen_runtime.settings.openai_api_key.get_secret_value() == "openai-key"
+    assert isinstance(seen_runtime.service.client, GovernorClient)
+    assert isinstance(seen_runtime.service.client.agent_runner, ConfiguredGovernorAgentRunner)
+    assert seen_runtime.service.client.agent_runner.api_key.get_secret_value() == "openai-key"
+    assert seen_runtime.service.client.agent_runner.timeout_sec == 12
 
 
 def test_governor_entrypoint_fails_fast_without_required_settings(monkeypatch) -> None:

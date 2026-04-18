@@ -13,13 +13,13 @@ from xuanshu.strategies.regime_router import classify_regime
 class SymbolState:
     bid: float | None = None
     ask: float | None = None
-    buy_volume: float = 0.0
-    sell_volume: float = 0.0
+    recent_trades: list[float] = field(default_factory=list)
 
 
 @dataclass
 class StateEngine:
     symbols: dict[str, SymbolState] = field(default_factory=dict)
+    recent_trade_window: int = 20
 
     def on_bbo(self, symbol: str, bid: float, ask: float) -> None:
         state = self.symbols.setdefault(symbol, SymbolState())
@@ -30,19 +30,23 @@ class StateEngine:
         state = self.symbols.setdefault(symbol, SymbolState())
         normalized_side = side.lower()
         if normalized_side == "buy":
-            state.buy_volume += size
+            signed_size = size
         elif normalized_side == "sell":
-            state.sell_volume += size
+            signed_size = -size
         else:
             raise ValueError(f"unsupported trade side: {side}")
+        state.recent_trades.append(signed_size)
+        if len(state.recent_trades) > self.recent_trade_window:
+            del state.recent_trades[0 : len(state.recent_trades) - self.recent_trade_window]
 
     def snapshot(self, symbol: str) -> MarketStateSnapshot:
-        state = self.symbols[symbol]
+        state = self.symbols.setdefault(symbol, SymbolState())
         has_quotes = state.bid is not None and state.ask is not None and state.bid > 0.0 and state.ask >= state.bid
         mid_price = ((state.bid + state.ask) / 2) if has_quotes else 0.0
-        observed_volume = state.buy_volume + state.sell_volume
+        observed_volume = sum(abs(size) for size in state.recent_trades)
+        directional_volume = sum(state.recent_trades)
         total_volume = max(observed_volume, 1.0)
-        recent_trade_bias = (state.buy_volume - state.sell_volume) / total_volume
+        recent_trade_bias = directional_volume / total_volume
         spread = max(state.ask - state.bid, 0.0) if has_quotes else 0.0
 
         snapshot = MarketStateSnapshot(

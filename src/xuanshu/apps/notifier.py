@@ -5,12 +5,14 @@ from dataclasses import dataclass
 
 from xuanshu.config.settings import NotifierRuntimeSettings
 from xuanshu.core.enums import RunMode
+from xuanshu.infra.notifier.telegram import TelegramNotifier
 
 
 @dataclass(frozen=True, slots=True)
 class NotifierRuntime:
     mode: RunMode
     settings: NotifierRuntimeSettings
+    notifier: TelegramNotifier
 
 
 def build_notifier_runtime(mode: RunMode | str = RunMode.NORMAL) -> NotifierRuntime:
@@ -18,6 +20,10 @@ def build_notifier_runtime(mode: RunMode | str = RunMode.NORMAL) -> NotifierRunt
     return NotifierRuntime(
         mode=mode if isinstance(mode, RunMode) else RunMode(mode),
         settings=settings,
+        notifier=TelegramNotifier(
+            bot_token=settings.telegram_bot_token,
+            chat_id=settings.telegram_chat_id,
+        ),
     )
 
 

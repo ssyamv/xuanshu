@@ -3,6 +3,7 @@ from pydantic import ValidationError
 
 import xuanshu.apps.notifier as notifier_app
 from xuanshu.core.enums import RunMode
+from xuanshu.infra.notifier.telegram import TelegramNotifier, TextMessagePayload
 
 
 def _set_required_settings_env(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -32,6 +33,10 @@ def test_notifier_entrypoint_loads_settings_and_threads_it_into_runtime(monkeypa
     assert seen_runtime is not None
     assert seen_runtime.mode == RunMode.NORMAL
     assert seen_runtime.settings.telegram_chat_id == "123456"
+    assert isinstance(seen_runtime.notifier, TelegramNotifier)
+    assert seen_runtime.notifier.chat_id == "123456"
+    assert seen_runtime.notifier.bot_token.get_secret_value() == "telegram-token"
+    assert seen_runtime.notifier.build_text_message("mode update") == TextMessagePayload(text="mode update")
 
 
 def test_notifier_entrypoint_fails_fast_without_required_settings(monkeypatch) -> None:

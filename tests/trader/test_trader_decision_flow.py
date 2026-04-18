@@ -60,6 +60,40 @@ def test_trader_trade_only_cold_start_does_not_generate_a_live_entry_signal() ->
     assert signals[0].side == OrderSide.FLAT
 
 
+def test_trader_empty_cold_start_snapshot_stays_unknown() -> None:
+    engine = StateEngine()
+
+    snapshot = engine.snapshot("BTC-USDT-SWAP")
+    signals = build_candidate_signals(snapshot)
+
+    assert snapshot.mid_price == 0.0
+    assert snapshot.spread == 0.0
+    assert snapshot.recent_trade_bias == 0.0
+    assert snapshot.regime == MarketRegime.UNKNOWN
+    assert signals[0].strategy_id == StrategyId.RISK_PAUSE
+
+
+def test_trader_recent_flow_overrides_stale_lifetime_pressure() -> None:
+    engine = StateEngine(recent_trade_window=4)
+    engine.on_bbo("BTC-USDT-SWAP", bid=100.0, ask=100.2)
+    for _ in range(6):
+        engine.on_trade("BTC-USDT-SWAP", price=100.3, size=2.0, side="buy")
+
+    hot_snapshot = engine.snapshot("BTC-USDT-SWAP")
+    assert hot_snapshot.regime == MarketRegime.TREND
+
+    engine.on_bbo("BTC-USDT-SWAP", bid=100.0, ask=100.1)
+    engine.on_trade("BTC-USDT-SWAP", price=100.1, size=2.0, side="buy")
+    engine.on_trade("BTC-USDT-SWAP", price=100.1, size=2.0, side="sell")
+    engine.on_trade("BTC-USDT-SWAP", price=100.1, size=2.0, side="buy")
+    engine.on_trade("BTC-USDT-SWAP", price=100.1, size=2.0, side="sell")
+
+    recent_snapshot = engine.snapshot("BTC-USDT-SWAP")
+
+    assert recent_snapshot.recent_trade_bias == 0.0
+    assert recent_snapshot.regime == MarketRegime.MEAN_REVERSION
+
+
 def test_trader_rejects_unsupported_trade_side() -> None:
     engine = StateEngine()
 

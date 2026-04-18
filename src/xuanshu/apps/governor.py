@@ -5,6 +5,7 @@ from dataclasses import dataclass
 
 from xuanshu.config.settings import GovernorRuntimeSettings
 from xuanshu.governor.service import GovernorService
+from xuanshu.infra.ai.governor_client import ConfiguredGovernorAgentRunner, GovernorClient
 
 
 @dataclass(frozen=True, slots=True)
@@ -13,13 +14,19 @@ class GovernorRuntime:
     service: GovernorService
 
 
-def build_governor_service() -> GovernorService:
-    return GovernorService()
+def build_governor_service(settings: GovernorRuntimeSettings) -> GovernorService:
+    client = GovernorClient(
+        agent_runner=ConfiguredGovernorAgentRunner(
+            api_key=settings.openai_api_key,
+            timeout_sec=settings.ai_timeout_sec,
+        )
+    )
+    return GovernorService(client=client)
 
 
 def build_governor_runtime() -> GovernorRuntime:
     settings = GovernorRuntimeSettings()
-    return GovernorRuntime(settings=settings, service=build_governor_service())
+    return GovernorRuntime(settings=settings, service=build_governor_service(settings))
 
 
 async def _wait_forever() -> None:
