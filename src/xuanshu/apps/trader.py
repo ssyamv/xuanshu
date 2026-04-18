@@ -41,6 +41,7 @@ class TraderRuntime:
     components: TraderComponents
     starting_nav: float
     startup_checkpoint: ExecutionCheckpoint
+    opening_allowed: bool = True
 
 
 def _build_startup_checkpoint() -> ExecutionCheckpoint:
@@ -95,9 +96,7 @@ async def _wait_forever() -> None:
 
 
 async def _run_trader(runtime: TraderRuntime) -> None:
-    can_open_new_risk = runtime.components.checkpoint_service.can_open_new_risk(runtime.startup_checkpoint)
-    if not can_open_new_risk:
-        return
+    runtime.opening_allowed = runtime.components.checkpoint_service.can_open_new_risk(runtime.startup_checkpoint)
     await _wait_forever()
 
 

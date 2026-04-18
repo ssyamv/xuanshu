@@ -142,6 +142,42 @@ def test_trader_runtime_checks_checkpoint_before_waiting(monkeypatch) -> None:
     assert seen_can_open == [False]
 
 
+def test_trader_runtime_stays_alive_when_startup_gating_blocks_opening(monkeypatch) -> None:
+    blocked = []
+
+    async def _noop_wait_forever() -> None:
+        blocked.append("waited")
+        return None
+
+    class _CheckpointProbe:
+        def can_open_new_risk(self, checkpoint) -> bool:
+            return False
+
+    _set_required_settings_env(monkeypatch)
+    monkeypatch.setattr(trader_app, "_wait_forever", _noop_wait_forever)
+
+    runtime = trader_app.build_trader_runtime()
+    runtime.components = trader_app.TraderComponents(
+        state_engine=runtime.components.state_engine,
+        risk_kernel=runtime.components.risk_kernel,
+        checkpoint_service=_CheckpointProbe(),
+        okx_rest_client=runtime.components.okx_rest_client,
+        okx_public_stream=runtime.components.okx_public_stream,
+        okx_private_stream=runtime.components.okx_private_stream,
+        client_order_id_builder=runtime.components.client_order_id_builder,
+    )
+
+    async def _run_and_close_runtime() -> None:
+        try:
+            await trader_app._run_trader(runtime)
+        finally:
+            await runtime.components.aclose()
+
+    asyncio.run(_run_and_close_runtime())
+
+    assert blocked == ["waited"]
+
+
 def test_trader_entrypoint_fails_fast_without_required_settings(monkeypatch) -> None:
     _set_required_settings_env(monkeypatch)
     monkeypatch.setenv("XUANSHU_TRADER_STARTING_NAV", "0")
