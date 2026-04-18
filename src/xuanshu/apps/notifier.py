@@ -2,24 +2,27 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
+from typing import Protocol
 
 from xuanshu.config.settings import NotifierRuntimeSettings
 from xuanshu.core.enums import RunMode
-from xuanshu.infra.notifier.telegram import TelegramNotifier, TextMessagePayload
+
+
+class NotifierAdapter(Protocol):
+    async def send_text(self, text: str) -> None:
+        ...
 
 
 @dataclass(frozen=True, slots=True)
 class NotifierRuntime:
     mode: RunMode
     settings: NotifierRuntimeSettings
-    adapter: TelegramNotifier
-
-    @property
-    def notifier(self) -> TelegramNotifier:
-        return self.adapter
+    adapter: NotifierAdapter
 
 
-def build_notifier_adapter(settings: NotifierRuntimeSettings) -> TelegramNotifier:
+def build_notifier_adapter(settings: NotifierRuntimeSettings) -> NotifierAdapter:
+    from xuanshu.infra.notifier.telegram import TelegramNotifier
+
     return TelegramNotifier(
         bot_token=settings.telegram_bot_token,
         chat_id=settings.telegram_chat_id,
@@ -40,7 +43,7 @@ async def _wait_forever() -> None:
 
 
 async def _run_notifier(runtime: NotifierRuntime) -> None:
-    await runtime.adapter.send_text(TextMessagePayload(text="Notifier runtime started"))
+    await runtime.adapter.send_text("Notifier runtime started")
     await _wait_forever()
 
 

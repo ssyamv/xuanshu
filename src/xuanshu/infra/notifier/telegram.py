@@ -18,8 +18,6 @@ class TelegramNotifier:
     bot_token: SecretStr
     chat_id: str
 
-    def build_text_message(self, text: str) -> TextMessagePayload:
-        return render_text_message(text)
-
-    async def send_text(self, payload: TextMessagePayload) -> None:
+    async def send_text(self, text: str) -> None:
+        render_text_message(text)
         return None
