@@ -26,23 +26,10 @@ class TelegramRuntimeSecrets(BaseModel):
     chat_id: str = Field(min_length=1)
 
 
-class Settings(BaseSettings):
+class _XuanshuBaseSettings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_prefix="XUANSHU_", extra="ignore")
 
-    env: str = Field(default="dev", min_length=1)
-    okx_symbols: tuple[str, ...] = Field(default=("BTC-USDT-SWAP", "ETH-USDT-SWAP"), min_length=1)
-    okx_api_key: SecretStr | None = Field(default=None, validation_alias="OKX_API_KEY")
-    okx_api_secret: SecretStr | None = Field(default=None, validation_alias="OKX_API_SECRET")
-    okx_api_passphrase: SecretStr | None = Field(default=None, validation_alias="OKX_API_PASSPHRASE")
-    openai_api_key: SecretStr | None = Field(default=None, validation_alias="OPENAI_API_KEY")
-    telegram_bot_token: SecretStr | None = Field(default=None, validation_alias="TELEGRAM_BOT_TOKEN")
-    telegram_chat_id: str | None = Field(default=None, validation_alias="TELEGRAM_CHAT_ID")
-    redis_url: RedisDsn = Field(validation_alias="REDIS_URL")
-    postgres_dsn: PostgresDsn = Field(validation_alias="POSTGRES_DSN")
-    qdrant_url: AnyHttpUrl = Field(validation_alias="QDRANT_URL")
-    ai_timeout_sec: int = Field(default=12, gt=0, le=300)
-
-    @field_validator("okx_symbols", mode="before")
+    @field_validator("okx_symbols", mode="before", check_fields=False)
     @classmethod
     def parse_okx_symbols(cls, value: object) -> object:
         if isinstance(value, str):
@@ -57,6 +44,7 @@ class Settings(BaseSettings):
         "telegram_bot_token",
         "telegram_chat_id",
         mode="before",
+        check_fields=False,
     )
     @classmethod
     def empty_runtime_values_are_none(cls, value: object) -> object:
@@ -64,22 +52,6 @@ class Settings(BaseSettings):
             stripped = value.strip()
             return stripped or None
         return value
-
-    def require_trader_runtime(self) -> OkxRuntimeSecrets:
-        return OkxRuntimeSecrets(
-            api_key=self.okx_api_key,
-            api_secret=self.okx_api_secret,
-            passphrase=self.okx_api_passphrase,
-        )
-
-    def require_governor_runtime(self) -> OpenAiRuntimeSecrets:
-        return OpenAiRuntimeSecrets(api_key=self.openai_api_key)
-
-    def require_notifier_runtime(self) -> TelegramRuntimeSecrets:
-        return TelegramRuntimeSecrets(
-            bot_token=self.telegram_bot_token,
-            chat_id=self.telegram_chat_id,
-        )
 
     @classmethod
     def settings_customise_sources(
@@ -102,3 +74,51 @@ class Settings(BaseSettings):
             env_parse_enums=env_settings.env_parse_enums,
         )
         return init_settings, custom_env_settings, dotenv_settings, file_secret_settings
+
+
+class Settings(_XuanshuBaseSettings):
+    env: str = Field(default="dev", min_length=1)
+    okx_symbols: tuple[str, ...] = Field(default=("BTC-USDT-SWAP", "ETH-USDT-SWAP"), min_length=1)
+    okx_api_key: SecretStr | None = Field(default=None, validation_alias="OKX_API_KEY")
+    okx_api_secret: SecretStr | None = Field(default=None, validation_alias="OKX_API_SECRET")
+    okx_api_passphrase: SecretStr | None = Field(default=None, validation_alias="OKX_API_PASSPHRASE")
+    openai_api_key: SecretStr | None = Field(default=None, validation_alias="OPENAI_API_KEY")
+    telegram_bot_token: SecretStr | None = Field(default=None, validation_alias="TELEGRAM_BOT_TOKEN")
+    telegram_chat_id: str | None = Field(default=None, validation_alias="TELEGRAM_CHAT_ID")
+    redis_url: RedisDsn = Field(validation_alias="REDIS_URL")
+    postgres_dsn: PostgresDsn = Field(validation_alias="POSTGRES_DSN")
+    qdrant_url: AnyHttpUrl = Field(validation_alias="QDRANT_URL")
+    ai_timeout_sec: int = Field(default=12, gt=0, le=300)
+
+    def require_trader_runtime(self) -> OkxRuntimeSecrets:
+        return OkxRuntimeSecrets(
+            api_key=self.okx_api_key,
+            api_secret=self.okx_api_secret,
+            passphrase=self.okx_api_passphrase,
+        )
+
+    def require_governor_runtime(self) -> OpenAiRuntimeSecrets:
+        return OpenAiRuntimeSecrets(api_key=self.openai_api_key)
+
+    def require_notifier_runtime(self) -> TelegramRuntimeSecrets:
+        return TelegramRuntimeSecrets(
+            bot_token=self.telegram_bot_token,
+            chat_id=self.telegram_chat_id,
+        )
+
+
+class TraderRuntimeSettings(_XuanshuBaseSettings):
+    okx_symbols: tuple[str, ...] = Field(default=("BTC-USDT-SWAP", "ETH-USDT-SWAP"), min_length=1)
+    trader_starting_nav: float = Field(gt=0.0)
+    okx_api_key: SecretStr = Field(validation_alias="OKX_API_KEY")
+    okx_api_secret: SecretStr = Field(validation_alias="OKX_API_SECRET")
+    okx_api_passphrase: SecretStr = Field(validation_alias="OKX_API_PASSPHRASE")
+
+
+class GovernorRuntimeSettings(_XuanshuBaseSettings):
+    openai_api_key: SecretStr = Field(validation_alias="OPENAI_API_KEY")
+
+
+class NotifierRuntimeSettings(_XuanshuBaseSettings):
+    telegram_bot_token: SecretStr = Field(validation_alias="TELEGRAM_BOT_TOKEN")
+    telegram_chat_id: str = Field(min_length=1, validation_alias="TELEGRAM_CHAT_ID")

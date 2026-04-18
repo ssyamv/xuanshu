@@ -44,6 +44,50 @@ def test_strategy_snapshot_and_expert_opinion_are_stable_contracts() -> None:
     assert opinion.expert_type == "risk"
 
 
+@pytest.mark.parametrize("field_name", ["generated_at", "effective_from", "expires_at"])
+def test_strategy_snapshot_rejects_naive_datetimes(field_name: str) -> None:
+    payload = {
+        "version_id": "snap-001",
+        "generated_at": datetime.now(UTC),
+        "effective_from": datetime.now(UTC),
+        "expires_at": datetime.now(UTC) + timedelta(minutes=5),
+        "symbol_whitelist": ["BTC-USDT-SWAP", "ETH-USDT-SWAP"],
+        "strategy_enable_flags": {"breakout": True},
+        "risk_multiplier": 0.8,
+        "per_symbol_max_position": 0.12,
+        "max_leverage": 3,
+        "market_mode": RunMode.NORMAL,
+        "approval_state": "approved",
+        "source_reason": "committee result",
+        "ttl_sec": 300,
+    }
+    payload[field_name] = datetime.now()
+
+    with pytest.raises(ValidationError, match="timezone-aware"):
+        StrategyConfigSnapshot(**payload)
+
+
+def test_strategy_snapshot_rejects_naive_reference_times() -> None:
+    snapshot = StrategyConfigSnapshot(
+        version_id="snap-001",
+        generated_at=datetime.now(UTC),
+        effective_from=datetime.now(UTC),
+        expires_at=datetime.now(UTC) + timedelta(minutes=5),
+        symbol_whitelist=["BTC-USDT-SWAP", "ETH-USDT-SWAP"],
+        strategy_enable_flags={"breakout": True, "mean_reversion": True, "risk_pause": True},
+        risk_multiplier=0.8,
+        per_symbol_max_position=0.12,
+        max_leverage=3,
+        market_mode=RunMode.NORMAL,
+        approval_state="approved",
+        source_reason="committee result",
+        ttl_sec=300,
+    )
+
+    with pytest.raises(ValueError, match="timezone-aware"):
+        snapshot.is_active(datetime.now())
+
+
 @pytest.mark.parametrize(
     "symbol_whitelist",
     [

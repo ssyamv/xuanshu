@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from collections.abc import Callable
 
 from xuanshu.checkpoints.service import CheckpointService
-from xuanshu.config.settings import Settings
+from xuanshu.config.settings import TraderRuntimeSettings
 from xuanshu.execution.engine import build_client_order_id
 from xuanshu.risk.kernel import RiskKernel
 from xuanshu.state.engine import StateEngine
@@ -13,7 +13,7 @@ from xuanshu.state.engine import StateEngine
 
 @dataclass(frozen=True, slots=True)
 class TraderComponents:
-    settings: Settings
+    settings: TraderRuntimeSettings
     state_engine: StateEngine
     risk_kernel: RiskKernel
     checkpoint_service: CheckpointService
@@ -21,12 +21,11 @@ class TraderComponents:
 
 
 def build_trader_components() -> TraderComponents:
-    settings = Settings()
-    settings.require_trader_runtime()
+    settings = TraderRuntimeSettings()
     return TraderComponents(
         settings=settings,
         state_engine=StateEngine(),
-        risk_kernel=RiskKernel(nav=100_000.0),
+        risk_kernel=RiskKernel(nav=settings.trader_starting_nav),
         checkpoint_service=CheckpointService(),
         client_order_id_builder=build_client_order_id,
     )

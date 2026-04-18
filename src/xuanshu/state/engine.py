@@ -11,8 +11,8 @@ from xuanshu.strategies.regime_router import classify_regime
 
 @dataclass
 class SymbolState:
-    bid: float = 0.0
-    ask: float = 0.0
+    bid: float | None = None
+    ask: float | None = None
     buy_volume: float = 0.0
     sell_volume: float = 0.0
 
@@ -38,11 +38,12 @@ class StateEngine:
 
     def snapshot(self, symbol: str) -> MarketStateSnapshot:
         state = self.symbols[symbol]
-        mid_price = (state.bid + state.ask) / 2
+        has_quotes = state.bid is not None and state.ask is not None and state.bid > 0.0 and state.ask >= state.bid
+        mid_price = ((state.bid + state.ask) / 2) if has_quotes else 0.0
         observed_volume = state.buy_volume + state.sell_volume
         total_volume = max(observed_volume, 1.0)
         recent_trade_bias = (state.buy_volume - state.sell_volume) / total_volume
-        spread = max(state.ask - state.bid, 0.0)
+        spread = max(state.ask - state.bid, 0.0) if has_quotes else 0.0
 
         snapshot = MarketStateSnapshot(
             snapshot_id=str(uuid4()),
@@ -60,7 +61,7 @@ class StateEngine:
         )
 
         snapshot.volatility_state = VolatilityState.HOT if spread >= 0.2 else VolatilityState.NORMAL
-        if observed_volume <= 0.0:
+        if not has_quotes or observed_volume <= 0.0:
             snapshot.regime = MarketRegime.UNKNOWN
             return snapshot
         snapshot.regime = classify_regime(snapshot)

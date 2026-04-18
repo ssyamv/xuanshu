@@ -3,13 +3,13 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 
-from xuanshu.config.settings import Settings
+from xuanshu.config.settings import GovernorRuntimeSettings
 from xuanshu.governor.service import GovernorService
 
 
 @dataclass(frozen=True, slots=True)
 class GovernorRuntime:
-    settings: Settings
+    settings: GovernorRuntimeSettings
     service: GovernorService
 
 
@@ -18,8 +18,7 @@ def build_governor_service() -> GovernorService:
 
 
 def build_governor_runtime() -> GovernorRuntime:
-    settings = Settings()
-    settings.require_governor_runtime()
+    settings = GovernorRuntimeSettings()
     return GovernorRuntime(settings=settings, service=build_governor_service())
 
 

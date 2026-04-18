@@ -47,6 +47,19 @@ def test_trader_quote_only_cold_start_does_not_generate_a_live_entry_signal() ->
     assert signals[0].side == OrderSide.FLAT
 
 
+def test_trader_trade_only_cold_start_does_not_generate_a_live_entry_signal() -> None:
+    engine = StateEngine()
+    engine.on_trade("BTC-USDT-SWAP", price=100.3, size=5.0, side="buy")
+    engine.on_trade("BTC-USDT-SWAP", price=100.4, size=5.0, side="sell")
+
+    snapshot = engine.snapshot("BTC-USDT-SWAP")
+    signals = build_candidate_signals(snapshot)
+
+    assert snapshot.regime == MarketRegime.UNKNOWN
+    assert signals[0].strategy_id == StrategyId.RISK_PAUSE
+    assert signals[0].side == OrderSide.FLAT
+
+
 def test_trader_rejects_unsupported_trade_side() -> None:
     engine = StateEngine()
 

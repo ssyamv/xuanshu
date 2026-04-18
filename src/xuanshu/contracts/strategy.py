@@ -1,6 +1,6 @@
-from datetime import datetime
+from datetime import UTC, datetime
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, Field, ValidationInfo, field_validator, model_validator
 
 from xuanshu.core.enums import ApprovalState, RunMode
 
@@ -21,12 +21,15 @@ class StrategyConfigSnapshot(BaseModel):
     ttl_sec: int = Field(gt=0)
 
     def is_effective(self, reference_time: datetime) -> bool:
+        reference_time = self._normalize_reference_time(reference_time)
         return reference_time >= self.effective_from
 
     def is_expired(self, reference_time: datetime) -> bool:
+        reference_time = self._normalize_reference_time(reference_time)
         return reference_time >= self.expires_at
 
     def is_active(self, reference_time: datetime) -> bool:
+        reference_time = self._normalize_reference_time(reference_time)
         return (
             self.approval_state == ApprovalState.APPROVED
             and self.is_effective(reference_time)
@@ -45,9 +48,22 @@ class StrategyConfigSnapshot(BaseModel):
             raise ValueError("expires_at must be after effective_from")
         return self
 
+    @field_validator("generated_at", "effective_from", "expires_at")
+    @classmethod
+    def validate_timezone_aware_datetimes(cls, value: datetime, info: ValidationInfo) -> datetime:
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError(f"{info.field_name} must be timezone-aware")
+        return value.astimezone(UTC)
+
     @field_validator("symbol_whitelist")
     @classmethod
     def validate_symbol_whitelist(cls, value: list[str]) -> list[str]:
         if any(not symbol.strip() for symbol in value):
             raise ValueError("symbol_whitelist must not contain blank symbols")
         return value
+
+    @staticmethod
+    def _normalize_reference_time(reference_time: datetime) -> datetime:
+        if reference_time.tzinfo is None or reference_time.utcoffset() is None:
+            raise ValueError("reference_time must be timezone-aware")
+        return reference_time.astimezone(UTC)

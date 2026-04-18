@@ -3,19 +3,18 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 
-from xuanshu.config.settings import Settings
+from xuanshu.config.settings import NotifierRuntimeSettings
 from xuanshu.core.enums import RunMode
 
 
 @dataclass(frozen=True, slots=True)
 class NotifierRuntime:
     mode: RunMode
-    settings: Settings
+    settings: NotifierRuntimeSettings
 
 
 def build_notifier_runtime(mode: RunMode | str = RunMode.NORMAL) -> NotifierRuntime:
-    settings = Settings()
-    settings.require_notifier_runtime()
+    settings = NotifierRuntimeSettings()
     return NotifierRuntime(
         mode=mode if isinstance(mode, RunMode) else RunMode(mode),
         settings=settings,
