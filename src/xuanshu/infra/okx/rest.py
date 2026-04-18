@@ -17,6 +17,16 @@ class OkxRestClient:
         self.api_secret = api_secret
         self.passphrase = passphrase
         self.client = httpx.AsyncClient(base_url=self.base_url, timeout=timeout)
+        self._closed = False
+
+    async def __aenter__(self) -> "OkxRestClient":
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb) -> None:
+        await self.aclose()
 
     async def aclose(self) -> None:
+        if self._closed:
+            return
         await self.client.aclose()
+        self._closed = True
