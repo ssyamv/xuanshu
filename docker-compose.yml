@@ -2,33 +2,85 @@ services:
   trader:
     build: .
     command: python -m xuanshu.apps.trader
-    env_file: .env.example
+    environment: &app_env
+      OKX_API_KEY: ${OKX_API_KEY:-}
+      OKX_API_PASSPHRASE: ${OKX_API_PASSPHRASE:-}
+      OKX_API_SECRET: ${OKX_API_SECRET:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      POSTGRES_DSN: ${POSTGRES_DSN:-postgresql+psycopg://xuanshu:xuanshu@postgres:5432/xuanshu}
+      QDRANT_URL: ${QDRANT_URL:-http://qdrant:6333}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+      TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID:-}
+      XUANSHU_ENV: ${XUANSHU_ENV:-prod}
+      XUANSHU_OKX_SYMBOLS: ${XUANSHU_OKX_SYMBOLS:-BTC-USDT-SWAP,ETH-USDT-SWAP}
     depends_on:
-      - redis
-      - postgres
-      - qdrant
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      qdrant:
+        condition: service_healthy
+    restart: unless-stopped
   governor:
     build: .
     command: python -m xuanshu.apps.governor
-    env_file: .env.example
+    environment: *app_env
     depends_on:
-      - redis
-      - postgres
-      - qdrant
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      qdrant:
+        condition: service_healthy
+    restart: unless-stopped
   notifier:
     build: .
     command: python -m xuanshu.apps.notifier
-    env_file: .env.example
+    environment: *app_env
     depends_on:
-      - redis
-      - postgres
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
   redis:
     image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes", "--save", "60", "1"]
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
   postgres:
     image: postgres:16-alpine
     environment:
       POSTGRES_USER: xuanshu
       POSTGRES_PASSWORD: xuanshu
       POSTGRES_DB: xuanshu
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U xuanshu -d xuanshu"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
   qdrant:
     image: qdrant/qdrant:v1.9.0
+    volumes:
+      - qdrant-data:/qdrant/storage
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O- http://localhost:6333/healthz >/dev/null 2>&1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+volumes:
+  postgres-data:
+  redis-data:
+  qdrant-data:
