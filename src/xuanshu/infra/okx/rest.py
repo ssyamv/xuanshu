@@ -67,6 +67,11 @@ class OkxRestClient:
         client_order_id: str,
         price: str | None = None,
     ) -> dict[str, str]:
+        if order_type == "limit" and price is None:
+            raise ValueError("price is required for limit orders")
+        if order_type == "market" and price is not None:
+            raise ValueError("price is not allowed for market orders")
+
         payload = {
             "instId": symbol,
             "tdMode": "cross",

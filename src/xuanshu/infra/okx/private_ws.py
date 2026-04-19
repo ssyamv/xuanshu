@@ -56,10 +56,21 @@ class OkxPrivateStream:
         if event == "error":
             return (self._build_fault(payload, code=str(payload.get("code") or "private_ws_error")),)
 
-        channel = payload.get("arg", {}).get("channel")
-        data = payload.get("data") or []
+        envelope = self._normalize_envelope(payload)
+        if isinstance(envelope, FaultEvent):
+            return (envelope,)
+
+        channel, data = envelope
         if not data:
             return ()
+        if channel not in {"orders", "positions", "account"}:
+            return (
+                self._build_fault(
+                    payload,
+                    code="private_ws_unknown_channel",
+                    detail=f"unknown private channel: {channel}",
+                ),
+            )
 
         events: list[OrderUpdateEvent | PositionUpdateEvent | AccountSnapshotEvent | FaultEvent] = []
         for item in data:
@@ -75,6 +86,42 @@ class OkxPrivateStream:
             except (KeyError, TypeError, ValueError) as exc:
                 events.append(self._build_fault(payload, code=f"{channel}_decode_error", detail=str(exc)))
         return tuple(events)
+
+    def _normalize_envelope(
+        self, payload: dict[str, Any]
+    ) -> tuple[str, list[dict[str, Any]]] | FaultEvent:
+        arg = payload.get("arg")
+        if not isinstance(arg, dict):
+            return self._build_fault(
+                payload,
+                code="private_ws_malformed_envelope",
+                detail="private websocket envelope arg must be an object",
+            )
+
+        channel = arg.get("channel")
+        if not isinstance(channel, str) or not channel.strip():
+            return self._build_fault(
+                payload,
+                code="private_ws_malformed_envelope",
+                detail="private websocket envelope channel must be a non-empty string",
+            )
+
+        data = payload.get("data")
+        if data is None:
+            return (channel.strip(), [])
+        if not isinstance(data, list):
+            return self._build_fault(
+                payload,
+                code="private_ws_malformed_envelope",
+                detail="private websocket envelope data must be a list",
+            )
+        if not all(isinstance(item, dict) for item in data):
+            return self._build_fault(
+                payload,
+                code="private_ws_malformed_envelope",
+                detail="private websocket envelope items must be objects",
+            )
+        return (channel.strip(), data)
 
     def _decode_order(self, item: dict[str, Any], sequence: str) -> OrderUpdateEvent:
         generated_at = self._parse_timestamp(item["uTime"])

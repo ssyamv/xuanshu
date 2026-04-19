@@ -85,6 +85,39 @@ def test_okx_public_stream_ignores_empty_data_batches() -> None:
     assert events == ()
 
 
+def test_okx_public_stream_normalizes_malformed_and_unknown_envelopes_into_faults() -> None:
+    stream = OkxPublicStream(url="wss://ws.okx.com:8443/ws/v5/public")
+
+    malformed_arg_events = stream.decode_message(
+        {"arg": "tickers", "data": [{"ts": "1713484800000"}]},
+        sequence="pub-1",
+    )
+    malformed_data_events = stream.decode_message(
+        {
+            "arg": {"channel": "tickers", "instId": "BTC-USDT-SWAP"},
+            "data": {"ts": "1713484800000"},
+        },
+        sequence="pub-2",
+    )
+    unknown_channel_events = stream.decode_message(
+        {
+            "arg": {"channel": "books", "instId": "BTC-USDT-SWAP"},
+            "data": [{"ts": "1713484800000"}],
+        },
+        sequence="pub-3",
+    )
+
+    assert len(malformed_arg_events) == 1
+    assert isinstance(malformed_arg_events[0], FaultEvent)
+    assert malformed_arg_events[0].code == "public_ws_malformed_envelope"
+    assert len(malformed_data_events) == 1
+    assert isinstance(malformed_data_events[0], FaultEvent)
+    assert malformed_data_events[0].code == "public_ws_malformed_envelope"
+    assert len(unknown_channel_events) == 1
+    assert isinstance(unknown_channel_events[0], FaultEvent)
+    assert unknown_channel_events[0].code == "public_ws_unknown_channel"
+
+
 def test_okx_private_stream_builds_login_and_decodes_order_position_and_account_batches() -> None:
     stream = OkxPrivateStream(url="wss://ws.okx.com:8443/ws/v5/private")
 
@@ -281,6 +314,39 @@ def test_okx_private_stream_normalizes_decode_failures_into_faults() -> None:
     assert "filled_size" in events[0].detail
 
 
+def test_okx_private_stream_normalizes_malformed_and_unknown_envelopes_into_faults() -> None:
+    stream = OkxPrivateStream(url="wss://ws.okx.com:8443/ws/v5/private")
+
+    malformed_arg_events = stream.decode_message(
+        {"arg": "orders", "data": [{"ordId": "1"}]},
+        sequence="pri-1",
+    )
+    malformed_data_events = stream.decode_message(
+        {
+            "arg": {"channel": "orders", "instType": "SWAP"},
+            "data": {"ordId": "1"},
+        },
+        sequence="pri-2",
+    )
+    unknown_channel_events = stream.decode_message(
+        {
+            "arg": {"channel": "algo-advance", "instType": "SWAP"},
+            "data": [{"ordId": "1"}],
+        },
+        sequence="pri-3",
+    )
+
+    assert len(malformed_arg_events) == 1
+    assert isinstance(malformed_arg_events[0], FaultEvent)
+    assert malformed_arg_events[0].code == "private_ws_malformed_envelope"
+    assert len(malformed_data_events) == 1
+    assert isinstance(malformed_data_events[0], FaultEvent)
+    assert malformed_data_events[0].code == "private_ws_malformed_envelope"
+    assert len(unknown_channel_events) == 1
+    assert isinstance(unknown_channel_events[0], FaultEvent)
+    assert unknown_channel_events[0].code == "private_ws_unknown_channel"
+
+
 def test_okx_rest_client_builds_signed_headers_and_place_order_payload() -> None:
     client = OkxRestClient(
         base_url="https://www.okx.com",
@@ -314,6 +380,44 @@ def test_okx_rest_client_builds_signed_headers_and_place_order_payload() -> None
         "sz": "1",
         "clOrdId": "btc-breakout-000001",
     }
+
+    asyncio.run(client.aclose())
+
+
+def test_okx_rest_client_rejects_invalid_order_type_price_combinations() -> None:
+    client = OkxRestClient(
+        base_url="https://www.okx.com",
+        api_key="api-key",
+        api_secret="api-secret",
+        passphrase="api-passphrase",
+    )
+
+    try:
+        client.build_place_order_payload(
+            symbol="BTC-USDT-SWAP",
+            side="buy",
+            order_type="limit",
+            size="1",
+            client_order_id="btc-breakout-000001",
+        )
+    except ValueError as exc:
+        assert "price" in str(exc)
+    else:
+        raise AssertionError("expected ValueError when limit order omits price")
+
+    try:
+        client.build_place_order_payload(
+            symbol="BTC-USDT-SWAP",
+            side="buy",
+            order_type="market",
+            size="1",
+            client_order_id="btc-breakout-000002",
+            price="100.0",
+        )
+    except ValueError as exc:
+        assert "price" in str(exc)
+    else:
+        raise AssertionError("expected ValueError when market order includes price")
 
     asyncio.run(client.aclose())
 
@@ -414,5 +518,21 @@ def test_okx_rest_client_fetches_open_orders_positions_and_account_summary() -> 
     assert captured[1][0] == "/api/v5/account/positions?instId=BTC-USDT-SWAP"
     assert captured[2][0] == "/api/v5/account/balance"
     assert all(item[1] == timestamp for item in captured)
+    expected_open_orders_signature = base64.b64encode(
+        hmac.new(
+            b"api-secret",
+            f"{timestamp}GET/api/v5/trade/orders-pending?instId=BTC-USDT-SWAP".encode(),
+            hashlib.sha256,
+        ).digest()
+    ).decode()
+    expected_positions_signature = base64.b64encode(
+        hmac.new(
+            b"api-secret",
+            f"{timestamp}GET/api/v5/account/positions?instId=BTC-USDT-SWAP".encode(),
+            hashlib.sha256,
+        ).digest()
+    ).decode()
+    assert captured[0][2]["OK-ACCESS-SIGN"] == expected_open_orders_signature
+    assert captured[1][2]["OK-ACCESS-SIGN"] == expected_positions_signature
 
     asyncio.run(client.aclose())
