@@ -26,6 +26,10 @@ env $(grep -v '^#' .env.prod | xargs) uv run python -m xuanshu.ops.preflight
 - schedule-driven research runs on the planned cadence.
 - event-triggered research runs when a qualifying market or system event occurs.
 - Only research with committee approval may influence execution snapshots.
+- Configure the provider explicitly with `XUANSHU_RESEARCH_PROVIDER=api|codex_cli`.
+- Research provider selection has no automatic fallback; operators must switch it deliberately.
+- `codex_cli` requires a valid server-side `codex login` session before research runs.
+- Provider failures only fail the current research attempt; they must not be treated as Trader hot-path failures.
 
 ## Recovery
 

@@ -4,6 +4,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 from pydantic_settings.sources import DotEnvSettingsSource, EnvSettingsSource, PydanticBaseSettingsSource
 
 from xuanshu.core.enums import RunMode
+from xuanshu.governor.research_providers import ResearchProviderName
 
 
 class _SettingsEnvSource(EnvSettingsSource):
@@ -158,6 +159,7 @@ class GovernorRuntimeSettings(_XuanshuBaseSettings):
     )
     qdrant_url: AnyHttpUrl = Field(default="http://qdrant:6333", validation_alias="QDRANT_URL")
     openai_api_key: SecretStr = Field(validation_alias="OPENAI_API_KEY")
+    research_provider: ResearchProviderName = Field(default=ResearchProviderName.API)
     ai_timeout_sec: int = Field(default=12, gt=0, le=300)
     governor_interval_sec: int = Field(default=30, gt=0, le=3600)
 

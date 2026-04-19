@@ -8,6 +8,7 @@ from xuanshu.config.settings import GovernorRuntimeSettings
 from xuanshu.contracts.research import ResearchTrigger, StrategyPackage
 from xuanshu.contracts.strategy import StrategyConfigSnapshot
 from xuanshu.core.enums import ApprovalState, RunMode
+from xuanshu.governor.research_providers import create_research_provider
 from xuanshu.governor.service import GovernorService
 from xuanshu.governor.research import StrategyResearchEngine
 from xuanshu.infra.ai.governor_client import ConfiguredGovernorAgentRunner, GovernorClient
@@ -27,6 +28,7 @@ _APPROVED_RESEARCH_SOURCE_REASON = "approved research package"
 class GovernorRuntime:
     settings: GovernorRuntimeSettings
     service: GovernorService
+    research_engine: StrategyResearchEngine
     governor_client: GovernorClient
     case_store: QdrantCaseStore
     snapshot_store: SnapshotStore
@@ -50,6 +52,15 @@ def build_governor_client(settings: GovernorRuntimeSettings) -> GovernorClient:
     )
 
 
+def build_research_engine(settings: GovernorRuntimeSettings) -> StrategyResearchEngine:
+    provider = create_research_provider(
+        provider_name=settings.research_provider,
+        openai_api_key=settings.openai_api_key,
+        timeout_sec=settings.ai_timeout_sec,
+    )
+    return StrategyResearchEngine(provider=provider)
+
+
 def build_snapshot_store(settings: GovernorRuntimeSettings) -> SnapshotStore:
     return RedisSnapshotStore(redis_url=str(settings.redis_url))
 
@@ -66,7 +77,7 @@ def build_case_store(settings: GovernorRuntimeSettings) -> QdrantCaseStore:
     return QdrantCaseStore(qdrant_url=str(settings.qdrant_url))
 
 
-def _build_research_candidates(
+async def _build_research_candidates(
     runtime: GovernorRuntime,
     state_summary: dict[str, object],
 ) -> list[StrategyPackage]:
@@ -89,7 +100,7 @@ def _build_research_candidates(
         return []
 
     return [
-        StrategyResearchEngine().build_candidate_package(
+        await runtime.research_engine.build_candidate_package_from_provider(
             trigger=ResearchTrigger.SCHEDULE,
             symbol_scope=symbol_scope,
             market_environment="trend",
@@ -199,6 +210,7 @@ def build_governor_runtime() -> GovernorRuntime:
     return GovernorRuntime(
         settings=settings,
         service=build_governor_service(),
+        research_engine=build_research_engine(settings),
         governor_client=build_governor_client(settings),
         case_store=build_case_store(settings),
         snapshot_store=build_snapshot_store(settings),
@@ -244,7 +256,22 @@ async def _run_governor_cycle(runtime: GovernorRuntime) -> None:
         if isinstance(opinion, dict):
             runtime.history_store.append_expert_opinion(opinion)
 
-    research_candidates = _build_research_candidates(runtime, state_summary)
+    research_provider = runtime.research_engine.provider.provider_name.value
+    research_status = "skipped"
+    research_provider_success: bool | None = None
+    research_error: str | None = None
+    research_candidates: list[StrategyPackage] = []
+    try:
+        research_candidates = await _build_research_candidates(runtime, state_summary)
+        if research_candidates:
+            research_status = "succeeded"
+            research_provider_success = True
+    except Exception as exc:
+        research_status = "failed"
+        research_provider_success = False
+        research_error = str(exc)
+        research_candidates = []
+
     approved_research_candidates: list[StrategyPackage] = []
     if research_candidates:
         expert_opinions = runtime.service.build_expert_opinions(
@@ -308,6 +335,12 @@ async def _run_governor_cycle(runtime: GovernorRuntime) -> None:
         {
             "version_id": runtime.last_snapshot.version_id,
             "status": result.status,
+            "research_provider": research_provider,
+            "research_status": research_status,
+            "research_provider_success": research_provider_success,
+            "research_error": research_error,
+            "research_candidate_count": len(research_candidates),
+            "approved_research_candidate_ids": approved_research_candidate_ids,
         }
     )
     runtime.consecutive_failures = 0 if result.status == "published" else runtime.consecutive_failures + 1

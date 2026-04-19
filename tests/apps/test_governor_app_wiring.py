@@ -7,6 +7,9 @@ from pydantic import ValidationError
 import xuanshu.apps.governor as governor_app
 from xuanshu.contracts.research import ResearchTrigger, StrategyPackage
 from xuanshu.core.enums import ApprovalState, RunMode
+from xuanshu.governor.research import StrategyResearchEngine
+import xuanshu.governor.research_providers as research_providers_module
+from xuanshu.governor.research_providers import ResearchProviderName
 from xuanshu.infra.ai.governor_client import ConfiguredGovernorAgentRunner, GovernorClient
 from xuanshu.infra.storage.postgres_store import PostgresRuntimeStore
 from xuanshu.infra.storage.redis_store import RedisSnapshotStore
@@ -67,6 +70,7 @@ def test_governor_entrypoint_loads_settings_and_threads_it_into_runtime(monkeypa
     assert isinstance(seen_runtime.governor_client.agent_runner, ConfiguredGovernorAgentRunner)
     assert seen_runtime.governor_client.agent_runner.api_key.get_secret_value() == "openai-key"
     assert seen_runtime.governor_client.agent_runner.timeout_sec == 12
+    assert seen_runtime.settings.research_provider == ResearchProviderName.API
     assert seen_runtime.history_store.dsn == "postgresql+psycopg://xuanshu:xuanshu@localhost:5432/xuanshu"
     assert seen_runtime.last_snapshot.version_id == "bootstrap"
 
@@ -84,6 +88,40 @@ def test_governor_entrypoint_fails_fast_without_required_settings(monkeypatch) -
         governor_app.main()
 
 
+def test_governor_entrypoint_supports_codex_cli_research_provider(monkeypatch) -> None:
+    _set_required_settings_env(monkeypatch)
+    _clear_unrelated_settings_env(monkeypatch)
+    monkeypatch.setenv("XUANSHU_RESEARCH_PROVIDER", "codex_cli")
+
+    seen_runtime = None
+
+    async def fake_run_governor(runtime: governor_app.GovernorRuntime) -> None:
+        nonlocal seen_runtime
+        seen_runtime = runtime
+
+    monkeypatch.setattr(governor_app, "_run_governor", fake_run_governor)
+
+    assert governor_app.main() == 0
+
+    assert seen_runtime is not None
+    assert seen_runtime.settings.research_provider == ResearchProviderName.CODEX_CLI
+    assert seen_runtime.research_engine.provider.provider_name == ResearchProviderName.CODEX_CLI
+
+
+def test_governor_entrypoint_rejects_unsupported_research_provider(monkeypatch) -> None:
+    _set_required_settings_env(monkeypatch)
+    _clear_unrelated_settings_env(monkeypatch)
+    monkeypatch.setenv("XUANSHU_RESEARCH_PROVIDER", "chatgpt_pro_web")
+
+    async def unexpected_run_governor(_: governor_app.GovernorRuntime) -> None:
+        raise AssertionError("governor runtime should not start when research provider is invalid")
+
+    monkeypatch.setattr(governor_app, "_run_governor", unexpected_run_governor)
+
+    with pytest.raises(ValidationError):
+        governor_app.main()
+
+
 def test_governor_research_bridge_stays_idle_without_real_historical_rows(monkeypatch) -> None:
     _set_required_settings_env(monkeypatch)
     _clear_unrelated_settings_env(monkeypatch)
@@ -91,9 +129,11 @@ def test_governor_research_bridge_stays_idle_without_real_historical_rows(monkey
     runtime = governor_app.build_governor_runtime()
 
     assert (
-        governor_app._build_research_candidates(
-            runtime,
-            {"symbol_summaries": [{"symbol": "BTC-USDT-SWAP"}]},
+        asyncio.run(
+            governor_app._build_research_candidates(
+                runtime,
+                {"symbol_summaries": [{"symbol": "BTC-USDT-SWAP"}]},
+            )
         )
         == []
     )
@@ -104,6 +144,25 @@ def test_governor_research_bridge_builds_candidates_from_store_backed_position_r
     _clear_unrelated_settings_env(monkeypatch)
 
     runtime = governor_app.build_governor_runtime()
+
+    class _Provider:
+        provider_name = ResearchProviderName.API
+
+        async def generate_analysis(self, *, symbol_scope, market_environment, historical_rows, research_reason):
+            return research_providers_module.ResearchProviderSuggestion(
+                thesis="trend remains constructive",
+                strategy_family="breakout",
+                entry_signal="provider_breakout_signal",
+                exit_stop_loss_bps=50,
+                exit_take_profit_bps=120,
+                risk_fraction=0.0025,
+                max_hold_minutes=60,
+                failure_modes=[],
+                invalidating_conditions=[],
+            )
+
+    runtime.research_engine = StrategyResearchEngine(provider=_Provider())
+
     runtime.history_store.append_order_fact(
         {
             "symbol": "BTC-USDT-SWAP",
@@ -133,9 +192,11 @@ def test_governor_research_bridge_builds_candidates_from_store_backed_position_r
         }
     )
 
-    candidates = governor_app._build_research_candidates(
-        runtime,
-        {"symbol_summaries": [{"symbol": "BTC-USDT-SWAP"}]},
+    candidates = asyncio.run(
+        governor_app._build_research_candidates(
+            runtime,
+            {"symbol_summaries": [{"symbol": "BTC-USDT-SWAP"}]},
+        )
     )
 
     assert len(candidates) == 1
@@ -146,6 +207,7 @@ def test_governor_research_bridge_builds_candidates_from_store_backed_position_r
         "end_close": 103.0,
         "close_change_bps": 300.0,
     }
+    assert candidates[0].entry_rules["signal"]
 
 
 def test_governor_runtime_runs_one_cycle_and_publishes_snapshot(monkeypatch) -> None:
@@ -302,8 +364,11 @@ def test_governor_cycle_can_publish_snapshot_from_approved_research(monkeypatch)
     async def _noop_wait_forever() -> None:
         return None
 
+    async def _approved_research_candidates(*_args, **_kwargs):
+        return [research_package]
+
     monkeypatch.setattr(governor_app, "_wait_forever", _noop_wait_forever)
-    monkeypatch.setattr(governor_app, "_build_research_candidates", lambda *_args, **_kwargs: [research_package])
+    monkeypatch.setattr(governor_app, "_build_research_candidates", _approved_research_candidates)
     monkeypatch.setattr(governor_app, "build_governor_client", lambda settings: GovernorClient(_Runner()))
 
     runtime = governor_app.build_governor_runtime()
@@ -379,8 +444,11 @@ def test_governor_cycle_does_not_send_unapproved_research_downstream(monkeypatch
     async def _noop_wait_forever() -> None:
         return None
 
+    async def _blocked_research_candidates(*_args, **_kwargs):
+        return [research_package]
+
     monkeypatch.setattr(governor_app, "_wait_forever", _noop_wait_forever)
-    monkeypatch.setattr(governor_app, "_build_research_candidates", lambda *_args, **_kwargs: [research_package])
+    monkeypatch.setattr(governor_app, "_build_research_candidates", _blocked_research_candidates)
     monkeypatch.setattr(governor_app, "build_governor_client", lambda settings: GovernorClient(_Runner()))
     monkeypatch.setattr(governor_app.GovernorService, "build_committee_summary", _blocked_committee_summary)
 
@@ -439,6 +507,12 @@ def test_governor_runtime_records_snapshot_publication_for_notifier(monkeypatch)
         {
             "version_id": "snap-audit",
             "status": "published",
+            "research_provider": "api",
+            "research_status": "skipped",
+            "research_provider_success": None,
+            "research_error": None,
+            "research_candidate_count": 0,
+            "approved_research_candidate_ids": [],
         }
     ]
     assert [row["expert_type"] for row in history_store.written_rows["expert_opinions"]] == [
@@ -697,11 +771,91 @@ def test_governor_cycle_freezes_snapshot_and_tracks_consecutive_failures(monkeyp
         {
             "version_id": "bootstrap",
             "status": "frozen",
+            "research_provider": "api",
+            "research_status": "skipped",
+            "research_provider_success": None,
+            "research_error": None,
+            "research_candidate_count": 0,
+            "approved_research_candidate_ids": [],
         },
         {
             "version_id": "bootstrap",
             "status": "frozen",
+            "research_provider": "api",
+            "research_status": "skipped",
+            "research_provider_success": None,
+            "research_error": None,
+            "research_candidate_count": 0,
+            "approved_research_candidate_ids": [],
         },
+    ]
+
+
+def test_governor_cycle_contains_research_provider_failure_to_research_branch(monkeypatch) -> None:
+    _set_required_settings_env(monkeypatch)
+    _clear_unrelated_settings_env(monkeypatch)
+    history_store = PostgresRuntimeStore(dsn="postgresql://xuanshu:xuanshu@localhost:5432/xuanshu")
+
+    class _Runner:
+        async def run(self, state_summary):
+            now = datetime.now(UTC)
+            return {
+                "version_id": "snap-research-failure-contained",
+                "generated_at": now.isoformat().replace("+00:00", "Z"),
+                "effective_from": now.isoformat().replace("+00:00", "Z"),
+                "expires_at": (now + timedelta(minutes=5)).isoformat().replace("+00:00", "Z"),
+                "symbol_whitelist": ["BTC-USDT-SWAP"],
+                "strategy_enable_flags": {"breakout": True, "mean_reversion": False, "risk_pause": True},
+                "risk_multiplier": 0.5,
+                "per_symbol_max_position": 0.12,
+                "max_leverage": 3,
+                "market_mode": RunMode.NORMAL,
+                "approval_state": ApprovalState.APPROVED,
+                "source_reason": "cycle",
+                "ttl_sec": 300,
+            }
+
+    monkeypatch.setattr(governor_app, "build_governor_client", lambda settings: GovernorClient(_Runner()))
+    monkeypatch.setattr(governor_app, "build_history_store", lambda settings: history_store)
+
+    async def _failing_research_candidates(*_args, **_kwargs):
+        raise RuntimeError("codex login required")
+
+    monkeypatch.setattr(governor_app, "_build_research_candidates", _failing_research_candidates)
+    monkeypatch.setattr(
+        governor_app,
+        "build_research_engine",
+        lambda settings: StrategyResearchEngine(
+            provider=type("Provider", (), {"provider_name": ResearchProviderName.CODEX_CLI})()
+        ),
+    )
+
+    runtime = governor_app.build_governor_runtime()
+    runtime.runtime_store.set_symbol_runtime_summary(
+        "BTC-USDT-SWAP",
+        {"symbol": "BTC-USDT-SWAP", "mid_price": 100.0, "net_quantity": 0.0},
+    )
+    runtime.history_store.append_order_fact(
+        {"symbol": "BTC-USDT-SWAP", "generated_at": "2026-04-19T00:00:00Z", "price": 100.0}
+    )
+    runtime.history_store.append_position_fact(
+        {"symbol": "BTC-USDT-SWAP", "generated_at": "2026-04-19T00:05:00Z", "mark_price": 103.0}
+    )
+
+    asyncio.run(governor_app._run_governor_cycle(runtime))
+
+    assert runtime.last_snapshot.version_id == "snap-research-failure-contained"
+    assert history_store.written_rows["governor_runs"] == [
+        {
+            "version_id": "snap-research-failure-contained",
+            "status": "published",
+            "research_provider": "codex_cli",
+            "research_status": "failed",
+            "research_provider_success": False,
+            "research_error": "codex login required",
+            "research_candidate_count": 0,
+            "approved_research_candidate_ids": [],
+        }
     ]
 
 

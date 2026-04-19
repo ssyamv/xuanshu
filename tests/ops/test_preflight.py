@@ -4,6 +4,8 @@ from xuanshu.ops import preflight
 
 
 def _set_required_runtime_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("XUANSHU_DEFAULT_RUN_MODE", "halted")
+    monkeypatch.setenv("XUANSHU_RESEARCH_PROVIDER", "api")
     monkeypatch.setenv("OKX_API_KEY", "okx-key")
     monkeypatch.setenv("OKX_API_SECRET", "okx-secret")
     monkeypatch.setenv("OKX_API_PASSPHRASE", "okx-passphrase")
@@ -23,8 +25,20 @@ def test_run_preflight_returns_success_when_all_checks_pass(monkeypatch: pytest.
 
     results = preflight.run_preflight()
 
-    assert [result.name for result in results] == ["settings", "redis", "postgres", "qdrant"]
+    assert [result.name for result in results] == [
+        "settings",
+        "trader_runtime",
+        "governor_runtime",
+        "notifier_runtime",
+        "redis",
+        "postgres",
+        "qdrant",
+    ]
     assert all(result.ok for result in results)
+    assert "default_run_mode=halted" in results[0].detail
+    assert results[1].detail == "ok default_run_mode=halted symbols=2"
+    assert results[2].detail == "ok research_provider=api"
+    assert results[3].detail == "ok chat_id=123456"
 
 
 def test_preflight_main_returns_nonzero_when_a_dependency_check_fails(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
@@ -38,3 +52,17 @@ def test_preflight_main_returns_nonzero_when_a_dependency_check_fails(monkeypatc
     captured = capsys.readouterr()
     assert exit_code == 1
     assert "postgres: FAIL down" in captured.out
+
+
+def test_preflight_main_returns_nonzero_when_runtime_configuration_is_invalid(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _set_required_runtime_env(monkeypatch)
+    monkeypatch.delenv("TELEGRAM_CHAT_ID")
+
+    exit_code = preflight.main()
+
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert "settings: FAIL" in captured.out

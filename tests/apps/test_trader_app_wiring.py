@@ -177,6 +177,8 @@ def test_single_host_deploy_doc_pins_compose_entrypoint() -> None:
 
     assert "docker compose --env-file .env.prod up -d --build" in deploy_doc
     assert "restart: unless-stopped" in compose
+    assert "XUANSHU_DEFAULT_RUN_MODE:" in compose
+    assert "XUANSHU_RESEARCH_PROVIDER:" in compose
 
 
 def test_single_host_operations_docs_cover_research_triggering_and_approval() -> None:
@@ -187,7 +189,12 @@ def test_single_host_operations_docs_cover_research_triggering_and_approval() ->
     assert "schedule-driven research" in runbook
     assert "event-triggered research" in runbook
     assert "committee approval" in runbook
+    assert "XUANSHU_RESEARCH_PROVIDER=api|codex_cli" in runbook
+    assert "codex login" in runbook
+    assert "no automatic fallback" in runbook
     assert "committee approval" in alerts
+    assert "research provider failure" in alerts
+    assert "codex login" in alerts
 
 
 def test_trader_runtime_loads_starting_nav_from_settings(monkeypatch) -> None:

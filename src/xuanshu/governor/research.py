@@ -1,14 +1,19 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from hashlib import sha256
 import json
 
 from xuanshu.contracts.research import ResearchTrigger, StrategyPackage
+from xuanshu.governor.research_providers import ResearchProvider
 
 
+@dataclass(slots=True)
 class StrategyResearchEngine:
+    provider: ResearchProvider | None = None
+
     def build_candidate_package(
         self,
         *,
@@ -17,6 +22,65 @@ class StrategyResearchEngine:
         market_environment: str,
         historical_rows: list[dict[str, object]],
         research_reason: str,
+    ) -> StrategyPackage:
+        return self._build_candidate_package(
+            trigger=trigger,
+            symbol_scope=symbol_scope,
+            market_environment=market_environment,
+            historical_rows=historical_rows,
+            research_reason=research_reason,
+        )
+
+    async def build_candidate_package_from_provider(
+        self,
+        *,
+        trigger: ResearchTrigger,
+        symbol_scope: list[str],
+        market_environment: str,
+        historical_rows: list[dict[str, object]],
+        research_reason: str,
+    ) -> StrategyPackage:
+        if self.provider is None:
+            raise RuntimeError("research provider is not configured")
+        suggestion = await self.provider.generate_analysis(
+            symbol_scope=symbol_scope,
+            market_environment=market_environment,
+            historical_rows=historical_rows,
+            research_reason=research_reason,
+        )
+        provider_reason = f"{research_reason} | {self._normalize_text(suggestion.thesis, 'thesis')}"
+        return self._build_candidate_package(
+            trigger=trigger,
+            symbol_scope=symbol_scope,
+            market_environment=market_environment,
+            historical_rows=historical_rows,
+            research_reason=provider_reason,
+            strategy_family=suggestion.strategy_family,
+            entry_signal=suggestion.entry_signal,
+            stop_loss_bps=suggestion.exit_stop_loss_bps,
+            take_profit_bps=suggestion.exit_take_profit_bps,
+            risk_fraction=suggestion.risk_fraction,
+            max_hold_minutes=suggestion.max_hold_minutes,
+            failure_modes=suggestion.failure_modes,
+            invalidating_conditions=suggestion.invalidating_conditions,
+        )
+
+    def _build_candidate_package(
+        self,
+        *,
+        trigger: ResearchTrigger,
+        symbol_scope: list[str],
+        market_environment: str,
+        historical_rows: list[dict[str, object]],
+        research_reason: str,
+        strategy_family: str | None = None,
+        entry_signal: str | None = None,
+        stop_loss_bps: int = 50,
+        take_profit_bps: int = 120,
+        risk_fraction: float = 0.0025,
+        max_hold_minutes: int = 60,
+        failure_modes: list[str] | None = None,
+        invalidating_conditions: list[str] | None = None,
     ) -> StrategyPackage:
         normalized_market_environment = self._normalize_text(market_environment, "market_environment")
         normalized_research_reason = self._normalize_text(research_reason, "research_reason")
@@ -63,26 +127,35 @@ class StrategyResearchEngine:
             trigger=trigger,
             symbol_scope=normalized_symbol_scope,
             market_environment_scope=[normalized_market_environment],
-            strategy_family=self._select_strategy_family(normalized_market_environment),
+            strategy_family=self._normalize_text(
+                strategy_family or self._select_strategy_family(normalized_market_environment),
+                "strategy_family",
+            ),
             directionality="long_short",
             entry_rules={
-                "signal": self._select_entry_signal(normalized_market_environment),
+                "signal": self._normalize_text(
+                    entry_signal or self._select_entry_signal(normalized_market_environment),
+                    "entry_signal",
+                ),
             },
             exit_rules={
-                "stop_loss_bps": 50,
-                "take_profit_bps": 120,
+                "stop_loss_bps": stop_loss_bps,
+                "take_profit_bps": take_profit_bps,
             },
             position_sizing_rules={
-                "risk_fraction": 0.0025,
+                "risk_fraction": risk_fraction,
             },
             risk_constraints={
-                "max_hold_minutes": 60,
+                "max_hold_minutes": max_hold_minutes,
             },
             parameter_set=parameter_set,
             backtest_summary=backtest_summary,
             performance_summary=performance_summary,
-            failure_modes=[],
-            invalidating_conditions=[],
+            failure_modes=[self._normalize_text(item, "failure_modes") for item in (failure_modes or [])],
+            invalidating_conditions=[
+                self._normalize_text(item, "invalidating_conditions")
+                for item in (invalidating_conditions or [])
+            ],
             research_reason=normalized_research_reason,
         )
 

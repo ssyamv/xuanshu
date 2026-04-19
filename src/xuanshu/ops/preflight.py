@@ -22,6 +22,30 @@ class CheckResult:
     detail: str
 
 
+def check_trader_runtime(settings: TraderRuntimeSettings) -> CheckResult:
+    return CheckResult(
+        "trader_runtime",
+        True,
+        f"ok default_run_mode={settings.default_run_mode.value} symbols={len(settings.okx_symbols)}",
+    )
+
+
+def check_governor_runtime(settings: GovernorRuntimeSettings) -> CheckResult:
+    return CheckResult(
+        "governor_runtime",
+        True,
+        f"ok research_provider={settings.research_provider.value}",
+    )
+
+
+def check_notifier_runtime(settings: NotifierRuntimeSettings) -> CheckResult:
+    return CheckResult(
+        "notifier_runtime",
+        True,
+        f"ok chat_id={settings.telegram_chat_id}",
+    )
+
+
 def check_redis(redis_url: str) -> CheckResult:
     try:
         client = Redis.from_url(redis_url)
@@ -55,10 +79,13 @@ def check_qdrant(qdrant_url: str) -> CheckResult:
 def run_preflight() -> list[CheckResult]:
     settings = Settings()
     trader = TraderRuntimeSettings()
-    GovernorRuntimeSettings()
-    NotifierRuntimeSettings()
+    governor = GovernorRuntimeSettings()
+    notifier = NotifierRuntimeSettings()
 
     results = [CheckResult("settings", True, f"ok env={settings.env} default_run_mode={trader.default_run_mode.value}")]
+    results.append(check_trader_runtime(trader))
+    results.append(check_governor_runtime(governor))
+    results.append(check_notifier_runtime(notifier))
     results.append(check_redis(str(trader.redis_url)))
     results.append(check_postgres(str(trader.postgres_dsn)))
     results.append(check_qdrant(str(settings.qdrant_url)))
