@@ -150,8 +150,17 @@ class RedisRuntimeStateStore:
         if payload is None:
             return None
         if isinstance(payload, bytes):
-            payload = payload.decode("utf-8")
-        return json.loads(payload)
+            try:
+                payload = payload.decode("utf-8")
+            except UnicodeDecodeError:
+                return None
+        if not isinstance(payload, str):
+            return None
+        try:
+            summary = json.loads(payload)
+        except (TypeError, ValueError):
+            return None
+        return summary if isinstance(summary, dict) else None
 
     def set_fault_flags(self, flags: dict[str, object]) -> None:
         try:
@@ -167,5 +176,14 @@ class RedisRuntimeStateStore:
         if payload is None:
             return None
         if isinstance(payload, bytes):
-            payload = payload.decode("utf-8")
-        return json.loads(payload)
+            try:
+                payload = payload.decode("utf-8")
+            except UnicodeDecodeError:
+                return None
+        if not isinstance(payload, str):
+            return None
+        try:
+            flags = json.loads(payload)
+        except (TypeError, ValueError):
+            return None
+        return flags if isinstance(flags, dict) else None

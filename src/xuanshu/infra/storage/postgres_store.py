@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -23,17 +24,20 @@ class PostgresRuntimeStore:
         default_factory=lambda: {table: [] for table in POSTGRES_TABLES}
     )
 
+    def _append_row(self, table: str, payload: dict[str, Any]) -> None:
+        self.written_rows[table].append(deepcopy(payload))
+
     def append_order_fact(self, payload: dict[str, Any]) -> None:
-        self.written_rows["orders"].append(payload)
+        self._append_row("orders", payload)
 
     def append_fill_fact(self, payload: dict[str, Any]) -> None:
-        self.written_rows["fills"].append(payload)
+        self._append_row("fills", payload)
 
     def append_position_fact(self, payload: dict[str, Any]) -> None:
-        self.written_rows["positions"].append(payload)
+        self._append_row("positions", payload)
 
     def append_risk_event(self, payload: dict[str, Any]) -> None:
-        self.written_rows["risk_events"].append(payload)
+        self._append_row("risk_events", payload)
 
     def save_checkpoint(self, payload: dict[str, Any]) -> None:
-        self.written_rows["execution_checkpoints"].append(payload)
+        self._append_row("execution_checkpoints", payload)

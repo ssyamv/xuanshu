@@ -2,7 +2,7 @@ import pytest
 
 from xuanshu.contracts.strategy import StrategyConfigSnapshot
 from xuanshu.core.enums import ApprovalState, RunMode
-from xuanshu.infra.storage.postgres_store import POSTGRES_TABLES
+from xuanshu.infra.storage.postgres_store import POSTGRES_TABLES, PostgresRuntimeStore
 from xuanshu.infra.storage.qdrant_store import QDRANT_COLLECTIONS
 from xuanshu.infra.storage.redis_store import RedisKeys, RedisRuntimeStateStore, RedisSnapshotStore
 
@@ -95,17 +95,54 @@ def test_redis_runtime_summary_and_fault_store_round_trips_json() -> None:
     assert store.get_fault_flags() == {"public_ws_disconnected": {"severity": "warn"}}
 
 
+def test_redis_runtime_state_store_ignores_malformed_symbol_summary_json() -> None:
+    client = _FakeRedis()
+    client.set(RedisKeys.symbol_runtime("BTC-USDT-SWAP"), "{not-json")
+    store = RedisRuntimeStateStore(redis_client=client)
+
+    assert store.get_symbol_runtime_summary("BTC-USDT-SWAP") is None
+
+
+def test_redis_runtime_state_store_ignores_malformed_fault_flags_json() -> None:
+    client = _FakeRedis()
+    client.set(RedisKeys.fault_flags(), "{not-json")
+    store = RedisRuntimeStateStore(redis_client=client)
+
+    assert store.get_fault_flags() is None
+
+
 def test_postgres_store_exposes_append_fact_methods() -> None:
-    store = __import__(
-        "xuanshu.infra.storage.postgres_store",
-        fromlist=["PostgresRuntimeStore"],
-    ).PostgresRuntimeStore(dsn="postgresql://xuanshu:xuanshu@localhost:5432/xuanshu")
+    store = PostgresRuntimeStore(dsn="postgresql://xuanshu:xuanshu@localhost:5432/xuanshu")
 
     assert hasattr(store, "append_order_fact")
     assert hasattr(store, "append_fill_fact")
     assert hasattr(store, "append_position_fact")
     assert hasattr(store, "append_risk_event")
     assert hasattr(store, "save_checkpoint")
+
+
+@pytest.mark.parametrize(
+    ("method_name", "table_name"),
+    [
+        ("append_order_fact", "orders"),
+        ("append_fill_fact", "fills"),
+        ("append_position_fact", "positions"),
+        ("append_risk_event", "risk_events"),
+        ("save_checkpoint", "execution_checkpoints"),
+    ],
+)
+def test_postgres_store_copies_payloads_before_append(method_name: str, table_name: str) -> None:
+    store = PostgresRuntimeStore(dsn="postgresql://xuanshu:xuanshu@localhost:5432/xuanshu")
+    payload = {"event_id": "evt-1", "detail": {"status": "live"}, "values": [1, 2]}
+
+    getattr(store, method_name)(payload)
+    payload["event_id"] = "evt-2"
+    payload["detail"]["status"] = "mutated"
+    payload["values"].append(3)
+
+    assert store.written_rows[table_name] == [
+        {"event_id": "evt-1", "detail": {"status": "live"}, "values": [1, 2]}
+    ]
 
 
 def test_postgres_tables_are_deterministic_and_immutable() -> None:

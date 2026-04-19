@@ -10,6 +10,8 @@ from xuanshu.contracts.market import MarketStateSnapshot
 from xuanshu.core.enums import MarketRegime, RunMode, VolatilityState
 from xuanshu.strategies.regime_router import classify_regime
 
+_TERMINAL_ORDER_STATUSES = frozenset({"filled", "canceled", "cancelled", "rejected"})
+
 
 @dataclass
 class SymbolState:
@@ -72,6 +74,7 @@ class StateEngine:
     def on_order_update(self, event: OrderUpdateEvent) -> None:
         self.last_private_stream_marker = event.private_sequence
         symbol_orders = self.open_orders_by_symbol.setdefault(event.symbol, {})
+        normalized_status = event.status.strip().lower()
         symbol_orders[event.order_id] = OrderState(
             order_id=event.order_id,
             client_order_id=event.client_order_id,
@@ -79,9 +82,9 @@ class StateEngine:
             price=event.price,
             size=event.size,
             filled_size=event.filled_size,
-            status=event.status,
+            status=normalized_status,
         )
-        if event.status in {"filled", "canceled"}:
+        if normalized_status in _TERMINAL_ORDER_STATUSES:
             symbol_orders.pop(event.order_id, None)
 
     def on_position_update(self, event: PositionUpdateEvent) -> None:
