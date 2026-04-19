@@ -320,6 +320,17 @@ def test_okx_private_stream_normalizes_fault_payloads() -> None:
     assert stream_faults[0].code == "60012"
 
 
+def test_okx_private_stream_ignores_control_messages_without_arg() -> None:
+    stream = OkxPrivateStream(url="wss://ws.okx.com:8443/ws/v5/private")
+
+    events = stream.decode_message(
+        {"connId": "abc123", "code": "0", "msg": ""},
+        sequence="pri-1",
+    )
+
+    assert events == ()
+
+
 def test_okx_private_stream_handles_optional_blank_fields_without_crashing() -> None:
     stream = OkxPrivateStream(url="wss://ws.okx.com:8443/ws/v5/private")
 
@@ -408,9 +419,32 @@ def test_okx_private_stream_normalizes_blank_account_and_position_numerics_into_
     assert position_events[0].code == "positions_decode_error"
     assert "avgPx" in position_events[0].detail
     assert len(account_events) == 1
-    assert isinstance(account_events[0], FaultEvent)
-    assert account_events[0].code == "account_decode_error"
-    assert "availEq" in account_events[0].detail
+    assert isinstance(account_events[0], AccountSnapshotEvent)
+    assert account_events[0].available_balance == 0.0
+
+
+def test_okx_private_stream_accepts_blank_available_equity_in_account_updates() -> None:
+    stream = OkxPrivateStream(url="wss://ws.okx.com:8443/ws/v5/private")
+
+    account_events = stream.decode_message(
+        {
+            "arg": {"channel": "account"},
+            "data": [
+                {
+                    "totalEq": "1000",
+                    "availEq": "",
+                    "mgnRatio": "0.15",
+                    "uTime": "1713484810000",
+                }
+            ],
+        },
+        sequence="pri-3",
+    )
+
+    assert len(account_events) == 1
+    assert isinstance(account_events[0], AccountSnapshotEvent)
+    assert account_events[0].equity == 1000.0
+    assert account_events[0].available_balance == 0.0
 
 
 def test_okx_private_stream_normalizes_decode_failures_into_faults() -> None:

@@ -108,6 +108,8 @@ class OkxPrivateStream:
             return (self._build_fault(payload, code=str(payload.get("code") or "login_failed")),)
         if event == "error":
             return (self._build_fault(payload, code=str(payload.get("code") or "private_ws_error")),)
+        if "arg" not in payload:
+            return ()
 
         envelope = self._normalize_envelope(payload)
         if isinstance(envelope, FaultEvent):
@@ -215,7 +217,7 @@ class OkxPrivateStream:
             generated_at=self._parse_timestamp(item["uTime"]),
             private_sequence=sequence,
             equity=self._required_float(item["totalEq"], field="totalEq"),
-            available_balance=self._required_float(item["availEq"], field="availEq"),
+            available_balance=self._optional_float(item.get("availEq"), default=0.0),
             margin_ratio=self._required_float(item["mgnRatio"], field="mgnRatio"),
         )
 
