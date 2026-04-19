@@ -6,7 +6,14 @@ import pytest
 from pydantic import ValidationError
 
 import xuanshu.apps.trader as trader_app
-from xuanshu.contracts.events import FaultEvent, OrderbookTopEvent
+from xuanshu.contracts.events import (
+    AccountSnapshotEvent,
+    FaultEvent,
+    MarketTradeEvent,
+    OrderUpdateEvent,
+    OrderbookTopEvent,
+    PositionUpdateEvent,
+)
 from xuanshu.contracts.risk import CandidateSignal
 from xuanshu.core.enums import ApprovalState, EntryType, OrderSide, RunMode, SignalUrgency, StrategyId, TraderEventType
 from xuanshu.infra.okx.private_ws import OkxPrivateStream
@@ -26,6 +33,43 @@ class _FakeRedis:
 
     def get(self, key: str) -> bytes | None:
         return self.values.get(key)
+
+
+class _FakeRestClient:
+    def __init__(self) -> None:
+        self.placed_orders: list[tuple[dict[str, str], str]] = []
+        self.open_orders_calls: list[tuple[str, str]] = []
+        self.positions_calls: list[tuple[str, str]] = []
+
+    async def place_order(self, payload: dict[str, str], timestamp: str) -> list[dict[str, object]]:
+        self.placed_orders.append((payload, timestamp))
+        return [{"ordId": "ord-1", "clOrdId": payload["clOrdId"], "sCode": "0"}]
+
+    async def fetch_open_orders(self, symbol: str, timestamp: str) -> list[dict[str, object]]:
+        self.open_orders_calls.append((symbol, timestamp))
+        return []
+
+    async def fetch_positions(self, symbol: str, timestamp: str) -> list[dict[str, object]]:
+        self.positions_calls.append((symbol, timestamp))
+        return []
+
+    async def aclose(self) -> None:
+        return None
+
+
+class _FakeEventStream:
+    def __init__(self, events: list[object]) -> None:
+        self.events = list(events)
+        self.calls: list[dict[str, object]] = []
+
+    def iter_events(self, **kwargs: object):
+        self.calls.append(dict(kwargs))
+
+        async def _generator():
+            for event in self.events:
+                yield event
+
+        return _generator()
 
 
 def _set_required_settings_env(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -391,7 +435,7 @@ def test_trader_runtime_dispatches_fault_event_updates_fault_flags(monkeypatch) 
             "detail": "public stream dropped",
         }
     }
-    assert runtime.runtime_store.get_run_mode() == RunMode.NORMAL
+    assert runtime.runtime_store.get_run_mode() == RunMode.DEGRADED
 
 
 def test_trader_runtime_rejects_unsupported_dispatch_event(monkeypatch) -> None:
@@ -429,7 +473,7 @@ def test_trader_runtime_rejects_unsupported_dispatch_event(monkeypatch) -> None:
     asyncio.run(_exercise_runtime())
 
     assert runtime.runtime_store.get_run_mode() == RunMode.NORMAL
-    assert runtime.runtime_store.get_fault_flags() is None
+    assert runtime.runtime_store.get_fault_flags() == {}
 
 
 def test_trader_runtime_records_recovery_mode_change_for_notifier(monkeypatch) -> None:
@@ -476,13 +520,11 @@ def test_trader_runtime_records_recovery_mode_change_for_notifier(monkeypatch) -
 
     asyncio.run(_run_and_close_runtime())
 
-    assert history_store.written_rows["execution_checkpoints"] == [
-        {
-            "checkpoint_id": "startup",
-            "current_mode": "reduce_only",
-            "needs_reconcile": False,
-        }
-    ]
+    assert len(history_store.written_rows["execution_checkpoints"]) == 1
+    saved_checkpoint = history_store.written_rows["execution_checkpoints"][0]
+    assert saved_checkpoint["checkpoint_id"] == "startup"
+    assert saved_checkpoint["current_mode"] == "reduce_only"
+    assert saved_checkpoint["needs_reconcile"] is False
     assert history_store.written_rows["risk_events"] == [
         {
             "event_type": "runtime_mode_changed",
@@ -490,14 +532,185 @@ def test_trader_runtime_records_recovery_mode_change_for_notifier(monkeypatch) -
             "detail": "startup gating tightened runtime to reduce_only",
         }
     ]
-    assert runtime.runtime_store.get_budget_pool_summary() == {
-        "max_daily_loss": 100.0,
-        "remaining_daily_loss": 100.0,
-        "remaining_notional": 100.0,
-        "remaining_order_count": 10,
-        "current_mode": "reduce_only",
-        "starting_nav": 250000.0,
-    }
+    budget_summary = runtime.runtime_store.get_budget_pool_summary()
+    assert budget_summary["max_daily_loss"] == 100.0
+    assert budget_summary["remaining_daily_loss"] == 100.0
+    assert budget_summary["remaining_notional"] == 100.0
+    assert budget_summary["remaining_order_count"] == 10
+    assert budget_summary["current_mode"] == "reduce_only"
+    assert budget_summary["starting_nav"] == 250000.0
+
+
+def test_trader_runtime_runs_startup_recovery_against_persisted_checkpoint(monkeypatch) -> None:
+    _set_required_settings_env(monkeypatch)
+    fake_redis = _FakeRedis()
+    history_store = PostgresRuntimeStore(dsn="postgresql://xuanshu:xuanshu@localhost:5432/xuanshu")
+    fake_rest = _FakeRestClient()
+    monkeypatch.setattr(
+        trader_app,
+        "build_snapshot_store",
+        lambda settings: RedisSnapshotStore(redis_client=fake_redis),
+    )
+    monkeypatch.setattr(
+        trader_app,
+        "build_runtime_state_store",
+        lambda settings: RedisRuntimeStateStore(redis_client=fake_redis),
+    )
+    monkeypatch.setattr(trader_app, "build_history_store", lambda settings: history_store)
+
+    runtime = trader_app.build_trader_runtime()
+    runtime.components = trader_app.TraderComponents(
+        state_engine=runtime.components.state_engine,
+        risk_kernel=runtime.components.risk_kernel,
+        checkpoint_service=runtime.components.checkpoint_service,
+        okx_rest_client=fake_rest,
+        okx_public_stream=runtime.components.okx_public_stream,
+        okx_private_stream=runtime.components.okx_private_stream,
+        client_order_id_builder=runtime.components.client_order_id_builder,
+    )
+    runtime.execution_coordinator = trader_app.ExecutionCoordinator(rest_client=fake_rest)
+    runtime.recovery_supervisor = trader_app.RecoverySupervisor(rest_client=fake_rest)
+    history_store.save_checkpoint(
+        {
+            "checkpoint_id": "cp-prev",
+            "active_snapshot_version": runtime.startup_snapshot.version_id,
+            "current_mode": "normal",
+            "positions_snapshot": [],
+            "open_orders_snapshot": [],
+            "budget_state": {
+                "max_daily_loss": 100.0,
+                "remaining_daily_loss": 80.0,
+                "remaining_notional": 60.0,
+                "remaining_order_count": 10,
+            },
+            "last_public_stream_marker": "pub-prev",
+            "last_private_stream_marker": "pri-prev",
+            "needs_reconcile": False,
+        }
+    )
+
+    async def _noop_wait_forever() -> None:
+        return None
+
+    monkeypatch.setattr(trader_app, "_wait_forever", _noop_wait_forever)
+
+    async def _run_and_close_runtime() -> None:
+        try:
+            await trader_app._run_trader(runtime)
+        finally:
+            await runtime.components.aclose()
+
+    asyncio.run(_run_and_close_runtime())
+
+    assert [symbol for symbol, _ in fake_rest.open_orders_calls] == ["BTC-USDT-SWAP", "ETH-USDT-SWAP"]
+    assert [symbol for symbol, _ in fake_rest.positions_calls] == ["BTC-USDT-SWAP", "ETH-USDT-SWAP"]
+    assert len({timestamp for _, timestamp in fake_rest.open_orders_calls}) == 1
+    assert len({timestamp for _, timestamp in fake_rest.positions_calls}) == 1
+
+
+def test_trader_runtime_consumes_public_and_private_streams_and_persists_runtime_facts(monkeypatch) -> None:
+    _set_required_settings_env(monkeypatch)
+    fake_redis = _FakeRedis()
+    history_store = PostgresRuntimeStore(dsn="postgresql://xuanshu:xuanshu@localhost:5432/xuanshu")
+    fake_rest = _FakeRestClient()
+    monkeypatch.setattr(
+        trader_app,
+        "build_snapshot_store",
+        lambda settings: RedisSnapshotStore(redis_client=fake_redis),
+    )
+    monkeypatch.setattr(
+        trader_app,
+        "build_runtime_state_store",
+        lambda settings: RedisRuntimeStateStore(redis_client=fake_redis),
+    )
+    monkeypatch.setattr(trader_app, "build_history_store", lambda settings: history_store)
+
+    runtime = trader_app.build_trader_runtime()
+    runtime.components = trader_app.TraderComponents(
+        state_engine=runtime.components.state_engine,
+        risk_kernel=runtime.components.risk_kernel,
+        checkpoint_service=runtime.components.checkpoint_service,
+        okx_rest_client=fake_rest,
+        okx_public_stream=_FakeEventStream(
+            [
+                OrderbookTopEvent(
+                    event_type=TraderEventType.ORDERBOOK_TOP,
+                    symbol="BTC-USDT-SWAP",
+                    exchange="okx",
+                    generated_at=datetime.now(UTC),
+                    public_sequence="pub-1",
+                    bid_price=100.0,
+                    ask_price=100.2,
+                    bid_size=5.0,
+                    ask_size=6.0,
+                ),
+                MarketTradeEvent(
+                    event_type=TraderEventType.MARKET_TRADE,
+                    symbol="BTC-USDT-SWAP",
+                    exchange="okx",
+                    generated_at=datetime.now(UTC),
+                    public_sequence="pub-2",
+                    price=100.3,
+                    size=1.0,
+                    side="buy",
+                ),
+            ]
+        ),
+        okx_private_stream=_FakeEventStream(
+            [
+                AccountSnapshotEvent(
+                    event_type=TraderEventType.ACCOUNT_SNAPSHOT,
+                    exchange="okx",
+                    generated_at=datetime.now(UTC),
+                    private_sequence="pri-1",
+                    equity=10_000.0,
+                    available_balance=8_000.0,
+                    margin_ratio=0.2,
+                ),
+                OrderUpdateEvent(
+                    event_type=TraderEventType.ORDER_UPDATE,
+                    symbol="BTC-USDT-SWAP",
+                    exchange="okx",
+                    generated_at=datetime.now(UTC),
+                    private_sequence="pri-2",
+                    order_id="ord-1",
+                    client_order_id="BTC-USDT-SWAP-breakout-000001",
+                    side="buy",
+                    price=100.2,
+                    size=1.0,
+                    filled_size=0.0,
+                    status="live",
+                ),
+                PositionUpdateEvent(
+                    event_type=TraderEventType.POSITION_UPDATE,
+                    symbol="BTC-USDT-SWAP",
+                    exchange="okx",
+                    generated_at=datetime.now(UTC),
+                    private_sequence="pri-3",
+                    net_quantity=1.0,
+                    average_price=100.2,
+                    mark_price=100.4,
+                    unrealized_pnl=0.2,
+                ),
+            ]
+        ),
+        client_order_id_builder=runtime.components.client_order_id_builder,
+    )
+    runtime.execution_coordinator = trader_app.ExecutionCoordinator(rest_client=fake_rest)
+
+    async def _run_and_close_runtime() -> None:
+        try:
+            await trader_app._run_trader(runtime)
+        finally:
+            await runtime.components.aclose()
+
+    asyncio.run(_run_and_close_runtime())
+
+    assert len(fake_rest.placed_orders) == 1
+    assert history_store.written_rows["orders"]
+    assert history_store.written_rows["positions"]
+    assert runtime.runtime_store.get_symbol_runtime_summary("BTC-USDT-SWAP")["net_quantity"] == 1.0
+    assert runtime.runtime_store.get_budget_pool_summary()["equity"] == 10_000.0
 
 
 def test_trader_entrypoint_fails_fast_without_required_settings(monkeypatch) -> None:

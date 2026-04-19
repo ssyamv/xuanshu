@@ -1,8 +1,16 @@
 from datetime import UTC, datetime
 
-from xuanshu.contracts.events import FaultEvent, OrderUpdateEvent, OrderbookTopEvent, PositionUpdateEvent
+from xuanshu.contracts.events import (
+    AccountSnapshotEvent,
+    FaultEvent,
+    MarketTradeEvent,
+    OrderUpdateEvent,
+    OrderbookTopEvent,
+    PositionUpdateEvent,
+)
 from xuanshu.core.enums import RunMode, TraderEventType
 from xuanshu.state.engine import StateEngine
+from xuanshu.trader.dispatcher import dispatch_event
 
 
 def test_state_engine_tracks_market_orders_positions_mode_and_faults() -> None:
@@ -154,3 +162,57 @@ def test_state_engine_removes_terminal_orders_and_keeps_latest_private_marker() 
 
     assert engine.last_private_stream_marker == "pri-cancel"
     assert engine.open_orders_by_symbol["BTC-USDT-SWAP"] == {}
+
+
+def test_dispatcher_routes_market_trade_and_account_snapshot_into_state() -> None:
+    engine = StateEngine()
+
+    dispatch_event(
+        engine,
+        OrderbookTopEvent(
+            event_type=TraderEventType.ORDERBOOK_TOP,
+            symbol="BTC-USDT-SWAP",
+            exchange="okx",
+            generated_at=datetime.now(UTC),
+            public_sequence="pub-1",
+            bid_price=100.0,
+            ask_price=100.2,
+            bid_size=5.0,
+            ask_size=6.0,
+        ),
+    )
+    dispatch_event(
+        engine,
+        MarketTradeEvent(
+            event_type=TraderEventType.MARKET_TRADE,
+            symbol="BTC-USDT-SWAP",
+            exchange="okx",
+            generated_at=datetime.now(UTC),
+            public_sequence="pub-2",
+            price=100.3,
+            size=2.0,
+            side="buy",
+        ),
+    )
+    dispatch_event(
+        engine,
+        AccountSnapshotEvent(
+            event_type=TraderEventType.ACCOUNT_SNAPSHOT,
+            exchange="okx",
+            generated_at=datetime.now(UTC),
+            private_sequence="pri-1",
+            equity=10_000.0,
+            available_balance=7_500.0,
+            margin_ratio=0.25,
+        ),
+    )
+
+    snapshot = engine.snapshot("BTC-USDT-SWAP")
+    budget_summary = engine.build_budget_pool_summary()
+
+    assert engine.last_public_stream_marker == "pub-2"
+    assert engine.last_private_stream_marker == "pri-1"
+    assert snapshot.recent_trade_bias == 1.0
+    assert budget_summary["equity"] == 10_000.0
+    assert budget_summary["available_balance"] == 7_500.0
+    assert budget_summary["margin_ratio"] == 0.25

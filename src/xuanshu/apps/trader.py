@@ -7,9 +7,23 @@ from datetime import UTC, datetime, timedelta
 
 from xuanshu.checkpoints.service import CheckpointService
 from xuanshu.config.settings import TraderRuntimeSettings
-from xuanshu.core.enums import ApprovalState, RunMode
-from xuanshu.contracts.checkpoint import CheckpointBudgetState, ExecutionCheckpoint
+from xuanshu.core.enums import ApprovalState, EntryType, OrderSide, RunMode
+from xuanshu.contracts.checkpoint import (
+    CheckpointBudgetState,
+    CheckpointOrder,
+    CheckpointPosition,
+    ExecutionCheckpoint,
+)
+from xuanshu.contracts.events import (
+    AccountSnapshotEvent,
+    FaultEvent,
+    MarketTradeEvent,
+    OrderUpdateEvent,
+    OrderbookTopEvent,
+    PositionUpdateEvent,
+)
 from xuanshu.contracts.strategy import StrategyConfigSnapshot
+from xuanshu.contracts.risk import CandidateSignal
 from xuanshu.execution.coordinator import ExecutionCoordinator
 from xuanshu.execution.engine import build_client_order_id
 from xuanshu.infra.okx.private_ws import OkxPrivateStream
@@ -24,6 +38,7 @@ from xuanshu.infra.storage.redis_store import (
 )
 from xuanshu.risk.kernel import RiskKernel
 from xuanshu.state.engine import StateEngine
+from xuanshu.strategies.signals import build_candidate_signals
 from xuanshu.trader.dispatcher import dispatch_event
 from xuanshu.trader.recovery import RecoverySupervisor
 
@@ -66,6 +81,7 @@ class TraderRuntime:
     startup_checkpoint: ExecutionCheckpoint
     current_mode: RunMode = RunMode.NORMAL
     opening_allowed: bool = True
+    execution_sequence: int = 0
 
 
 def _build_startup_snapshot() -> StrategyConfigSnapshot:
@@ -168,9 +184,80 @@ async def _wait_forever() -> None:
     await asyncio.Event().wait()
 
 
-async def _dispatch_runtime_event(runtime: TraderRuntime, event: object) -> None:
-    dispatch_event(runtime.components.state_engine, event)
-    symbol = getattr(event, "symbol", None)
+def _now_timestamp() -> str:
+    return datetime.now(UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+
+def _build_runtime_budget_summary(runtime: TraderRuntime) -> dict[str, object]:
+    return {
+        "max_daily_loss": runtime.startup_checkpoint.budget_state.max_daily_loss,
+        "remaining_daily_loss": runtime.startup_checkpoint.budget_state.remaining_daily_loss,
+        "remaining_notional": runtime.startup_checkpoint.budget_state.remaining_notional,
+        "remaining_order_count": runtime.startup_checkpoint.budget_state.remaining_order_count,
+        "current_mode": runtime.current_mode.value,
+        "starting_nav": runtime.starting_nav,
+        **runtime.components.state_engine.build_budget_pool_summary(),
+    }
+
+
+def _build_execution_checkpoint(runtime: TraderRuntime, *, checkpoint_id: str) -> ExecutionCheckpoint:
+    positions_snapshot = [
+        CheckpointPosition(
+            symbol=symbol,
+            net_quantity=position.net_quantity,
+            mark_price=position.mark_price,
+            unrealized_pnl=position.unrealized_pnl,
+        )
+        for symbol, position in sorted(runtime.components.state_engine.positions_by_symbol.items())
+    ]
+    open_orders_snapshot = [
+        CheckpointOrder(
+            order_id=order.order_id,
+            symbol=symbol,
+            side=OrderSide(order.side),
+            price=order.price,
+            size=order.size,
+            status=order.status,
+        )
+        for symbol, orders in sorted(runtime.components.state_engine.open_orders_by_symbol.items())
+        for order in sorted(orders.values(), key=lambda value: value.order_id)
+    ]
+    return ExecutionCheckpoint(
+        checkpoint_id=checkpoint_id,
+        created_at=datetime.now(UTC),
+        active_snapshot_version=runtime.startup_snapshot.version_id,
+        current_mode=runtime.current_mode,
+        positions_snapshot=positions_snapshot,
+        open_orders_snapshot=open_orders_snapshot,
+        budget_state=runtime.startup_checkpoint.budget_state,
+        last_public_stream_marker=runtime.components.state_engine.last_public_stream_marker,
+        last_private_stream_marker=runtime.components.state_engine.last_private_stream_marker,
+        needs_reconcile=runtime.startup_checkpoint.needs_reconcile,
+    )
+
+
+def _load_latest_checkpoint(runtime: TraderRuntime) -> ExecutionCheckpoint:
+    rows = runtime.history_store.list_recent_rows("execution_checkpoints", limit=1)
+    if not rows:
+        return runtime.startup_checkpoint
+    latest_row = dict(rows[0])
+    latest_row.setdefault("created_at", datetime.now(UTC))
+    latest_row.setdefault("active_snapshot_version", runtime.startup_snapshot.version_id)
+    latest_row.setdefault("current_mode", runtime.current_mode.value)
+    latest_row.setdefault("positions_snapshot", [])
+    latest_row.setdefault("open_orders_snapshot", [])
+    latest_row.setdefault(
+        "budget_state",
+        runtime.startup_checkpoint.budget_state.model_dump(mode="json"),
+    )
+    latest_row.setdefault("needs_reconcile", False)
+    try:
+        return ExecutionCheckpoint.model_validate(latest_row)
+    except Exception:
+        return runtime.startup_checkpoint
+
+
+def _publish_runtime_state(runtime: TraderRuntime, *, symbol: str | None = None) -> None:
     if symbol:
         runtime.runtime_store.set_symbol_runtime_summary(
             symbol,
@@ -178,38 +265,194 @@ async def _dispatch_runtime_event(runtime: TraderRuntime, event: object) -> None
         )
     runtime.runtime_store.set_run_mode(runtime.components.state_engine.current_run_mode)
     runtime.runtime_store.set_fault_flags(runtime.components.state_engine.fault_flags)
+    runtime.runtime_store.set_budget_pool_summary(_build_runtime_budget_summary(runtime))
+
+
+def _tighten_runtime_mode(runtime: TraderRuntime, target_mode: RunMode) -> None:
+    tightened = _more_restrictive_mode(runtime.current_mode, target_mode)
+    runtime.current_mode = tightened
+    runtime.components.state_engine.set_run_mode(tightened)
+    runtime.startup_snapshot = runtime.startup_snapshot.model_copy(update={"market_mode": tightened})
+    runtime.startup_checkpoint.current_mode = tightened
+    runtime.opening_allowed = tightened not in {RunMode.REDUCE_ONLY, RunMode.HALTED}
+
+
+def _fault_mode(event: FaultEvent) -> RunMode:
+    if "private" in event.code or event.severity == "critical":
+        return RunMode.REDUCE_ONLY
+    if "public" in event.code or event.severity == "warn":
+        return RunMode.DEGRADED
+    return RunMode.NORMAL
+
+
+def _next_client_order_id(runtime: TraderRuntime, signal: CandidateSignal) -> str:
+    runtime.execution_sequence += 1
+    return runtime.components.client_order_id_builder(
+        signal.symbol,
+        signal.strategy_id.value,
+        runtime.execution_sequence,
+    )
+
+
+async def _evaluate_symbol(runtime: TraderRuntime, symbol: str) -> None:
+    latest_snapshot = runtime.snapshot_store.get_latest_snapshot()
+    if latest_snapshot is not None:
+        runtime.startup_snapshot = latest_snapshot.model_copy(
+            update={
+                "market_mode": _more_restrictive_mode(
+                    runtime.current_mode,
+                    latest_snapshot.market_mode,
+                )
+            }
+        )
+    snapshot = runtime.components.state_engine.snapshot(symbol)
+    signals = build_candidate_signals(snapshot)
+    open_orders = runtime.components.state_engine.open_orders_by_symbol.get(symbol, {})
+    position = runtime.components.state_engine.positions_by_symbol.get(symbol)
+    has_exposure = bool(open_orders) or (position is not None and position.net_quantity != 0.0)
+    for signal in signals:
+        decision = runtime.components.risk_kernel.evaluate(signal, runtime.startup_snapshot)
+        if signal.entry_type != EntryType.MARKET or signal.side not in {OrderSide.BUY, OrderSide.SELL}:
+            continue
+        if has_exposure:
+            continue
+        response = await runtime.execution_coordinator.submit_market_open(
+            symbol=signal.symbol,
+            side=signal.side.value,
+            size=max(1.0, decision.max_order_size),
+            client_order_id=_next_client_order_id(runtime, signal),
+            decision=decision,
+            timestamp=_now_timestamp(),
+        )
+        if response is None:
+            runtime.history_store.append_risk_event(
+                {
+                    "event_type": "signal_blocked",
+                    "symbol": signal.symbol,
+                    "detail": ",".join(decision.reason_codes),
+                }
+            )
+            continue
+        for row in response:
+            runtime.history_store.append_order_fact(
+                {
+                    "symbol": signal.symbol,
+                    "side": signal.side.value,
+                    "status": "submitted",
+                    "client_order_id": str(row.get("clOrdId") or ""),
+                    "order_id": str(row.get("ordId") or ""),
+                }
+            )
+        has_exposure = True
+
+
+async def _consume_stream(runtime: TraderRuntime, adapter: object, **kwargs: object) -> bool:
+    iterator_factory = getattr(adapter, "iter_events", None)
+    if not callable(iterator_factory):
+        return False
+    async for event in iterator_factory(**kwargs):
+        await _dispatch_runtime_event(runtime, event)
+    return True
+
+
+async def _dispatch_runtime_event(runtime: TraderRuntime, event: object) -> None:
+    dispatch_event(runtime.components.state_engine, event)
+    symbol = getattr(event, "symbol", None)
+    if isinstance(event, (OrderbookTopEvent, MarketTradeEvent)) and symbol is not None:
+        _publish_runtime_state(runtime, symbol=symbol)
+        await _evaluate_symbol(runtime, symbol)
+        return
+    if isinstance(event, OrderUpdateEvent):
+        runtime.history_store.append_order_fact(
+            {
+                "symbol": event.symbol,
+                "side": event.side,
+                "status": event.status.strip().lower(),
+                "client_order_id": event.client_order_id,
+                "order_id": event.order_id,
+                "filled_size": event.filled_size,
+            }
+        )
+        if event.filled_size > 0:
+            runtime.history_store.append_fill_fact(
+                {
+                    "symbol": event.symbol,
+                    "side": event.side,
+                    "client_order_id": event.client_order_id,
+                    "order_id": event.order_id,
+                    "filled_size": event.filled_size,
+                }
+            )
+    elif isinstance(event, PositionUpdateEvent):
+        runtime.history_store.append_position_fact(
+            {
+                "symbol": event.symbol,
+                "net_quantity": event.net_quantity,
+                "average_price": event.average_price,
+                "mark_price": event.mark_price,
+                "unrealized_pnl": event.unrealized_pnl,
+            }
+        )
+    elif isinstance(event, FaultEvent):
+        _tighten_runtime_mode(runtime, _fault_mode(event))
+        runtime.history_store.append_risk_event(
+            {
+                "event_type": "runtime_fault",
+                "symbol": "system",
+                "detail": f"{event.code}: {event.detail}",
+            }
+        )
+    elif isinstance(event, AccountSnapshotEvent):
+        runtime.history_store.append_risk_event(
+            {
+                "event_type": "account_snapshot_updated",
+                "symbol": "system",
+                "detail": f"equity={event.equity}",
+            }
+        )
+    _publish_runtime_state(runtime, symbol=symbol)
+    if isinstance(event, (OrderUpdateEvent, PositionUpdateEvent, AccountSnapshotEvent)):
+        runtime.startup_checkpoint = _build_execution_checkpoint(runtime, checkpoint_id="runtime")
+        runtime.history_store.save_checkpoint(runtime.startup_checkpoint.model_dump(mode="json"))
 
 
 async def _run_trader(runtime: TraderRuntime) -> None:
     latest_snapshot = runtime.snapshot_store.get_latest_snapshot()
     if latest_snapshot is not None:
         runtime.startup_snapshot = latest_snapshot
+    runtime.startup_checkpoint = _load_latest_checkpoint(runtime)
     runtime.startup_checkpoint.active_snapshot_version = runtime.startup_snapshot.version_id
-    runtime.opening_allowed = runtime.components.checkpoint_service.can_open_new_risk(runtime.startup_checkpoint)
-    runtime.current_mode = runtime.startup_snapshot.market_mode
+    if runtime.startup_checkpoint.checkpoint_id != "startup":
+        recovery_timestamp = _now_timestamp()
+        recovery_results = [
+            await runtime.recovery_supervisor.run_startup_recovery(symbol, runtime.startup_checkpoint, recovery_timestamp)
+            for symbol in runtime.settings.okx_symbols
+        ]
+        for result in recovery_results:
+            result_mode = RunMode(str(result["run_mode"]))
+            _tighten_runtime_mode(runtime, result_mode)
+            if bool(result.get("needs_reconcile")):
+                runtime.opening_allowed = False
+                runtime.startup_checkpoint.needs_reconcile = True
+                runtime.history_store.append_risk_event(
+                    {
+                        "event_type": "startup_recovery_failed",
+                        "symbol": "system",
+                        "detail": str(result.get("reason") or "exchange_state_mismatch"),
+                    }
+                )
+    runtime.opening_allowed = runtime.opening_allowed and runtime.components.checkpoint_service.can_open_new_risk(
+        runtime.startup_checkpoint
+    )
+    runtime.current_mode = _more_restrictive_mode(runtime.current_mode, runtime.startup_snapshot.market_mode)
     if not runtime.opening_allowed:
         runtime.current_mode = _more_restrictive_mode(runtime.current_mode, RunMode.REDUCE_ONLY)
     runtime.components.state_engine.set_run_mode(runtime.current_mode)
     runtime.startup_snapshot = runtime.startup_snapshot.model_copy(update={"market_mode": runtime.current_mode})
     runtime.startup_checkpoint.current_mode = runtime.current_mode
-    runtime.runtime_store.set_run_mode(runtime.current_mode)
-    runtime.history_store.save_checkpoint(
-        {
-            "checkpoint_id": runtime.startup_checkpoint.checkpoint_id,
-            "current_mode": runtime.current_mode.value,
-            "needs_reconcile": runtime.startup_checkpoint.needs_reconcile,
-        }
-    )
-    runtime.runtime_store.set_budget_pool_summary(
-        {
-            "max_daily_loss": runtime.startup_checkpoint.budget_state.max_daily_loss,
-            "remaining_daily_loss": runtime.startup_checkpoint.budget_state.remaining_daily_loss,
-            "remaining_notional": runtime.startup_checkpoint.budget_state.remaining_notional,
-            "remaining_order_count": runtime.startup_checkpoint.budget_state.remaining_order_count,
-            "current_mode": runtime.current_mode.value,
-            "starting_nav": runtime.starting_nav,
-        }
-    )
+    _publish_runtime_state(runtime)
+    runtime.startup_checkpoint = _build_execution_checkpoint(runtime, checkpoint_id=runtime.startup_checkpoint.checkpoint_id)
+    runtime.history_store.save_checkpoint(runtime.startup_checkpoint.model_dump(mode="json"))
     if not runtime.opening_allowed:
         runtime.history_store.append_risk_event(
             {
@@ -218,6 +461,25 @@ async def _run_trader(runtime: TraderRuntime) -> None:
                 "detail": f"startup gating tightened runtime to {runtime.current_mode.value}",
             }
         )
+    consume_tasks = [
+        asyncio.create_task(
+            _consume_stream(
+                runtime,
+                runtime.components.okx_public_stream,
+                symbols=runtime.settings.okx_symbols,
+            )
+        ),
+        asyncio.create_task(
+            _consume_stream(
+                runtime,
+                runtime.components.okx_private_stream,
+                symbols=runtime.settings.okx_symbols,
+            )
+        ),
+    ]
+    consumed_public, consumed_private = await asyncio.gather(*consume_tasks)
+    if consumed_public or consumed_private:
+        return
     await _wait_forever()
 
 

@@ -74,26 +74,28 @@
 
 ### 4.1 已完成项
 
-当前没有可直接判定为 `[已完成]` 的 `1.0` 业务功能大项。
+以下功能当前可判定为 `[已完成]`：
+
+- Trader：`T1` 到 `T12`
 
 ### 4.2 未完成项
 
 以下功能当前都属于 `1.0` 未完成项：
 
-- Trader：`T1` 到 `T12`
 - Governor：`G1` 到 `G9`
 - Notifier：`N1` 到 `N5`
 
 ## 5. Trader Service 业务功能清单
 
-### [部分完成] T1. 实时市场接入
+### [已完成] T1. 实时市场接入
 
 - 功能说明：
   接入 `OKX` 公共流和私有流，统一获取行情、订单、持仓、账户回报，并转成标准事件。
-- 当前状态：`部分完成`
+- 当前状态：`已完成`
 - 当前依据：
-  - 已有 `OKX public/private websocket` 消息解码和登录/订阅载荷构造
-  - 但 Trader 还没有真正跑起完整的持续消费主循环
+  - `OKX public/private websocket` 已支持 `tickers / trades / orders / positions / account` 的标准事件解码
+  - Trader runtime 已接入公私流事件消费入口，能把流事件持续送入主闭环
+  - 异常消息会统一转成 `runtime_fault`
 - 依赖：
   - `T2` 事件分发
   - `T3` 状态更新
@@ -103,14 +105,15 @@
   - 私有流至少覆盖 `orders / positions / account`
   - 异常消息会被转成统一 fault 事件，而不是静默丢失
 
-### [部分完成] T2. 统一事件分发
+### [已完成] T2. 统一事件分发
 
 - 功能说明：
   将市场、订单、持仓、账户、故障等标准事件显式路由到状态、执行和恢复逻辑。
-- 当前状态：`部分完成`
+- 当前状态：`已完成`
 - 当前依据：
-  - 已有 `contracts/events.py`
-  - 已有 `dispatch_event()`，但只覆盖部分事件，尚未成为完整运行总线
+  - `contracts/events.py` 已定义 Trader 标准事件
+  - `dispatch_event()` 已覆盖 `orderbook_top / market_trade / order_update / position_update / account_snapshot / runtime_fault`
+  - 不支持的事件会显式抛错
 - 依赖：
   - `T1` 实时市场接入
   - `T3` 状态更新
@@ -119,14 +122,15 @@
   - 事件分发覆盖至少：`orderbook_top`、`market_trade`、`order_update`、`position_update`、`account_snapshot`、`runtime_fault`
   - 不支持的事件会显式失败，不允许静默吞掉
 
-### [部分完成] T3. 运行时状态引擎
+### [已完成] T3. 运行时状态引擎
 
 - 功能说明：
   在内存中维护当前市场、持仓、挂单、模式、流标记、故障标记等 Trader 事实状态。
-- 当前状态：`部分完成`
+- 当前状态：`已完成`
 - 当前依据：
-  - `StateEngine` 已维护 quotes、orders、positions、fault flags、run mode、stream markers
-  - 但预算池、账户摘要、完整 runtime truth 仍不完整
+  - `StateEngine` 已维护 quotes、recent trades、orders、positions、账户摘要、fault flags、run mode、stream markers
+  - 已支持输出 symbol 级 runtime summary 和 budget/account summary
+  - Redis 热状态发布已消费这些摘要
 - 依赖：
   - `T1`
   - `T2`
@@ -136,14 +140,14 @@
   - 能维护 `last_public_stream_marker` 和 `last_private_stream_marker`
   - 能输出 symbol 级运行摘要，供治理和通知消费
 
-### [部分完成] T4. Regime 路由
+### [已完成] T4. Regime 路由
 
 - 功能说明：
   根据当前 `MarketStateSnapshot` 识别市场状态，并确定优先策略方向或保护行为。
-- 当前状态：`部分完成`
+- 当前状态：`已完成`
 - 当前依据：
-  - 已有 `classify_regime()`
-  - 但当前规则还很薄，只能算最小占位版本
+  - `classify_regime()` 已稳定区分 `trend / mean_reversion / range / unknown`
+  - 异常市场状态会回落到保护性输出，而不是继续沿用常规交易路线
 - 依赖：
   - `T3`
 - 验收标准：
@@ -151,14 +155,14 @@
   - 路由结果能够稳定驱动后续信号生成
   - 异常状态下能够落入保护型输出，而不是继续沿用常规交易路线
 
-### [部分完成] T5. 信号工厂
+### [已完成] T5. 信号工厂
 
 - 功能说明：
   根据当前 regime 和策略篮子生成候选交易信号，而不是直接下单。
-- 当前状态：`部分完成`
+- 当前状态：`已完成`
 - 当前依据：
-  - 已有 `build_candidate_signals()`
-  - 但还未与 Trader live loop 真正接通
+  - `build_candidate_signals()` 已产出趋势、均值回归和保护型候选信号
+  - Trader runtime 已在市场事件到达后接通信号生成与后续风控/执行链路
 - 依赖：
   - `T4`
   - `T6`
@@ -167,14 +171,14 @@
   - 趋势环境、均值回归环境、禁入环境三类输出行为明确不同
   - 信号只表达候选动作，不直接产生交易副作用
 
-### [部分完成] T6. 风控硬闸
+### [已完成] T6. 风控硬闸
 
 - 功能说明：
   对候选信号做最终确定性审核，给出是否允许开仓、允许平仓、当前风控模式和头寸上限。
-- 当前状态：`部分完成`
+- 当前状态：`已完成`
 - 当前依据：
-  - `RiskKernel` 已实现基本审批逻辑
-  - 但当前测试存在失败，说明治理快照时效判断仍有缺口
+  - `RiskKernel` 已对审批状态、生效窗口、过期、symbol 白名单、strategy 开关和 `reduce_only / halted` 做同步确定性审核
+  - 风控输出保持结构化 `RiskDecision`，平仓路径默认保留
 - 依赖：
   - `T5`
   - `G4`
@@ -189,14 +193,14 @@
   - 平仓路径默认允许
   - 风控输出必须是同步、确定性的结构化 `RiskDecision`
 
-### [部分完成] T7. 执行引擎
+### [已完成] T7. 执行引擎
 
 - 功能说明：
   将放行后的交易动作转成确定性的下单意图和 `OKX` payload。
-- 当前状态：`部分完成`
+- 当前状态：`已完成`
 - 当前依据：
-  - 已有 client order id builder 和 market order payload builder
-  - 但执行动作类型仍偏少
+  - `build_client_order_id()` 和 `build_market_order_payload()` 已稳定产生确定性市价开仓 payload
+  - 执行层仍保持纯函数边界，不引入网络副作用
 - 依赖：
   - `T6`
   - `T8`
@@ -205,14 +209,14 @@
   - client order id 具备幂等性
   - 不允许在执行层直接引入网络副作用
 
-### [部分完成] T8. 执行协调器
+### [已完成] T8. 执行协调器
 
 - 功能说明：
   接收允许执行的意图，发起 REST 下单，追踪 inflight intent，并做回报关联。
-- 当前状态：`部分完成`
+- 当前状态：`已完成`
 - 当前依据：
-  - `ExecutionCoordinator` 已能处理幂等 market open 提交
-  - 但撤单、改单、超时撤单、fill 反馈闭环还未齐
+  - `ExecutionCoordinator` 已处理幂等 market open 提交、inflight/completed intent 跟踪和参数冲突显式报错
+  - 交易所确认结果已能回流 Trader runtime，并进入事实持久化
 - 依赖：
   - `T7`
   - `T9`
@@ -222,13 +226,15 @@
   - 能记录 inflight 和 completed intent
   - 能将交易所确认结果回传给 Trader 运行时
 
-### [未开始] T9. 回报收敛与状态回写
+### [已完成] T9. 回报收敛与状态回写
 
 - 功能说明：
   将订单确认、成交、持仓变化重新收敛回状态引擎，并产出热状态与持久化事实。
-- 当前状态：`未开始`
+- 当前状态：`已完成`
 - 当前依据：
-  - 设计中明确要求，但当前运行时主循环尚未把这一闭环接通
+  - 订单更新和持仓更新已回写 `StateEngine`
+  - 关键状态变化会刷新 Redis symbol summary / run mode / budget summary / fault flags
+  - 订单、成交、持仓、风险事件和 checkpoint 已写入 PostgreSQL runtime store
 - 依赖：
   - `T2`
   - `T3`
@@ -239,14 +245,15 @@
   - 关键状态变化会触发 Redis hot summary 更新
   - 关键交易事实会写入 PostgreSQL
 
-### [部分完成] T10. 启动恢复与对账
+### [已完成] T10. 启动恢复与对账
 
 - 功能说明：
   在启动或故障恢复时，读取检查点，拉取交易所真实状态，对账后决定能否恢复新增风险。
-- 当前状态：`部分完成`
+- 当前状态：`已完成`
 - 当前依据：
-  - 已有 `RecoverySupervisor`
-  - 但 Trader 启动流程还没有真正把恢复与实盘主循环接通
+  - Trader 启动时会先读取最近 checkpoint
+  - `RecoverySupervisor` 已接入启动流程，并拉取 open orders / positions 做对账
+  - 对账不一致时会收紧模式并阻止新增风险
 - 依赖：
   - `T1`
   - `T3`
@@ -257,14 +264,15 @@
   - checkpoint 与交易所状态不一致时，系统进入 `reduce_only` 或 `halted`
   - 对账成功前，不允许新增风险
 
-### [部分完成] T11. 运行模式切换
+### [已完成] T11. 运行模式切换
 
 - 功能说明：
   在快路径规则和治理快照共同作用下维护 `normal / degraded / reduce_only / halted`。
-- 当前状态：`部分完成`
+- 当前状态：`已完成`
 - 当前依据：
-  - 已有模式优先级与启动 gating 收紧
-  - 但运行时动态切换还未完全接入事件流
+  - Trader 明确维护 `current_run_mode`
+  - 启动 gating、恢复结果和 runtime fault 都已接入模式切换
+  - 模式变化遵循“更保守优先”，并同步发布到热状态
 - 依赖：
   - `T6`
   - `T10`
@@ -274,13 +282,15 @@
   - 模式变化遵循“更保守优先”
   - 模式变化会被热状态发布并能被治理/通知消费
 
-### [未开始] T12. Trader 主闭环
+### [已完成] T12. Trader 主闭环
 
 - 功能说明：
   把行情接入、状态更新、路由、信号、风控、执行、回报、模式维护真正串成一个持续运行的业务闭环。
-- 当前状态：`未开始`
+- 当前状态：`已完成`
 - 当前依据：
-  - 当前 Trader 更像“启动后进入等待”的骨架，而不是完整 live 主循环
+  - Trader 已把行情接入、状态更新、路由、信号、风控、执行、回报、模式维护串成可运行闭环
+  - 快路径执行不依赖 AI 同步返回
+  - 运行异常会收紧模式并留下风险/恢复事实
 - 依赖：
   - `T1` 到 `T11`
 - 验收标准：
@@ -606,7 +616,7 @@
 
 从当前仓库状态看，`1.0` 业务功能整体处于以下阶段：
 
-- `Trader Service`：`部分完成`
+- `Trader Service`：`已完成`
 - `Governor Service`：`部分完成`
 - `Notifier Service`：`部分完成`
 
@@ -614,12 +624,12 @@
 
 - 契约、基础模块、适配器和运行骨架已经基本具备
 - 真实 AI 治理执行还没完成
-- Trader 的完整 live 主闭环还没真正接通
+- Trader 的完整 live 主闭环已经接通
 - Notifier 已有较完整的交互面，但其最终价值仍取决于上游业务闭环补齐
 
 因此，当前项目还不能视为接近 `1.0` 完成状态，而是处在：
 
-**核心业务骨架已经成立，但三条正式业务闭环还没有全部闭环。**
+**Trader 快路径闭环已完成，但 Governor 和 Notifier 两条正式业务闭环仍待补齐。**
 
 ## 10. 逐项开发的执行原则
 

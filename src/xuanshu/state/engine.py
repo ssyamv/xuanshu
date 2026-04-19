@@ -5,7 +5,14 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from uuid import uuid4
 
-from xuanshu.contracts.events import FaultEvent, OrderUpdateEvent, OrderbookTopEvent, PositionUpdateEvent
+from xuanshu.contracts.events import (
+    AccountSnapshotEvent,
+    FaultEvent,
+    MarketTradeEvent,
+    OrderUpdateEvent,
+    OrderbookTopEvent,
+    PositionUpdateEvent,
+)
 from xuanshu.contracts.market import MarketStateSnapshot
 from xuanshu.core.enums import MarketRegime, RunMode, VolatilityState
 from xuanshu.strategies.regime_router import classify_regime
@@ -40,6 +47,13 @@ class PositionState:
 
 
 @dataclass
+class AccountState:
+    equity: float = 0.0
+    available_balance: float = 0.0
+    margin_ratio: float = 0.0
+
+
+@dataclass
 class StateEngine:
     symbols: dict[str, SymbolState] = field(default_factory=dict)
     open_orders_by_symbol: dict[str, dict[str, OrderState]] = field(default_factory=dict)
@@ -49,6 +63,7 @@ class StateEngine:
     last_public_stream_marker: str | None = None
     last_private_stream_marker: str | None = None
     recent_trade_window: int = 20
+    account_state: AccountState = field(default_factory=AccountState)
 
     def set_run_mode(self, mode: RunMode) -> None:
         self.current_run_mode = mode
@@ -61,6 +76,10 @@ class StateEngine:
     def on_orderbook_top(self, event: OrderbookTopEvent) -> None:
         self.last_public_stream_marker = event.public_sequence
         self.on_bbo(event.symbol, bid=event.bid_price, ask=event.ask_price)
+
+    def on_market_trade(self, event: MarketTradeEvent) -> None:
+        self.last_public_stream_marker = event.public_sequence
+        self.on_trade(event.symbol, price=event.price, size=event.size, side=event.side)
 
     def on_trade(self, symbol: str, price: float, size: float, side: str) -> None:
         state = self.symbols.setdefault(symbol, SymbolState())
@@ -96,6 +115,14 @@ class StateEngine:
             unrealized_pnl=event.unrealized_pnl,
         )
 
+    def on_account_snapshot(self, event: AccountSnapshotEvent) -> None:
+        self.last_private_stream_marker = event.private_sequence
+        self.account_state = AccountState(
+            equity=event.equity,
+            available_balance=event.available_balance,
+            margin_ratio=event.margin_ratio,
+        )
+
     def on_fault(self, event: FaultEvent) -> None:
         self.fault_flags[event.code] = {
             "severity": event.severity,
@@ -115,6 +142,16 @@ class StateEngine:
             "net_quantity": position.net_quantity,
             "open_order_count": len(open_orders),
             "fault_count": len(self.fault_flags),
+        }
+
+    def build_budget_pool_summary(self) -> dict[str, object]:
+        return {
+            "equity": self.account_state.equity,
+            "available_balance": self.account_state.available_balance,
+            "margin_ratio": self.account_state.margin_ratio,
+            "current_mode": self.current_run_mode.value,
+            "last_public_stream_marker": self.last_public_stream_marker,
+            "last_private_stream_marker": self.last_private_stream_marker,
         }
 
     def snapshot(self, symbol: str) -> MarketStateSnapshot:
