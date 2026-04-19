@@ -138,6 +138,10 @@ class TraderRuntimeSettings(_XuanshuBaseSettings):
     okx_symbols: tuple[str, ...] = Field(default=("BTC-USDT-SWAP", "ETH-USDT-SWAP"), min_length=1)
     trader_starting_nav: float = Field(default=250_000.0, gt=0.0)
     redis_url: RedisDsn = Field(default="redis://redis:6379/0", validation_alias="REDIS_URL")
+    postgres_dsn: PostgresDsn = Field(
+        default="postgresql+psycopg://xuanshu:xuanshu@postgres:5432/xuanshu",
+        validation_alias="POSTGRES_DSN",
+    )
     okx_api_key: SecretStr = Field(validation_alias="OKX_API_KEY")
     okx_api_secret: SecretStr = Field(validation_alias="OKX_API_SECRET")
     okx_api_passphrase: SecretStr = Field(validation_alias="OKX_API_PASSPHRASE")
@@ -145,10 +149,22 @@ class TraderRuntimeSettings(_XuanshuBaseSettings):
 
 class GovernorRuntimeSettings(_XuanshuBaseSettings):
     redis_url: RedisDsn = Field(default="redis://redis:6379/0", validation_alias="REDIS_URL")
+    postgres_dsn: PostgresDsn = Field(
+        default="postgresql+psycopg://xuanshu:xuanshu@postgres:5432/xuanshu",
+        validation_alias="POSTGRES_DSN",
+    )
+    qdrant_url: AnyHttpUrl = Field(default="http://qdrant:6333", validation_alias="QDRANT_URL")
     openai_api_key: SecretStr = Field(validation_alias="OPENAI_API_KEY")
     ai_timeout_sec: int = Field(default=12, gt=0, le=300)
+    governor_interval_sec: int = Field(default=30, gt=0, le=3600)
 
 
 class NotifierRuntimeSettings(_XuanshuBaseSettings):
+    okx_symbols: tuple[str, ...] = Field(default=("BTC-USDT-SWAP", "ETH-USDT-SWAP"), min_length=1)
     telegram_bot_token: SecretStr = Field(validation_alias="TELEGRAM_BOT_TOKEN")
     telegram_chat_id: str = Field(min_length=1, validation_alias="TELEGRAM_CHAT_ID")
+    redis_url: RedisDsn = Field(default="redis://redis:6379/0", validation_alias="REDIS_URL")
+    postgres_dsn: PostgresDsn = Field(
+        default="postgresql+psycopg://xuanshu:xuanshu@postgres:5432/xuanshu",
+        validation_alias="POSTGRES_DSN",
+    )

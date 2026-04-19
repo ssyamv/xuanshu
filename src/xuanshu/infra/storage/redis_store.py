@@ -30,8 +30,16 @@ class RedisKeys:
         return f"xuanshu:runtime:symbol:{symbol}"
 
     @staticmethod
+    def budget_pool_summary() -> str:
+        return "xuanshu:runtime:budget_pool"
+
+    @staticmethod
     def fault_flags() -> str:
         return "xuanshu:runtime:fault_flags"
+
+    @staticmethod
+    def governor_health_summary() -> str:
+        return "xuanshu:runtime:governor_health"
 
 
 class SnapshotStore(Protocol):
@@ -59,6 +67,18 @@ class RuntimeStateStore(Protocol):
         ...
 
     def get_fault_flags(self) -> dict[str, object] | None:
+        ...
+
+    def set_budget_pool_summary(self, summary: dict[str, object]) -> None:
+        ...
+
+    def get_budget_pool_summary(self) -> dict[str, object] | None:
+        ...
+
+    def set_governor_health_summary(self, summary: dict[str, object]) -> None:
+        ...
+
+    def get_governor_health_summary(self) -> dict[str, object] | None:
         ...
 
 
@@ -193,3 +213,55 @@ class RedisRuntimeStateStore:
         except (TypeError, ValueError):
             return None
         return flags if isinstance(flags, dict) else None
+
+    def set_budget_pool_summary(self, summary: dict[str, object]) -> None:
+        try:
+            self._redis.set(RedisKeys.budget_pool_summary(), json.dumps(summary, separators=(",", ":")))
+        except RedisError:
+            return
+
+    def get_budget_pool_summary(self) -> dict[str, object] | None:
+        try:
+            payload = self._redis.get(RedisKeys.budget_pool_summary())
+        except RedisError:
+            return None
+        if payload is None:
+            return None
+        if isinstance(payload, bytes):
+            try:
+                payload = payload.decode("utf-8")
+            except UnicodeDecodeError:
+                return None
+        if not isinstance(payload, str):
+            return None
+        try:
+            summary = json.loads(payload)
+        except (TypeError, ValueError):
+            return None
+        return summary if isinstance(summary, dict) else None
+
+    def set_governor_health_summary(self, summary: dict[str, object]) -> None:
+        try:
+            self._redis.set(RedisKeys.governor_health_summary(), json.dumps(summary, separators=(",", ":")))
+        except RedisError:
+            return
+
+    def get_governor_health_summary(self) -> dict[str, object] | None:
+        try:
+            payload = self._redis.get(RedisKeys.governor_health_summary())
+        except RedisError:
+            return None
+        if payload is None:
+            return None
+        if isinstance(payload, bytes):
+            try:
+                payload = payload.decode("utf-8")
+            except UnicodeDecodeError:
+                return None
+        if not isinstance(payload, str):
+            return None
+        try:
+            summary = json.loads(payload)
+        except (TypeError, ValueError):
+            return None
+        return summary if isinstance(summary, dict) else None

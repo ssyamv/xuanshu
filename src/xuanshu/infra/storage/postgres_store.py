@@ -1,8 +1,15 @@
 from __future__ import annotations
 
+import json
 from copy import deepcopy
 from dataclasses import dataclass, field
+from datetime import UTC, date, datetime
+from enum import Enum
 from typing import Any
+
+from sqlalchemy import JSON, Column, DateTime, Integer, MetaData, Table, create_engine, select
+from sqlalchemy.engine import Engine
+from sqlalchemy.exc import SQLAlchemyError
 
 POSTGRES_TABLES = (
     "orders",
@@ -23,9 +30,24 @@ class PostgresRuntimeStore:
     written_rows: dict[str, list[dict[str, Any]]] = field(
         default_factory=lambda: {table: [] for table in POSTGRES_TABLES}
     )
+    _engine: Engine | None = field(init=False, default=None, repr=False)
+    _metadata: MetaData | None = field(init=False, default=None, repr=False)
+    _tables: dict[str, Table] = field(init=False, default_factory=dict, repr=False)
+    _database_disabled: bool = field(init=False, default=False, repr=False)
 
     def _append_row(self, table: str, payload: dict[str, Any]) -> None:
-        self.written_rows[table].append(deepcopy(payload))
+        row = deepcopy(payload)
+        self.written_rows[table].append(row)
+        if not self._ensure_database():
+            return
+        assert self._engine is not None
+        try:
+            with self._engine.begin() as connection:
+                connection.execute(
+                    self._tables[table].insert().values(payload=self._normalize_payload(row))
+                )
+        except SQLAlchemyError:
+            self._disable_database()
 
     def append_order_fact(self, payload: dict[str, Any]) -> None:
         self._append_row("orders", payload)
@@ -39,5 +61,92 @@ class PostgresRuntimeStore:
     def append_risk_event(self, payload: dict[str, Any]) -> None:
         self._append_row("risk_events", payload)
 
+    def append_strategy_snapshot(self, payload: dict[str, Any]) -> None:
+        self._append_row("strategy_snapshots", payload)
+
+    def append_expert_opinion(self, payload: dict[str, Any]) -> None:
+        self._append_row("expert_opinions", payload)
+
+    def append_governor_run(self, payload: dict[str, Any]) -> None:
+        self._append_row("governor_runs", payload)
+
     def save_checkpoint(self, payload: dict[str, Any]) -> None:
         self._append_row("execution_checkpoints", payload)
+
+    def append_notification_event(self, payload: dict[str, Any]) -> None:
+        self._append_row("notification_events", payload)
+
+    def list_recent_rows(self, table: str, limit: int = 10) -> list[dict[str, Any]]:
+        if table not in self.written_rows:
+            raise ValueError(f"unknown table: {table}")
+        if limit <= 0:
+            return []
+        if self._ensure_database():
+            assert self._engine is not None
+            query = (
+                select(self._tables[table].c.payload)
+                .order_by(self._tables[table].c.id.desc())
+                .limit(limit)
+            )
+            try:
+                with self._engine.begin() as connection:
+                    rows = connection.execute(query).all()
+            except SQLAlchemyError:
+                self._disable_database()
+            else:
+                return [deepcopy(row.payload) for row in rows]
+        return deepcopy(self.written_rows[table][-limit:][::-1])
+
+    def _ensure_database(self) -> bool:
+        if self._database_disabled:
+            return False
+        if self._engine is not None:
+            return True
+        try:
+            metadata = MetaData()
+            tables = {
+                table_name: Table(
+                    table_name,
+                    metadata,
+                    Column("id", Integer, primary_key=True, autoincrement=True),
+                    Column("payload", JSON, nullable=False),
+                    Column(
+                        "created_at",
+                        DateTime(timezone=True),
+                        nullable=False,
+                        default=lambda: datetime.now(UTC),
+                    ),
+                )
+                for table_name in POSTGRES_TABLES
+            }
+            engine = create_engine(self.dsn, future=True)
+            metadata.create_all(engine)
+        except (ModuleNotFoundError, SQLAlchemyError):
+            self._database_disabled = True
+            return False
+        self._metadata = metadata
+        self._tables = tables
+        self._engine = engine
+        return True
+
+    def _disable_database(self) -> None:
+        self._engine = None
+        self._metadata = None
+        self._tables = {}
+        self._database_disabled = True
+
+    def _normalize_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
+        return json.loads(json.dumps(payload, default=self._json_default))
+
+    @staticmethod
+    def _json_default(value: object) -> object:
+        if isinstance(value, datetime | date):
+            return value.isoformat()
+        if isinstance(value, Enum):
+            return value.value
+        model_dump = getattr(value, "model_dump", None)
+        if callable(model_dump):
+            return model_dump(mode="json")
+        if hasattr(value, "__dict__"):
+            return dict(vars(value))
+        raise TypeError(f"Object of type {type(value).__name__} is not JSON serializable")

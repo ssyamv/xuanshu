@@ -15,6 +15,7 @@ from xuanshu.execution.engine import build_client_order_id
 from xuanshu.infra.okx.private_ws import OkxPrivateStream
 from xuanshu.infra.okx.public_ws import OkxPublicStream
 from xuanshu.infra.okx.rest import OkxRestClient
+from xuanshu.infra.storage.postgres_store import PostgresRuntimeStore
 from xuanshu.infra.storage.redis_store import (
     RedisRuntimeStateStore,
     RedisSnapshotStore,
@@ -57,6 +58,7 @@ class TraderRuntime:
     components: TraderComponents
     snapshot_store: SnapshotStore
     runtime_store: RuntimeStateStore
+    history_store: PostgresRuntimeStore
     execution_coordinator: ExecutionCoordinator
     recovery_supervisor: RecoverySupervisor
     starting_nav: float
@@ -130,6 +132,10 @@ def build_runtime_state_store(settings: TraderRuntimeSettings) -> RuntimeStateSt
     return RedisRuntimeStateStore(redis_url=str(settings.redis_url))
 
 
+def build_history_store(settings: TraderRuntimeSettings) -> PostgresRuntimeStore:
+    return PostgresRuntimeStore(dsn=str(settings.postgres_dsn))
+
+
 def _more_restrictive_mode(left: RunMode, right: RunMode) -> RunMode:
     if _RUN_MODE_PRIORITY[left] >= _RUN_MODE_PRIORITY[right]:
         return left
@@ -149,6 +155,7 @@ def build_trader_runtime() -> TraderRuntime:
         components=components,
         snapshot_store=snapshot_store,
         runtime_store=build_runtime_state_store(settings),
+        history_store=build_history_store(settings),
         execution_coordinator=ExecutionCoordinator(rest_client=components.okx_rest_client),
         recovery_supervisor=RecoverySupervisor(rest_client=components.okx_rest_client),
         starting_nav=settings.trader_starting_nav,
@@ -186,6 +193,31 @@ async def _run_trader(runtime: TraderRuntime) -> None:
     runtime.startup_snapshot = runtime.startup_snapshot.model_copy(update={"market_mode": runtime.current_mode})
     runtime.startup_checkpoint.current_mode = runtime.current_mode
     runtime.runtime_store.set_run_mode(runtime.current_mode)
+    runtime.history_store.save_checkpoint(
+        {
+            "checkpoint_id": runtime.startup_checkpoint.checkpoint_id,
+            "current_mode": runtime.current_mode.value,
+            "needs_reconcile": runtime.startup_checkpoint.needs_reconcile,
+        }
+    )
+    runtime.runtime_store.set_budget_pool_summary(
+        {
+            "max_daily_loss": runtime.startup_checkpoint.budget_state.max_daily_loss,
+            "remaining_daily_loss": runtime.startup_checkpoint.budget_state.remaining_daily_loss,
+            "remaining_notional": runtime.startup_checkpoint.budget_state.remaining_notional,
+            "remaining_order_count": runtime.startup_checkpoint.budget_state.remaining_order_count,
+            "current_mode": runtime.current_mode.value,
+            "starting_nav": runtime.starting_nav,
+        }
+    )
+    if not runtime.opening_allowed:
+        runtime.history_store.append_risk_event(
+            {
+                "event_type": "runtime_mode_changed",
+                "symbol": "system",
+                "detail": f"startup gating tightened runtime to {runtime.current_mode.value}",
+            }
+        )
     await _wait_forever()
 
 

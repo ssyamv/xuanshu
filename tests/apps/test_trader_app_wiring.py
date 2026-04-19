@@ -12,6 +12,7 @@ from xuanshu.core.enums import ApprovalState, EntryType, OrderSide, RunMode, Sig
 from xuanshu.infra.okx.private_ws import OkxPrivateStream
 from xuanshu.infra.okx.public_ws import OkxPublicStream
 from xuanshu.infra.okx.rest import OkxRestClient
+from xuanshu.infra.storage.postgres_store import PostgresRuntimeStore
 from xuanshu.infra.storage.redis_store import RedisRuntimeStateStore, RedisSnapshotStore
 
 
@@ -30,6 +31,7 @@ class _FakeRedis:
 def _set_required_settings_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("XUANSHU_OKX_SYMBOLS", "BTC-USDT-SWAP, ETH-USDT-SWAP")
     monkeypatch.setenv("XUANSHU_TRADER_STARTING_NAV", "250000")
+    monkeypatch.setenv("POSTGRES_DSN", "postgresql+psycopg://xuanshu:xuanshu@localhost:5432/xuanshu")
     monkeypatch.setenv("OKX_API_KEY", "api-key")
     monkeypatch.setenv("OKX_API_SECRET", "api-secret")
     monkeypatch.setenv("OKX_API_PASSPHRASE", "api-passphrase")
@@ -75,6 +77,7 @@ def test_trader_entrypoint_loads_settings_and_threads_it_into_components(monkeyp
     assert seen_components.components.client_order_id_builder("BTC-USDT-SWAP", "breakout", 1) == "BTC-USDT-SWAP-breakout-000001"
     assert seen_components.settings.okx_api_key.get_secret_value() == "api-key"
     assert seen_components.components.okx_rest_client.api_key == "api-key"
+    assert seen_components.history_store.dsn == "postgresql+psycopg://xuanshu:xuanshu@localhost:5432/xuanshu"
     assert seen_components.components.okx_public_stream.url.endswith("/public")
     assert seen_components.components.okx_private_stream.url.endswith("/private")
 
@@ -427,6 +430,74 @@ def test_trader_runtime_rejects_unsupported_dispatch_event(monkeypatch) -> None:
 
     assert runtime.runtime_store.get_run_mode() == RunMode.NORMAL
     assert runtime.runtime_store.get_fault_flags() is None
+
+
+def test_trader_runtime_records_recovery_mode_change_for_notifier(monkeypatch) -> None:
+    _set_required_settings_env(monkeypatch)
+    fake_redis = _FakeRedis()
+    history_store = PostgresRuntimeStore(dsn="postgresql://xuanshu:xuanshu@localhost:5432/xuanshu")
+    monkeypatch.setattr(
+        trader_app,
+        "build_snapshot_store",
+        lambda settings: RedisSnapshotStore(redis_client=fake_redis),
+    )
+    monkeypatch.setattr(
+        trader_app,
+        "build_runtime_state_store",
+        lambda settings: RedisRuntimeStateStore(redis_client=fake_redis),
+    )
+    monkeypatch.setattr(trader_app, "build_history_store", lambda settings: history_store)
+
+    class _CheckpointProbe:
+        def can_open_new_risk(self, checkpoint) -> bool:
+            return False
+
+    async def _noop_wait_forever() -> None:
+        return None
+
+    monkeypatch.setattr(trader_app, "_wait_forever", _noop_wait_forever)
+
+    runtime = trader_app.build_trader_runtime()
+    runtime.components = trader_app.TraderComponents(
+        state_engine=runtime.components.state_engine,
+        risk_kernel=runtime.components.risk_kernel,
+        checkpoint_service=_CheckpointProbe(),
+        okx_rest_client=runtime.components.okx_rest_client,
+        okx_public_stream=runtime.components.okx_public_stream,
+        okx_private_stream=runtime.components.okx_private_stream,
+        client_order_id_builder=runtime.components.client_order_id_builder,
+    )
+
+    async def _run_and_close_runtime() -> None:
+        try:
+            await trader_app._run_trader(runtime)
+        finally:
+            await runtime.components.aclose()
+
+    asyncio.run(_run_and_close_runtime())
+
+    assert history_store.written_rows["execution_checkpoints"] == [
+        {
+            "checkpoint_id": "startup",
+            "current_mode": "reduce_only",
+            "needs_reconcile": False,
+        }
+    ]
+    assert history_store.written_rows["risk_events"] == [
+        {
+            "event_type": "runtime_mode_changed",
+            "symbol": "system",
+            "detail": "startup gating tightened runtime to reduce_only",
+        }
+    ]
+    assert runtime.runtime_store.get_budget_pool_summary() == {
+        "max_daily_loss": 100.0,
+        "remaining_daily_loss": 100.0,
+        "remaining_notional": 100.0,
+        "remaining_order_count": 10,
+        "current_mode": "reduce_only",
+        "starting_nav": 250000.0,
+    }
 
 
 def test_trader_entrypoint_fails_fast_without_required_settings(monkeypatch) -> None:
