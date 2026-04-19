@@ -231,6 +231,17 @@ async def test_codex_cli_research_provider_invokes_codex_exec(monkeypatch) -> No
     assert captured["capture_output"] is True
     assert captured["text"] is True
     assert captured["check"] is False
+    prompt = captured["cmd"][3]
+    assert '"thesis": string' in prompt
+    assert '"strategy_family": string' in prompt
+    assert '"entry_signal": string' in prompt
+    assert '"exit_stop_loss_bps": integer' in prompt
+    assert '"exit_take_profit_bps": integer' in prompt
+    assert '"risk_fraction": number' in prompt
+    assert '"max_hold_minutes": integer' in prompt
+    assert '"failure_modes": string[]' in prompt
+    assert '"invalidating_conditions": string[]' in prompt
+    assert "Do not return keys outside this schema." in prompt
 
 
 def test_create_research_provider_rejects_unsupported_provider() -> None:

@@ -16,7 +16,12 @@ _DEFAULT_RESEARCH_MODEL = "gpt-4.1-mini"
 _RESPONSES_API_URL = "https://api.openai.com/v1/responses"
 _RESEARCH_PROVIDER_INSTRUCTIONS = (
     "You are a strategy research helper inside Governor. "
-    "Return exactly one JSON object describing research analysis assistance only. "
+    "Return exactly one JSON object matching this schema and nothing else: "
+    '{"thesis": string, "strategy_family": string, "entry_signal": string, '
+    '"exit_stop_loss_bps": integer, "exit_take_profit_bps": integer, '
+    '"risk_fraction": number, "max_hold_minutes": integer, '
+    '"failure_modes": string[], "invalidating_conditions": string[]}. '
+    "Do not return keys outside this schema. "
     "Do not suggest executable trading actions. Return JSON only."
 )
 
