@@ -17,7 +17,7 @@ from xuanshu.contracts.events import (
 from xuanshu.core.enums import TraderEventType
 from xuanshu.infra.okx.private_ws import OkxPrivateStream
 from xuanshu.infra.okx.public_ws import OkxPublicStream
-from xuanshu.infra.okx.rest import OkxRestClient
+from xuanshu.infra.okx.rest import OkxBusinessError, OkxRestClient
 
 
 def test_okx_public_stream_builds_bbo_subscription_and_decodes_batched_events() -> None:
@@ -596,6 +596,83 @@ def test_okx_rest_client_place_order_posts_signed_body() -> None:
         "Content-Type": "application/json",
     }
     assert captured["raise_for_status_called"] is True
+
+    asyncio.run(client.aclose())
+
+
+def test_okx_rest_client_treats_top_level_non_zero_code_as_failure() -> None:
+    client = OkxRestClient(
+        base_url="https://www.okx.com",
+        api_key="api-key",
+        api_secret="api-secret",
+        passphrase="api-passphrase",
+    )
+    timestamp = "2026-04-19T00:00:00.000Z"
+
+    class DummyResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, object]:
+            return {
+                "code": "51000",
+                "msg": "Parameter error",
+                "data": [],
+            }
+
+    async def fake_get(path: str, *, headers: dict[str, str]) -> DummyResponse:
+        return DummyResponse()
+
+    client.client.get = fake_get  # type: ignore[method-assign]
+
+    with pytest.raises(OkxBusinessError, match="51000"):
+        asyncio.run(client.fetch_account_summary(timestamp))
+
+    asyncio.run(client.aclose())
+
+
+def test_okx_rest_client_place_order_treats_non_zero_scode_as_failure() -> None:
+    client = OkxRestClient(
+        base_url="https://www.okx.com",
+        api_key="api-key",
+        api_secret="api-secret",
+        passphrase="api-passphrase",
+    )
+    payload = {
+        "instId": "BTC-USDT-SWAP",
+        "tdMode": "cross",
+        "side": "buy",
+        "ordType": "market",
+        "sz": "1",
+        "clOrdId": "btc-breakout-000001",
+    }
+    timestamp = "2026-04-19T00:00:00.000Z"
+
+    class DummyResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, object]:
+            return {
+                "code": "0",
+                "msg": "",
+                "data": [
+                    {
+                        "ordId": "",
+                        "clOrdId": "btc-breakout-000001",
+                        "sCode": "51008",
+                        "sMsg": "Order failed",
+                    }
+                ],
+            }
+
+    async def fake_post(path: str, *, content: str, headers: dict[str, str]) -> DummyResponse:
+        return DummyResponse()
+
+    client.client.post = fake_post  # type: ignore[method-assign]
+
+    with pytest.raises(OkxBusinessError, match="51008"):
+        asyncio.run(client.place_order(payload, timestamp))
 
     asyncio.run(client.aclose())
 

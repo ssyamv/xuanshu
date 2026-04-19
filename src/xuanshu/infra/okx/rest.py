@@ -15,6 +15,14 @@ _PLACE_ORDER_OPTIONAL_FIELDS = frozenset({"px"})
 _PLACE_ORDER_ALLOWED_FIELDS = _PLACE_ORDER_REQUIRED_FIELDS | _PLACE_ORDER_OPTIONAL_FIELDS
 
 
+class OkxBusinessError(RuntimeError):
+    def __init__(self, code: str, message: str, payload: object) -> None:
+        self.code = code
+        self.message = message
+        self.payload = payload
+        super().__init__(f"OKX business error {code}: {message}")
+
+
 class OkxRestClient:
     def __init__(
         self,
@@ -102,7 +110,7 @@ class OkxRestClient:
         headers = self.build_signed_headers("POST", "/api/v5/trade/order", body, timestamp)
         response = await self.client.post("/api/v5/trade/order", content=body, headers=headers)
         response.raise_for_status()
-        return self._extract_data_payload(response.json())
+        return self._extract_order_data_payload(response.json())
 
     async def fetch_open_orders(self, symbol: str, timestamp: str) -> list[dict[str, object]]:
         self._validate_non_blank_fields({"instId": symbol})
@@ -127,14 +135,51 @@ class OkxRestClient:
         return f"{path}?{urlencode(params)}"
 
     def _extract_data_payload(self, payload: object) -> list[dict[str, object]]:
-        if not isinstance(payload, dict):
-            raise ValueError("OKX response payload must be an object")
-        data = payload.get("data")
-        if not isinstance(data, list):
-            raise ValueError("OKX response payload data must be a list")
+        payload_object = self._validate_payload_object(payload)
+        self._raise_for_business_error(payload_object)
+        data = self._extract_data_list(payload_object)
         if any(not isinstance(item, dict) for item in data):
             raise ValueError("OKX response payload data items must be objects")
         return data
+
+    def _extract_order_data_payload(self, payload: object) -> list[dict[str, object]]:
+        payload_object = self._validate_payload_object(payload)
+        self._raise_for_business_error(payload_object)
+        data = self._extract_data_list(payload_object)
+        if any(not isinstance(item, dict) for item in data):
+            raise ValueError("OKX response payload data items must be objects")
+        for item in data:
+            status_code = item.get("sCode")
+            if status_code is not None and str(status_code) != "0":
+                raise OkxBusinessError(
+                    code=str(status_code),
+                    message=str(item.get("sMsg") or payload_object.get("msg") or "order rejected"),
+                    payload=item,
+                )
+        return data
+
+    def _validate_payload_object(self, payload: object) -> dict[str, object]:
+        if not isinstance(payload, dict):
+            raise ValueError("OKX response payload must be an object")
+        return payload
+
+    def _extract_data_list(self, payload: dict[str, object]) -> list[object]:
+        data = payload.get("data")
+        if not isinstance(data, list):
+            raise ValueError("OKX response payload data must be a list")
+        return data
+
+    def _raise_for_business_error(self, payload: dict[str, object]) -> None:
+        code = payload.get("code")
+        if code is None:
+            return
+        if str(code) == "0":
+            return
+        raise OkxBusinessError(
+            code=str(code),
+            message=str(payload.get("msg") or "request rejected"),
+            payload=payload,
+        )
 
     def _validate_order_entry_fields(
         self,
