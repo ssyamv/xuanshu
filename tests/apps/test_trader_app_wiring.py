@@ -174,6 +174,7 @@ def test_single_host_deploy_contract_lists_prod_env_template() -> None:
 def test_single_host_deploy_doc_pins_compose_entrypoint() -> None:
     deploy_doc = Path("docs/operations/single-host-deploy.md").read_text(encoding="utf-8")
     compose = Path("docker-compose.yml").read_text(encoding="utf-8")
+    dockerfile = Path("Dockerfile").read_text(encoding="utf-8")
 
     assert "docker compose --env-file .env.prod up -d --build" in deploy_doc
     assert "restart: unless-stopped" in compose
@@ -181,6 +182,11 @@ def test_single_host_deploy_doc_pins_compose_entrypoint() -> None:
     assert "XUANSHU_RESEARCH_PROVIDER:" in compose
     assert "/dev/tcp/127.0.0.1/6333" in compose
     assert "wget -q -O-" not in compose
+    assert "XUANSHU_CODEX_AUTH_DIR" in compose
+    assert ":/root/.codex:ro" in compose
+    assert "apt-get update" in dockerfile
+    assert "nodejs npm" in dockerfile
+    assert "@openai/codex@0.121.0" in dockerfile
 
 
 def test_single_host_operations_docs_cover_research_triggering_and_approval() -> None:
