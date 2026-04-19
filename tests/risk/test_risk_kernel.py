@@ -60,40 +60,41 @@ def _build_snapshot(
 
 
 @pytest.mark.parametrize(
-    ("signal", "snapshot", "expected_reason"),
+    ("signal", "snapshot_factory", "expected_reason"),
     [
         (
             _build_signal(symbol="SOL-USDT-SWAP"),
-            _build_snapshot(),
+            lambda: _build_snapshot(),
             "symbol_not_whitelisted",
         ),
         (
             _build_signal(strategy_id=StrategyId.BREAKOUT),
-            _build_snapshot(strategy_enable_flags={StrategyId.BREAKOUT.value: False}),
+            lambda: _build_snapshot(strategy_enable_flags={StrategyId.BREAKOUT.value: False}),
             "strategy_disabled",
         ),
         (
             _build_signal(),
-            _build_snapshot(approval_state=ApprovalState.REJECTED),
+            lambda: _build_snapshot(approval_state=ApprovalState.REJECTED),
             "snapshot_not_approved",
         ),
         (
             _build_signal(),
-            _build_snapshot(expires_at=datetime.now(UTC) - timedelta(seconds=1)),
+            lambda: _build_snapshot(expires_at=datetime.now(UTC) - timedelta(seconds=1)),
             "snapshot_inactive",
         ),
         (
             _build_signal(),
-            _build_snapshot(effective_from=datetime.now(UTC) + timedelta(minutes=1)),
+            lambda: _build_snapshot(effective_from=datetime.now(UTC) + timedelta(minutes=1)),
             "snapshot_inactive",
         ),
     ],
 )
 def test_risk_kernel_blocks_open_when_governance_snapshot_disallows_it(
     signal: CandidateSignal,
-    snapshot: StrategyConfigSnapshot,
+    snapshot_factory,
     expected_reason: str,
 ) -> None:
+    snapshot = snapshot_factory()
     decision = RiskKernel(nav=100_000.0).evaluate(signal, snapshot)
 
     assert decision.allow_open is False
