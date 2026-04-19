@@ -5,6 +5,7 @@ import pytest
 from xuanshu.contracts.risk import RiskDecision
 from xuanshu.core.enums import RunMode
 from xuanshu.execution.coordinator import ExecutionCoordinator
+from xuanshu.execution.engine import build_market_order_payload
 
 
 class _FakeRestClient:
@@ -17,10 +18,10 @@ class _FakeRestClient:
 
 
 @pytest.mark.asyncio
-async def test_execution_coordinator_places_idempotent_order_once() -> None:
+async def test_execution_coordinator_returns_cached_open_even_if_later_decision_disallows_open() -> None:
     rest = _FakeRestClient()
     coordinator = ExecutionCoordinator(rest_client=rest)
-    decision = RiskDecision(
+    allow_open_decision = RiskDecision(
         decision_id="dec-1",
         generated_at=datetime.now(UTC),
         symbol="BTC-USDT-SWAP",
@@ -37,17 +38,33 @@ async def test_execution_coordinator_places_idempotent_order_once() -> None:
         side="buy",
         size=1.0,
         client_order_id="btc-breakout-000001",
-        decision=decision,
+        decision=allow_open_decision,
         timestamp="2026-04-19T00:00:00.000Z",
     )
-    await coordinator.submit_market_open(
+    cached_response = await coordinator.submit_market_open(
         symbol="BTC-USDT-SWAP",
         side="buy",
         size=1.0,
         client_order_id="btc-breakout-000001",
-        decision=decision,
+        decision=RiskDecision(
+            decision_id="dec-2",
+            generated_at=datetime.now(UTC),
+            symbol="BTC-USDT-SWAP",
+            allow_open=False,
+            allow_close=True,
+            max_position=100.0,
+            max_order_size=1.0,
+            risk_mode=RunMode.NORMAL,
+            reason_codes=[],
+        ),
         timestamp="2026-04-19T00:00:00.000Z",
     )
 
+    assert cached_response == {"data": [{"ordId": "1", "clOrdId": "btc-breakout-000001", "sCode": "0"}]}
     assert len(rest.calls) == 1
     assert coordinator.inflight_by_client_order_id["btc-breakout-000001"]["symbol"] == "BTC-USDT-SWAP"
+
+
+def test_build_market_order_payload_rejects_blank_client_order_id() -> None:
+    with pytest.raises(ValueError, match=r"invalid client_order_id"):
+        build_market_order_payload("BTC-USDT-SWAP", "buy", 1.0, "   ")

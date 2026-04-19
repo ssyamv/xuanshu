@@ -31,6 +31,7 @@ def build_market_order_payload(symbol: str, side: str, size: float, client_order
         raise ValueError(f"invalid side: {side!r}")
     if size <= 0:
         raise ValueError(f"invalid size: {size!r}")
+    _validate_component("client_order_id", client_order_id, re.compile(r"^\S+$"))
     return {
         "instId": symbol,
         "tdMode": "cross",

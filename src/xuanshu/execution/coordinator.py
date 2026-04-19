@@ -26,10 +26,10 @@ class ExecutionCoordinator:
         decision: RiskDecision,
         timestamp: str,
     ) -> dict[str, object] | None:
-        if not decision.allow_open:
-            return None
         if client_order_id in self.inflight_by_client_order_id:
             return self.inflight_by_client_order_id[client_order_id]["response"]
+        if not decision.allow_open:
+            return None
         payload = build_market_order_payload(symbol, side, size, client_order_id)
         response = await self.rest_client.place_order(payload, timestamp)
         self.inflight_by_client_order_id[client_order_id] = {
