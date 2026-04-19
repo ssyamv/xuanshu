@@ -71,6 +71,11 @@ def test_build_market_order_payload_rejects_blank_client_order_id() -> None:
         build_market_order_payload("BTC-USDT-SWAP", "buy", 1.0, "   ")
 
 
+def test_build_market_order_payload_rejects_non_string_side() -> None:
+    with pytest.raises(ValueError, match=r"invalid side"):
+        build_market_order_payload("BTC-USDT-SWAP", ["buy"], 1.0, "btc-breakout-000001")
+
+
 class _BlockingRestClient:
     def __init__(self) -> None:
         self.calls: list[tuple[dict[str, str], str]] = []
@@ -136,5 +141,11 @@ async def test_execution_coordinator_deduplicates_inflight_open_submission() -> 
 
 @pytest.mark.parametrize("size", ["1", None, object()])
 def test_build_market_order_payload_rejects_non_numeric_size(size: object) -> None:
+    with pytest.raises(ValueError, match=r"invalid size"):
+        build_market_order_payload("BTC-USDT-SWAP", "buy", size, "btc-breakout-000001")
+
+
+@pytest.mark.parametrize("size", [float("nan"), float("inf"), float("-inf")])
+def test_build_market_order_payload_rejects_non_finite_size(size: float) -> None:
     with pytest.raises(ValueError, match=r"invalid size"):
         build_market_order_payload("BTC-USDT-SWAP", "buy", size, "btc-breakout-000001")

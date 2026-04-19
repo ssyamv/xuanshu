@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import re
 
 
@@ -27,11 +28,13 @@ def build_client_order_id(symbol: str, strategy_id: str, sequence: int) -> str:
 
 def build_market_order_payload(symbol: str, side: str, size: float, client_order_id: str) -> dict[str, str]:
     _validate_component("symbol", symbol, _SYMBOL_PATTERN)
+    if not isinstance(side, str):
+        raise ValueError(f"invalid side: {side!r}")
     if side not in {"buy", "sell"}:
         raise ValueError(f"invalid side: {side!r}")
     if not isinstance(size, int | float) or isinstance(size, bool):
         raise ValueError(f"invalid size: {size!r}")
-    if size <= 0:
+    if not math.isfinite(size) or size <= 0:
         raise ValueError(f"invalid size: {size!r}")
     _validate_component("client_order_id", client_order_id, re.compile(r"^\S+$"))
     return {
