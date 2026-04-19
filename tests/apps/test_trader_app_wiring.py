@@ -1,13 +1,30 @@
 import asyncio
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
 from pydantic import ValidationError
 
 import xuanshu.apps.trader as trader_app
+from xuanshu.contracts.events import OrderbookTopEvent
+from xuanshu.contracts.risk import CandidateSignal
+from xuanshu.core.enums import ApprovalState, EntryType, OrderSide, RunMode, SignalUrgency, StrategyId, TraderEventType
 from xuanshu.infra.okx.private_ws import OkxPrivateStream
 from xuanshu.infra.okx.public_ws import OkxPublicStream
 from xuanshu.infra.okx.rest import OkxRestClient
+from xuanshu.infra.storage.redis_store import RedisRuntimeStateStore, RedisSnapshotStore
+
+
+class _FakeRedis:
+    def __init__(self) -> None:
+        self.values: dict[str, bytes] = {}
+
+    def set(self, key: str, value: str) -> bool:
+        self.values[key] = value.encode("utf-8")
+        return True
+
+    def get(self, key: str) -> bytes | None:
+        return self.values.get(key)
 
 
 def _set_required_settings_env(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -106,9 +123,19 @@ def test_trader_runtime_loads_starting_nav_from_settings(monkeypatch) -> None:
     assert runtime.starting_nav == 250000.0
 
 
-def test_trader_runtime_reads_latest_snapshot_from_shared_store(monkeypatch, tmp_path) -> None:
+def test_trader_runtime_reads_latest_snapshot_from_shared_store(monkeypatch) -> None:
     _set_required_settings_env(monkeypatch)
-    monkeypatch.setenv("XUANSHU_SHARED_STATE_DIR", str(tmp_path))
+    fake_redis = _FakeRedis()
+    monkeypatch.setattr(
+        trader_app,
+        "build_snapshot_store",
+        lambda settings: RedisSnapshotStore(redis_client=fake_redis),
+    )
+    monkeypatch.setattr(
+        trader_app,
+        "build_runtime_state_store",
+        lambda settings: RedisRuntimeStateStore(redis_client=fake_redis),
+    )
 
     runtime = trader_app.build_trader_runtime()
     runtime.snapshot_store.set_latest_snapshot(
@@ -189,6 +216,117 @@ def test_trader_runtime_stays_alive_when_startup_gating_blocks_opening(monkeypat
     asyncio.run(_run_and_close_runtime())
 
     assert blocked == ["waited"]
+
+
+def test_trader_runtime_applies_snapshot_mode_to_runtime_and_risk(monkeypatch) -> None:
+    _set_required_settings_env(monkeypatch)
+    fake_redis = _FakeRedis()
+    monkeypatch.setattr(
+        trader_app,
+        "build_snapshot_store",
+        lambda settings: RedisSnapshotStore(redis_client=fake_redis),
+    )
+    monkeypatch.setattr(
+        trader_app,
+        "build_runtime_state_store",
+        lambda settings: RedisRuntimeStateStore(redis_client=fake_redis),
+    )
+
+    runtime = trader_app.build_trader_runtime()
+    runtime.snapshot_store.set_latest_snapshot(
+        "snap-halted",
+        runtime.startup_snapshot.model_copy(
+            update={
+                "version_id": "snap-halted",
+                "market_mode": RunMode.HALTED,
+                "approval_state": ApprovalState.APPROVED,
+            }
+        ),
+    )
+
+    async def _noop_wait_forever() -> None:
+        return None
+
+    monkeypatch.setattr(trader_app, "_wait_forever", _noop_wait_forever)
+
+    async def _run_and_close_runtime() -> None:
+        try:
+            await trader_app._run_trader(runtime)
+        finally:
+            await runtime.components.aclose()
+
+    asyncio.run(_run_and_close_runtime())
+
+    decision = runtime.components.risk_kernel.evaluate(
+        CandidateSignal(
+            symbol="BTC-USDT-SWAP",
+            strategy_id=StrategyId.BREAKOUT,
+            side=OrderSide.BUY,
+            entry_type=EntryType.MARKET,
+            urgency=SignalUrgency.HIGH,
+            confidence=0.7,
+            max_hold_ms=3_000,
+            cancel_after_ms=750,
+            risk_tag="trend",
+        ),
+        runtime.startup_snapshot,
+    )
+
+    assert runtime.current_mode == RunMode.HALTED
+    assert runtime.runtime_store.get_run_mode() == RunMode.HALTED
+    assert decision.allow_open is False
+    assert "mode_blocks_open" in decision.reason_codes
+
+
+def test_trader_runtime_dispatches_market_event_updates_summary_and_mode(monkeypatch) -> None:
+    _set_required_settings_env(monkeypatch)
+    fake_redis = _FakeRedis()
+
+    monkeypatch.setattr(
+        trader_app,
+        "build_snapshot_store",
+        lambda settings: RedisSnapshotStore(redis_client=fake_redis),
+    )
+    monkeypatch.setattr(
+        trader_app,
+        "build_runtime_state_store",
+        lambda settings: RedisRuntimeStateStore(redis_client=fake_redis),
+    )
+
+    async def _noop_wait_forever() -> None:
+        return None
+
+    monkeypatch.setattr(trader_app, "_wait_forever", _noop_wait_forever)
+    runtime = trader_app.build_trader_runtime()
+
+    async def _exercise_runtime() -> None:
+        try:
+            await trader_app._dispatch_runtime_event(
+                runtime,
+                OrderbookTopEvent(
+                    event_type=TraderEventType.ORDERBOOK_TOP,
+                    symbol="BTC-USDT-SWAP",
+                    exchange="okx",
+                    generated_at=datetime.now(UTC),
+                    public_sequence="pub-1",
+                    bid_price=100.0,
+                    ask_price=100.1,
+                    bid_size=5.0,
+                    ask_size=6.0,
+                ),
+            )
+        finally:
+            await runtime.components.aclose()
+
+    asyncio.run(_exercise_runtime())
+
+    assert runtime.runtime_store.get_symbol_runtime_summary("BTC-USDT-SWAP")["symbol"] == "BTC-USDT-SWAP"
+    assert runtime.runtime_store.get_run_mode() in {
+        RunMode.NORMAL,
+        RunMode.DEGRADED,
+        RunMode.REDUCE_ONLY,
+        RunMode.HALTED,
+    }
 
 
 def test_trader_entrypoint_fails_fast_without_required_settings(monkeypatch) -> None:
