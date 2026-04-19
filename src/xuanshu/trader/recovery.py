@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import math
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -41,8 +43,10 @@ class RecoverySupervisor:
         checkpoint: ExecutionCheckpoint,
         timestamp: str,
     ) -> dict[str, object]:
-        open_orders = await self.rest_client.fetch_open_orders(symbol, timestamp)
-        positions = await self.rest_client.fetch_positions(symbol, timestamp)
+        open_orders, positions = await asyncio.gather(
+            self.rest_client.fetch_open_orders(symbol, timestamp),
+            self.rest_client.fetch_positions(symbol, timestamp),
+        )
         checkpoint_orders = _normalize_checkpoint_items(checkpoint.open_orders_snapshot, fields=_ORDER_FIELDS)
         exchange_orders = _normalize_exchange_items(open_orders, field_aliases=_ORDER_FIELD_ALIASES)
         checkpoint_positions = _normalize_checkpoint_items(checkpoint.positions_snapshot, fields=_POSITION_FIELDS)
@@ -61,7 +65,10 @@ class RecoverySupervisor:
 
 
 def _normalize_checkpoint_items(items: list[object], *, fields: tuple[str, ...]) -> list[tuple[object, ...]]:
-    return sorted(tuple(getattr(item, field) for field in fields) for item in items)
+    return sorted(
+        (tuple(getattr(item, field) for field in fields) for item in items),
+        key=_item_sort_key,
+    )
 
 
 def _normalize_exchange_items(
@@ -71,13 +78,34 @@ def _normalize_exchange_items(
 ) -> list[tuple[object, ...]]:
     normalized_items: list[tuple[object, ...]] = []
     for item in items:
+        payload = item if isinstance(item, dict) else {}
         normalized_items.append(
             tuple(
-                _normalize_exchange_value(field, item.get(exchange_field))
+                _normalize_exchange_value(field, payload.get(exchange_field))
                 for field, exchange_field in field_aliases.items()
             )
         )
-    return sorted(normalized_items)
+    return sorted(normalized_items, key=_item_sort_key)
+
+
+def _item_sort_key(item: tuple[object, ...]) -> tuple[tuple[str, object], ...]:
+    return tuple(_value_sort_key(value) for value in item)
+
+
+def _value_sort_key(value: object) -> tuple[str, object]:
+    if value is None:
+        return ("none", "")
+    if isinstance(value, float):
+        if math.isnan(value):
+            return ("nan", "")
+        return ("float", value)
+    if isinstance(value, bool):
+        return ("bool", value)
+    if isinstance(value, int):
+        return ("int", value)
+    if isinstance(value, str):
+        return ("str", value)
+    return ("repr", repr(value))
 
 
 def _normalize_exchange_value(field: str, value: object) -> object:
