@@ -70,6 +70,14 @@ def test_redis_snapshot_store_returns_none_for_invalid_payload() -> None:
     assert store.get_latest_snapshot() is None
 
 
+def test_redis_snapshot_store_ignores_malformed_non_utf8_bytes() -> None:
+    client = _FakeRedis()
+    client.values[RedisKeys.latest_snapshot()] = b"\xff\xfe\xfd"
+    store = RedisSnapshotStore(redis_client=client)
+
+    assert store.get_latest_snapshot() is None
+
+
 def test_redis_runtime_state_store_round_trips_run_mode() -> None:
     store = RedisRuntimeStateStore(redis_client=_FakeRedis())
 
@@ -109,6 +117,14 @@ def test_redis_runtime_state_store_ignores_malformed_fault_flags_json() -> None:
     store = RedisRuntimeStateStore(redis_client=client)
 
     assert store.get_fault_flags() is None
+
+
+def test_redis_runtime_state_store_ignores_malformed_non_utf8_run_mode_bytes() -> None:
+    client = _FakeRedis()
+    client.values[RedisKeys.run_mode()] = b"\xff\xfe\xfd"
+    store = RedisRuntimeStateStore(redis_client=client)
+
+    assert store.get_run_mode() is None
 
 
 def test_postgres_store_exposes_append_fact_methods() -> None:

@@ -89,7 +89,10 @@ class RedisSnapshotStore:
         if payload is None:
             return self.latest_snapshot
         if isinstance(payload, bytes):
-            payload = payload.decode("utf-8")
+            try:
+                payload = payload.decode("utf-8")
+            except UnicodeDecodeError:
+                return self.latest_snapshot
         if not isinstance(payload, str):
             return self.latest_snapshot
         try:
@@ -126,7 +129,10 @@ class RedisRuntimeStateStore:
         if payload is None:
             return self._latest_mode
         if isinstance(payload, bytes):
-            payload = payload.decode("utf-8")
+            try:
+                payload = payload.decode("utf-8")
+            except UnicodeDecodeError:
+                return self._latest_mode
         if not isinstance(payload, str) or not payload:
             return self._latest_mode
         try:
