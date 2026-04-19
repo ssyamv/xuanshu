@@ -447,6 +447,31 @@ def test_okx_private_stream_accepts_blank_available_equity_in_account_updates() 
     assert account_events[0].available_balance == 0.0
 
 
+def test_okx_private_stream_accepts_blank_margin_ratio_in_account_updates() -> None:
+    stream = OkxPrivateStream(url="wss://ws.okx.com:8443/ws/v5/private")
+
+    account_events = stream.decode_message(
+        {
+            "arg": {"channel": "account"},
+            "data": [
+                {
+                    "totalEq": "1000",
+                    "availEq": "800",
+                    "mgnRatio": "",
+                    "uTime": "1713484810000",
+                }
+            ],
+        },
+        sequence="pri-3",
+    )
+
+    assert len(account_events) == 1
+    assert isinstance(account_events[0], AccountSnapshotEvent)
+    assert account_events[0].equity == 1000.0
+    assert account_events[0].available_balance == 800.0
+    assert account_events[0].margin_ratio == 0.0
+
+
 def test_okx_private_stream_normalizes_decode_failures_into_faults() -> None:
     stream = OkxPrivateStream(url="wss://ws.okx.com:8443/ws/v5/private")
 

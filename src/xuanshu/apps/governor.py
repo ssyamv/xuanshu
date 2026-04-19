@@ -337,9 +337,6 @@ async def _run_governor_cycle(runtime: GovernorRuntime) -> None:
         publish_snapshot=_publish_snapshot,
     )
     runtime.last_snapshot = published_snapshot or result.snapshot
-    manual_release_target = state_summary.get("manual_release_target")
-    if result.status == "published" and isinstance(manual_release_target, str) and manual_release_target:
-        runtime.runtime_store.clear_manual_release_target()
     runtime.history_store.append_governor_run(
         {
             "version_id": runtime.last_snapshot.version_id,

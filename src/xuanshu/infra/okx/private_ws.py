@@ -218,7 +218,7 @@ class OkxPrivateStream:
             private_sequence=sequence,
             equity=self._required_float(item["totalEq"], field="totalEq"),
             available_balance=self._optional_float(item.get("availEq"), default=0.0),
-            margin_ratio=self._required_float(item["mgnRatio"], field="mgnRatio"),
+            margin_ratio=self._optional_float(item.get("mgnRatio"), default=0.0),
         )
 
     def _build_fault(

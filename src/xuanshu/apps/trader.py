@@ -305,17 +305,21 @@ def _next_client_order_id(runtime: TraderRuntime, signal: CandidateSignal) -> st
     )
 
 
+def _can_relax_to_snapshot_mode(runtime: TraderRuntime, snapshot: StrategyConfigSnapshot) -> bool:
+    return (
+        runtime.current_mode == RunMode.HALTED
+        and snapshot.approval_state == ApprovalState.APPROVED
+        and snapshot.market_mode != RunMode.HALTED
+        and runtime.components.checkpoint_service.can_open_new_risk(runtime.startup_checkpoint)
+        and not runtime.components.state_engine.fault_flags
+    )
+
+
 async def _evaluate_symbol(runtime: TraderRuntime, symbol: str) -> None:
     latest_snapshot = runtime.snapshot_store.get_latest_snapshot()
     if latest_snapshot is not None:
         runtime.startup_snapshot = latest_snapshot
-        if (
-            runtime.current_mode == RunMode.HALTED
-            and latest_snapshot.approval_state == ApprovalState.APPROVED
-            and latest_snapshot.market_mode != RunMode.HALTED
-            and runtime.components.checkpoint_service.can_open_new_risk(runtime.startup_checkpoint)
-            and not runtime.components.state_engine.fault_flags
-        ):
+        if _can_relax_to_snapshot_mode(runtime, latest_snapshot):
             runtime.current_mode = latest_snapshot.market_mode
             runtime.components.state_engine.set_run_mode(runtime.current_mode)
             runtime.opening_allowed = True
@@ -478,6 +482,9 @@ async def _run_trader(runtime: TraderRuntime) -> None:
     runtime.current_mode = _more_restrictive_mode(runtime.current_mode, runtime.startup_snapshot.market_mode)
     if not runtime.opening_allowed:
         runtime.current_mode = _more_restrictive_mode(runtime.current_mode, RunMode.REDUCE_ONLY)
+    if _can_relax_to_snapshot_mode(runtime, runtime.startup_snapshot):
+        runtime.current_mode = runtime.startup_snapshot.market_mode
+        runtime.opening_allowed = True
     runtime.components.state_engine.set_run_mode(runtime.current_mode)
     runtime.startup_snapshot = runtime.startup_snapshot.model_copy(update={"market_mode": runtime.current_mode})
     runtime.startup_checkpoint.current_mode = runtime.current_mode

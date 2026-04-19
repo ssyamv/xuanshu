@@ -30,6 +30,11 @@ class _FakeRedis:
     def get(self, key: str) -> bytes | None:
         return self.values.get(key)
 
+    def delete(self, key: str) -> int:
+        existed = key in self.values
+        self.values.pop(key, None)
+        return 1 if existed else 0
+
 
 def _set_required_settings_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("OPENAI_API_KEY", "openai-key")
@@ -756,6 +761,45 @@ def test_governor_loop_short_circuits_wait_on_event_trigger(monkeypatch) -> None
 
     assert [snapshot.version_id for snapshot in runtime.published_snapshots] == ["snap-schedule", "snap-risk_event"]
     assert waits == [30, 0]
+
+
+def test_governor_cycle_keeps_manual_release_target_after_publishing_release_snapshot(monkeypatch) -> None:
+    _set_required_settings_env(monkeypatch)
+    _clear_unrelated_settings_env(monkeypatch)
+    fake_redis = _FakeRedis()
+
+    class _Runner:
+        async def run(self, state_summary):
+            now = datetime.now(UTC)
+            return {
+                "version_id": "snap-release",
+                "generated_at": now.isoformat().replace("+00:00", "Z"),
+                "effective_from": now.isoformat().replace("+00:00", "Z"),
+                "expires_at": (now + timedelta(minutes=5)).isoformat().replace("+00:00", "Z"),
+                "symbol_whitelist": ["BTC-USDT-SWAP"],
+                "strategy_enable_flags": {"breakout": True, "mean_reversion": False, "risk_pause": True},
+                "risk_multiplier": 0.5,
+                "per_symbol_max_position": 0.12,
+                "max_leverage": 2,
+                "market_mode": RunMode.DEGRADED,
+                "approval_state": ApprovalState.APPROVED,
+                "source_reason": "cycle",
+                "ttl_sec": 300,
+            }
+
+    monkeypatch.setattr(governor_app, "build_governor_client", lambda settings: GovernorClient(_Runner()))
+    monkeypatch.setattr(
+        governor_app,
+        "build_runtime_state_store",
+        lambda settings: governor_app.RedisRuntimeStateStore(redis_client=fake_redis),
+    )
+
+    runtime = governor_app.build_governor_runtime()
+    runtime.runtime_store.set_manual_release_target("degraded")
+
+    asyncio.run(governor_app._run_governor_cycle(runtime))
+
+    assert runtime.runtime_store.get_manual_release_target() == "degraded"
 
 
 def test_governor_cycle_freezes_snapshot_and_tracks_consecutive_failures(monkeypatch) -> None:
