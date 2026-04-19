@@ -353,6 +353,44 @@ async def test_notifier_service_emits_proactive_notifications_from_history_rows(
 
 
 @pytest.mark.asyncio
+async def test_notifier_service_ignores_account_snapshot_updated_risk_events_for_proactive_notifications() -> None:
+    history = PostgresRuntimeStore(dsn="postgresql://xuanshu:xuanshu@localhost:5432/xuanshu")
+    history.append_risk_event(
+        {
+            "event_type": "account_snapshot_updated",
+            "symbol": "system",
+            "detail": "equity=918.27",
+        }
+    )
+    history.append_risk_event(
+        {
+            "event_type": "runtime_mode_changed",
+            "symbol": "system",
+            "detail": "startup gating tightened runtime to reduce_only",
+        }
+    )
+    service = NotifierService(
+        okx_symbols=("BTC-USDT-SWAP",),
+        runtime_store=_RuntimeStore(),
+        snapshot_store=_SnapshotStore(),
+        history_store=history,
+    )
+
+    delivered: list[str] = []
+
+    class _Adapter:
+        async def send_text(self, payload: TextMessagePayload) -> None:
+            delivered.append(payload.text)
+
+    flushed = await service.flush_proactive_notifications(adapter=_Adapter())
+
+    assert flushed == 1
+    assert delivered == [
+        "Risk event: runtime_mode_changed startup gating tightened runtime to reduce_only",
+    ]
+
+
+@pytest.mark.asyncio
 async def test_notifier_service_marks_recovery_failures_as_critical_retriable_notifications() -> None:
     history = PostgresRuntimeStore(dsn="postgresql://xuanshu:xuanshu@localhost:5432/xuanshu")
     history.append_risk_event(

@@ -429,14 +429,6 @@ async def _dispatch_runtime_event(runtime: TraderRuntime, event: object) -> None
                 "detail": f"{event.code}: {event.detail}",
             }
         )
-    elif isinstance(event, AccountSnapshotEvent):
-        runtime.history_store.append_risk_event(
-            {
-                "event_type": "account_snapshot_updated",
-                "symbol": "system",
-                "detail": f"equity={event.equity}",
-            }
-        )
     _publish_runtime_state(runtime, symbol=symbol)
     if isinstance(event, (OrderUpdateEvent, PositionUpdateEvent, AccountSnapshotEvent)):
         runtime.startup_checkpoint = _build_execution_checkpoint(runtime, checkpoint_id="runtime")

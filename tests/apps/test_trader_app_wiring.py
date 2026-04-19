@@ -457,6 +457,53 @@ def test_trader_runtime_dispatches_market_event_updates_summary_and_mode(monkeyp
     assert runtime.runtime_store.get_run_mode() == RunMode.HALTED
 
 
+def test_trader_runtime_does_not_record_account_snapshot_as_risk_event(monkeypatch) -> None:
+    _set_required_settings_env(monkeypatch)
+    fake_redis = _FakeRedis()
+    history_store = PostgresRuntimeStore(dsn="postgresql://xuanshu:xuanshu@localhost:5432/xuanshu")
+
+    monkeypatch.setattr(
+        trader_app,
+        "build_snapshot_store",
+        lambda settings: RedisSnapshotStore(redis_client=fake_redis),
+    )
+    monkeypatch.setattr(
+        trader_app,
+        "build_runtime_state_store",
+        lambda settings: RedisRuntimeStateStore(redis_client=fake_redis),
+    )
+    monkeypatch.setattr(trader_app, "build_history_store", lambda settings: history_store)
+
+    async def _noop_wait_forever() -> None:
+        return None
+
+    monkeypatch.setattr(trader_app, "_wait_forever", _noop_wait_forever)
+    runtime = trader_app.build_trader_runtime()
+    _replace_runtime_streams_with_empty_event_streams(runtime)
+
+    async def _exercise_runtime() -> None:
+        try:
+            await trader_app._run_trader(runtime)
+            await trader_app._dispatch_runtime_event(
+                runtime,
+                AccountSnapshotEvent(
+                    event_type=TraderEventType.ACCOUNT_SNAPSHOT,
+                    exchange="okx",
+                    generated_at=datetime.now(UTC),
+                    private_sequence="pri-1",
+                    equity=918.27,
+                    available_balance=800.0,
+                    margin_ratio=0.15,
+                ),
+            )
+        finally:
+            await runtime.components.aclose()
+
+    asyncio.run(_exercise_runtime())
+
+    assert history_store.list_recent_rows("risk_events", limit=5) == []
+
+
 def test_trader_runtime_dispatches_fault_event_updates_fault_flags(monkeypatch) -> None:
     _set_required_settings_env(monkeypatch)
     fake_redis = _FakeRedis()
