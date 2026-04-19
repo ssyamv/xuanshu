@@ -182,6 +182,7 @@ async def _run_trader(runtime: TraderRuntime) -> None:
     runtime.current_mode = runtime.startup_snapshot.market_mode
     if not runtime.opening_allowed:
         runtime.current_mode = _more_restrictive_mode(runtime.current_mode, RunMode.REDUCE_ONLY)
+    runtime.components.state_engine.set_run_mode(runtime.current_mode)
     runtime.startup_snapshot = runtime.startup_snapshot.model_copy(update={"market_mode": runtime.current_mode})
     runtime.startup_checkpoint.current_mode = runtime.current_mode
     runtime.runtime_store.set_run_mode(runtime.current_mode)

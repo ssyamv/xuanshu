@@ -298,9 +298,20 @@ def test_trader_runtime_dispatches_market_event_updates_summary_and_mode(monkeyp
 
     monkeypatch.setattr(trader_app, "_wait_forever", _noop_wait_forever)
     runtime = trader_app.build_trader_runtime()
+    runtime.snapshot_store.set_latest_snapshot(
+        "snap-halted",
+        runtime.startup_snapshot.model_copy(
+            update={
+                "version_id": "snap-halted",
+                "market_mode": RunMode.HALTED,
+                "approval_state": ApprovalState.APPROVED,
+            }
+        ),
+    )
 
     async def _exercise_runtime() -> None:
         try:
+            await trader_app._run_trader(runtime)
             await trader_app._dispatch_runtime_event(
                 runtime,
                 OrderbookTopEvent(
@@ -320,13 +331,11 @@ def test_trader_runtime_dispatches_market_event_updates_summary_and_mode(monkeyp
 
     asyncio.run(_exercise_runtime())
 
-    assert runtime.runtime_store.get_symbol_runtime_summary("BTC-USDT-SWAP")["symbol"] == "BTC-USDT-SWAP"
-    assert runtime.runtime_store.get_run_mode() in {
-        RunMode.NORMAL,
-        RunMode.DEGRADED,
-        RunMode.REDUCE_ONLY,
-        RunMode.HALTED,
-    }
+    summary = runtime.runtime_store.get_symbol_runtime_summary("BTC-USDT-SWAP")
+    assert summary["symbol"] == "BTC-USDT-SWAP"
+    assert summary["run_mode"] == RunMode.HALTED.value
+    assert runtime.components.state_engine.current_run_mode == RunMode.HALTED
+    assert runtime.runtime_store.get_run_mode() == RunMode.HALTED
 
 
 def test_trader_entrypoint_fails_fast_without_required_settings(monkeypatch) -> None:
