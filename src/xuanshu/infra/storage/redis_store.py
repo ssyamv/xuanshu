@@ -1,10 +1,14 @@
 from __future__ import annotations
 
-import os
+import json
 import re
-from pathlib import Path
 from typing import Protocol
 
+from pydantic import ValidationError
+from redis import Redis
+from redis.exceptions import RedisError
+
+from xuanshu.core.enums import RunMode
 from xuanshu.contracts.strategy import StrategyConfigSnapshot
 
 
@@ -25,34 +29,143 @@ class RedisKeys:
             raise ValueError(f"invalid runtime symbol: {symbol!r}")
         return f"xuanshu:runtime:symbol:{symbol}"
 
+    @staticmethod
+    def fault_flags() -> str:
+        return "xuanshu:runtime:fault_flags"
+
 
 class SnapshotStore(Protocol):
-    def set_latest_snapshot(self, version_id: str, snapshot: object) -> None:
+    def set_latest_snapshot(self, version_id: str, snapshot: StrategyConfigSnapshot) -> None:
         ...
 
     def get_latest_snapshot(self) -> StrategyConfigSnapshot | None:
+        ...
+
+
+class RuntimeStateStore(Protocol):
+    def set_run_mode(self, mode: RunMode) -> None:
+        ...
+
+    def get_run_mode(self) -> RunMode | None:
+        ...
+
+    def set_symbol_runtime_summary(self, symbol: str, summary: dict[str, object]) -> None:
+        ...
+
+    def get_symbol_runtime_summary(self, symbol: str) -> dict[str, object] | None:
+        ...
+
+    def set_fault_flags(self, flags: dict[str, object]) -> None:
+        ...
+
+    def get_fault_flags(self) -> dict[str, object] | None:
         ...
 
 
 class RedisSnapshotStore:
-    def __init__(self, state_dir: str | Path | None = None) -> None:
-        if state_dir is None:
-            state_dir = Path(os.getenv("XUANSHU_SHARED_STATE_DIR", ".xuanshu-state"))
-        self.state_dir = Path(state_dir)
-        self.state_dir.mkdir(parents=True, exist_ok=True)
-        self._snapshot_path = self.state_dir / "latest_strategy_snapshot.json"
+    def __init__(
+        self,
+        redis_url: str = "redis://redis:6379/0",
+        redis_client: Redis | object | None = None,
+    ) -> None:
+        self._redis = redis_client or Redis.from_url(redis_url)
+        self._key = RedisKeys.latest_snapshot()
         self.latest_version_id: str | None = None
-        self.latest_snapshot: object | None = None
+        self.latest_snapshot: StrategyConfigSnapshot | None = None
 
-    def set_latest_snapshot(self, version_id: str, snapshot: object) -> None:
+    def set_latest_snapshot(self, version_id: str, snapshot: StrategyConfigSnapshot) -> None:
         self.latest_version_id = version_id
         self.latest_snapshot = snapshot
-        if isinstance(snapshot, StrategyConfigSnapshot):
-            self._snapshot_path.write_text(snapshot.model_dump_json(), encoding="utf-8")
+        try:
+            self._redis.set(self._key, snapshot.model_dump_json())
+        except RedisError:
+            return
 
     def get_latest_snapshot(self) -> StrategyConfigSnapshot | None:
-        if self._snapshot_path.exists():
-            return StrategyConfigSnapshot.model_validate_json(self._snapshot_path.read_text(encoding="utf-8"))
-        if isinstance(self.latest_snapshot, StrategyConfigSnapshot):
+        try:
+            payload = self._redis.get(self._key)
+        except RedisError:
             return self.latest_snapshot
-        return None
+        if payload is None:
+            return self.latest_snapshot
+        if isinstance(payload, bytes):
+            payload = payload.decode("utf-8")
+        if not isinstance(payload, str):
+            return self.latest_snapshot
+        try:
+            snapshot = StrategyConfigSnapshot.model_validate_json(payload)
+        except (ValidationError, UnicodeDecodeError, ValueError):
+            return self.latest_snapshot
+        self.latest_version_id = snapshot.version_id
+        self.latest_snapshot = snapshot
+        return snapshot
+
+
+class RedisRuntimeStateStore:
+    def __init__(
+        self,
+        redis_url: str = "redis://redis:6379/0",
+        redis_client: Redis | object | None = None,
+    ) -> None:
+        self._redis = redis_client or Redis.from_url(redis_url)
+        self._key = RedisKeys.run_mode()
+        self._latest_mode: RunMode | None = None
+
+    def set_run_mode(self, mode: RunMode) -> None:
+        self._latest_mode = mode
+        try:
+            self._redis.set(self._key, mode.value)
+        except RedisError:
+            return
+
+    def get_run_mode(self) -> RunMode | None:
+        try:
+            payload = self._redis.get(self._key)
+        except RedisError:
+            return self._latest_mode
+        if payload is None:
+            return self._latest_mode
+        if isinstance(payload, bytes):
+            payload = payload.decode("utf-8")
+        if not isinstance(payload, str) or not payload:
+            return self._latest_mode
+        try:
+            mode = RunMode(payload)
+        except ValueError:
+            return self._latest_mode
+        self._latest_mode = mode
+        return mode
+
+    def set_symbol_runtime_summary(self, symbol: str, summary: dict[str, object]) -> None:
+        try:
+            self._redis.set(RedisKeys.symbol_runtime(symbol), json.dumps(summary, separators=(",", ":")))
+        except RedisError:
+            return
+
+    def get_symbol_runtime_summary(self, symbol: str) -> dict[str, object] | None:
+        try:
+            payload = self._redis.get(RedisKeys.symbol_runtime(symbol))
+        except RedisError:
+            return None
+        if payload is None:
+            return None
+        if isinstance(payload, bytes):
+            payload = payload.decode("utf-8")
+        return json.loads(payload)
+
+    def set_fault_flags(self, flags: dict[str, object]) -> None:
+        try:
+            self._redis.set(RedisKeys.fault_flags(), json.dumps(flags, separators=(",", ":")))
+        except RedisError:
+            return
+
+    def get_fault_flags(self) -> dict[str, object] | None:
+        try:
+            payload = self._redis.get(RedisKeys.fault_flags())
+        except RedisError:
+            return None
+        if payload is None:
+            return None
+        if isinstance(payload, bytes):
+            payload = payload.decode("utf-8")
+        return json.loads(payload)
