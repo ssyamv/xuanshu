@@ -10,7 +10,11 @@ from xuanshu.core.enums import ApprovalState, RunMode
 from xuanshu.governor.research import StrategyResearchEngine
 import xuanshu.governor.research_providers as research_providers_module
 from xuanshu.governor.research_providers import ResearchProviderName
-from xuanshu.infra.ai.governor_client import ConfiguredGovernorAgentRunner, GovernorClient
+from xuanshu.infra.ai.governor_client import (
+    CodexCliGovernorAgentRunner,
+    ConfiguredGovernorAgentRunner,
+    GovernorClient,
+)
 from xuanshu.infra.storage.postgres_store import PostgresRuntimeStore
 from xuanshu.infra.storage.redis_store import RedisSnapshotStore
 
@@ -106,6 +110,27 @@ def test_governor_entrypoint_supports_codex_cli_research_provider(monkeypatch) -
     assert seen_runtime is not None
     assert seen_runtime.settings.research_provider == ResearchProviderName.CODEX_CLI
     assert seen_runtime.research_engine.provider.provider_name == ResearchProviderName.CODEX_CLI
+
+
+def test_governor_entrypoint_supports_codex_cli_without_openai_api_key(monkeypatch) -> None:
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.setenv("POSTGRES_DSN", "postgresql+psycopg://xuanshu:xuanshu@localhost:5432/xuanshu")
+    _clear_unrelated_settings_env(monkeypatch)
+    monkeypatch.setenv("XUANSHU_RESEARCH_PROVIDER", "codex_cli")
+
+    seen_runtime = None
+
+    async def fake_run_governor(runtime: governor_app.GovernorRuntime) -> None:
+        nonlocal seen_runtime
+        seen_runtime = runtime
+
+    monkeypatch.setattr(governor_app, "_run_governor", fake_run_governor)
+
+    assert governor_app.main() == 0
+
+    assert seen_runtime is not None
+    assert seen_runtime.settings.openai_api_key is None
+    assert isinstance(seen_runtime.governor_client.agent_runner, CodexCliGovernorAgentRunner)
 
 
 def test_governor_entrypoint_rejects_unsupported_research_provider(monkeypatch) -> None:

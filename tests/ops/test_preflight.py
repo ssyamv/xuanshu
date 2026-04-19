@@ -66,3 +66,19 @@ def test_preflight_main_returns_nonzero_when_runtime_configuration_is_invalid(
     captured = capsys.readouterr()
     assert exit_code == 1
     assert "settings: FAIL" in captured.out
+
+
+def test_run_preflight_supports_codex_cli_without_openai_api_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _set_required_runtime_env(monkeypatch)
+    monkeypatch.setenv("XUANSHU_RESEARCH_PROVIDER", "codex_cli")
+    monkeypatch.delenv("OPENAI_API_KEY")
+    monkeypatch.setattr(preflight, "check_redis", lambda _: preflight.CheckResult("redis", True, "ok"))
+    monkeypatch.setattr(preflight, "check_postgres", lambda _: preflight.CheckResult("postgres", True, "ok"))
+    monkeypatch.setattr(preflight, "check_qdrant", lambda _: preflight.CheckResult("qdrant", True, "ok"))
+
+    results = preflight.run_preflight()
+
+    assert all(result.ok for result in results)
+    assert results[2].detail == "ok research_provider=codex_cli"

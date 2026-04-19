@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 from collections.abc import Mapping
 import json
+import subprocess
 from typing import Protocol
 
 import httpx
@@ -72,6 +73,33 @@ class ConfiguredGovernorAgentRunner:
             return json.loads(_extract_json_object(text))
         except json.JSONDecodeError as exc:
             raise RuntimeError("Governor AI response did not contain valid JSON") from exc
+
+
+@dataclass(frozen=True, slots=True)
+class CodexCliGovernorAgentRunner:
+    command: str = "codex"
+    cwd: str | None = None
+
+    async def run(self, state_summary: Mapping[str, object]) -> object:
+        prompt = (
+            f"{_GOVERNOR_INSTRUCTIONS}\n"
+            f"State summary JSON:\n"
+            f"{json.dumps(state_summary, ensure_ascii=True, sort_keys=True)}"
+        )
+        completed = subprocess.run(
+            [self.command, "exec", "--skip-git-repo-check", prompt],
+            capture_output=True,
+            text=True,
+            check=False,
+            cwd=self.cwd,
+        )
+        if completed.returncode != 0:
+            stderr = (completed.stderr or completed.stdout or "").strip()
+            raise RuntimeError(stderr or "codex exec failed")
+        try:
+            return json.loads(_extract_json_object(completed.stdout))
+        except json.JSONDecodeError as exc:
+            raise RuntimeError("Governor codex response did not contain valid JSON") from exc
 
 
 class GovernorClient:

@@ -3,7 +3,7 @@ from datetime import UTC, datetime, timedelta, timezone
 import pytest
 from pydantic import ValidationError
 
-from xuanshu.config.settings import Settings, TraderRuntimeSettings
+from xuanshu.config.settings import GovernorRuntimeSettings, Settings, TraderRuntimeSettings
 from xuanshu.contracts.checkpoint import CheckpointBudgetState, CheckpointOrder, CheckpointPosition, ExecutionCheckpoint
 from xuanshu.contracts.research import ResearchTrigger, StrategyPackage
 from xuanshu.contracts.risk import CandidateSignal
@@ -216,6 +216,19 @@ def test_strategy_snapshot_rejects_naive_reference_times() -> None:
 
     with pytest.raises(ValueError, match="timezone-aware"):
         snapshot.is_active(datetime.now())
+
+
+def test_governor_runtime_settings_allow_codex_cli_without_openai_api_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("XUANSHU_RESEARCH_PROVIDER", "codex_cli")
+    monkeypatch.setenv("POSTGRES_DSN", "postgresql+psycopg://xuanshu:xuanshu@localhost:5432/xuanshu")
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+
+    settings = GovernorRuntimeSettings()
+
+    assert settings.research_provider.value == "codex_cli"
+    assert settings.openai_api_key is None
 
 
 @pytest.mark.parametrize(

@@ -8,10 +8,14 @@ from xuanshu.config.settings import GovernorRuntimeSettings
 from xuanshu.contracts.research import ResearchTrigger, StrategyPackage
 from xuanshu.contracts.strategy import StrategyConfigSnapshot
 from xuanshu.core.enums import ApprovalState, RunMode
-from xuanshu.governor.research_providers import create_research_provider
+from xuanshu.governor.research_providers import ResearchProviderName, create_research_provider
 from xuanshu.governor.service import GovernorService
 from xuanshu.governor.research import StrategyResearchEngine
-from xuanshu.infra.ai.governor_client import ConfiguredGovernorAgentRunner, GovernorClient
+from xuanshu.infra.ai.governor_client import (
+    CodexCliGovernorAgentRunner,
+    ConfiguredGovernorAgentRunner,
+    GovernorClient,
+)
 from xuanshu.infra.storage.postgres_store import PostgresRuntimeStore
 from xuanshu.infra.storage.qdrant_store import QdrantCaseStore
 from xuanshu.infra.storage.redis_store import (
@@ -44,6 +48,8 @@ def build_governor_service() -> GovernorService:
 
 
 def build_governor_client(settings: GovernorRuntimeSettings) -> GovernorClient:
+    if settings.research_provider == ResearchProviderName.CODEX_CLI:
+        return GovernorClient(agent_runner=CodexCliGovernorAgentRunner())
     return GovernorClient(
         agent_runner=ConfiguredGovernorAgentRunner(
             api_key=settings.openai_api_key,

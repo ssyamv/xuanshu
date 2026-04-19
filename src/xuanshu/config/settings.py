@@ -1,4 +1,4 @@
-from pydantic import BaseModel, Field, SecretStr, field_validator
+from pydantic import BaseModel, Field, SecretStr, field_validator, model_validator
 from pydantic.networks import AnyHttpUrl, PostgresDsn, RedisDsn
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from pydantic_settings.sources import DotEnvSettingsSource, EnvSettingsSource, PydanticBaseSettingsSource
@@ -158,10 +158,16 @@ class GovernorRuntimeSettings(_XuanshuBaseSettings):
         validation_alias="POSTGRES_DSN",
     )
     qdrant_url: AnyHttpUrl = Field(default="http://qdrant:6333", validation_alias="QDRANT_URL")
-    openai_api_key: SecretStr = Field(validation_alias="OPENAI_API_KEY")
+    openai_api_key: SecretStr | None = Field(default=None, validation_alias="OPENAI_API_KEY")
     research_provider: ResearchProviderName = Field(default=ResearchProviderName.API)
     ai_timeout_sec: int = Field(default=12, gt=0, le=300)
     governor_interval_sec: int = Field(default=30, gt=0, le=3600)
+
+    @model_validator(mode="after")
+    def validate_provider_requirements(self) -> "GovernorRuntimeSettings":
+        if self.research_provider == ResearchProviderName.API and self.openai_api_key is None:
+            raise ValueError("openai_api_key is required for api research provider")
+        return self
 
 
 class NotifierRuntimeSettings(_XuanshuBaseSettings):
