@@ -1,0 +1,12 @@
+.DS_Store
+
+# Python caches and local build artifacts
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+.pytest_cache/
+
+# Local runtime/editor state
+.xuanshu-state/
+.vscode/
