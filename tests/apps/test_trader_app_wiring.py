@@ -6,7 +6,7 @@ import pytest
 from pydantic import ValidationError
 
 import xuanshu.apps.trader as trader_app
-from xuanshu.contracts.events import OrderbookTopEvent
+from xuanshu.contracts.events import FaultEvent, OrderbookTopEvent
 from xuanshu.contracts.risk import CandidateSignal
 from xuanshu.core.enums import ApprovalState, EntryType, OrderSide, RunMode, SignalUrgency, StrategyId, TraderEventType
 from xuanshu.infra.okx.private_ws import OkxPrivateStream
@@ -336,6 +336,97 @@ def test_trader_runtime_dispatches_market_event_updates_summary_and_mode(monkeyp
     assert summary["run_mode"] == RunMode.HALTED.value
     assert runtime.components.state_engine.current_run_mode == RunMode.HALTED
     assert runtime.runtime_store.get_run_mode() == RunMode.HALTED
+
+
+def test_trader_runtime_dispatches_fault_event_updates_fault_flags(monkeypatch) -> None:
+    _set_required_settings_env(monkeypatch)
+    fake_redis = _FakeRedis()
+
+    monkeypatch.setattr(
+        trader_app,
+        "build_snapshot_store",
+        lambda settings: RedisSnapshotStore(redis_client=fake_redis),
+    )
+    monkeypatch.setattr(
+        trader_app,
+        "build_runtime_state_store",
+        lambda settings: RedisRuntimeStateStore(redis_client=fake_redis),
+    )
+
+    async def _noop_wait_forever() -> None:
+        return None
+
+    monkeypatch.setattr(trader_app, "_wait_forever", _noop_wait_forever)
+    runtime = trader_app.build_trader_runtime()
+
+    async def _exercise_runtime() -> None:
+        try:
+            await trader_app._run_trader(runtime)
+            await trader_app._dispatch_runtime_event(
+                runtime,
+                FaultEvent(
+                    event_type=TraderEventType.RUNTIME_FAULT,
+                    exchange="okx",
+                    generated_at=datetime.now(UTC),
+                    severity="warn",
+                    code="public_ws_disconnected",
+                    detail="public stream dropped",
+                ),
+            )
+        finally:
+            await runtime.components.aclose()
+
+    asyncio.run(_exercise_runtime())
+
+    assert runtime.components.state_engine.fault_flags["public_ws_disconnected"] == {
+        "severity": "warn",
+        "detail": "public stream dropped",
+    }
+    assert runtime.runtime_store.get_fault_flags() == {
+        "public_ws_disconnected": {
+            "severity": "warn",
+            "detail": "public stream dropped",
+        }
+    }
+    assert runtime.runtime_store.get_run_mode() == RunMode.NORMAL
+
+
+def test_trader_runtime_rejects_unsupported_dispatch_event(monkeypatch) -> None:
+    _set_required_settings_env(monkeypatch)
+    fake_redis = _FakeRedis()
+
+    monkeypatch.setattr(
+        trader_app,
+        "build_snapshot_store",
+        lambda settings: RedisSnapshotStore(redis_client=fake_redis),
+    )
+    monkeypatch.setattr(
+        trader_app,
+        "build_runtime_state_store",
+        lambda settings: RedisRuntimeStateStore(redis_client=fake_redis),
+    )
+
+    async def _noop_wait_forever() -> None:
+        return None
+
+    monkeypatch.setattr(trader_app, "_wait_forever", _noop_wait_forever)
+    runtime = trader_app.build_trader_runtime()
+
+    class _UnsupportedEvent:
+        pass
+
+    async def _exercise_runtime() -> None:
+        try:
+            await trader_app._run_trader(runtime)
+            with pytest.raises(ValueError, match="unsupported event type: _UnsupportedEvent"):
+                await trader_app._dispatch_runtime_event(runtime, _UnsupportedEvent())
+        finally:
+            await runtime.components.aclose()
+
+    asyncio.run(_exercise_runtime())
+
+    assert runtime.runtime_store.get_run_mode() == RunMode.NORMAL
+    assert runtime.runtime_store.get_fault_flags() is None
 
 
 def test_trader_entrypoint_fails_fast_without_required_settings(monkeypatch) -> None:

@@ -17,3 +17,4 @@ def dispatch_event(engine: StateEngine, event: object) -> None:
     if isinstance(event, FaultEvent):
         engine.on_fault(event)
         return
+    raise ValueError(f"unsupported event type: {type(event).__name__}")
