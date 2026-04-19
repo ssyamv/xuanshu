@@ -422,6 +422,55 @@ def test_okx_rest_client_rejects_invalid_order_type_price_combinations() -> None
     asyncio.run(client.aclose())
 
 
+def test_okx_rest_client_rejects_unsupported_order_type() -> None:
+    client = OkxRestClient(
+        base_url="https://www.okx.com",
+        api_key="api-key",
+        api_secret="api-secret",
+        passphrase="api-passphrase",
+    )
+
+    try:
+        client.build_place_order_payload(
+            symbol="BTC-USDT-SWAP",
+            side="buy",
+            order_type="post_only",
+            size="1",
+            client_order_id="btc-breakout-000003",
+            price="100.0",
+        )
+    except ValueError as exc:
+        assert "order_type" in str(exc)
+    else:
+        raise AssertionError("expected ValueError for unsupported order_type")
+
+    asyncio.run(client.aclose())
+
+
+def test_okx_rest_client_rejects_invalid_side() -> None:
+    client = OkxRestClient(
+        base_url="https://www.okx.com",
+        api_key="api-key",
+        api_secret="api-secret",
+        passphrase="api-passphrase",
+    )
+
+    try:
+        client.build_place_order_payload(
+            symbol="BTC-USDT-SWAP",
+            side="hold",
+            order_type="market",
+            size="1",
+            client_order_id="btc-breakout-000004",
+        )
+    except ValueError as exc:
+        assert "side" in str(exc)
+    else:
+        raise AssertionError("expected ValueError for invalid side")
+
+    asyncio.run(client.aclose())
+
+
 def test_okx_rest_client_place_order_posts_signed_body() -> None:
     client = OkxRestClient(
         base_url="https://www.okx.com",
@@ -477,6 +526,46 @@ def test_okx_rest_client_place_order_posts_signed_body() -> None:
         "Content-Type": "application/json",
     }
     assert captured["raise_for_status_called"] is True
+
+    asyncio.run(client.aclose())
+
+
+def test_okx_rest_client_place_order_rejects_malformed_payload_before_post() -> None:
+    client = OkxRestClient(
+        base_url="https://www.okx.com",
+        api_key="api-key",
+        api_secret="api-secret",
+        passphrase="api-passphrase",
+    )
+    timestamp = "2026-04-19T00:00:00.000Z"
+    post_called = False
+
+    async def fake_post(path: str, *, content: str, headers: dict[str, str]) -> None:
+        nonlocal post_called
+        post_called = True
+
+    client.client.post = fake_post  # type: ignore[method-assign]
+
+    try:
+        asyncio.run(
+            client.place_order(
+                {
+                    "instId": "BTC-USDT-SWAP",
+                    "tdMode": "cross",
+                    "side": "buy",
+                    "ordType": "stop",
+                    "sz": "1",
+                    "clOrdId": "btc-breakout-000005",
+                },
+                timestamp,
+            )
+        )
+    except ValueError as exc:
+        assert "order_type" in str(exc)
+    else:
+        raise AssertionError("expected ValueError for malformed direct place_order payload")
+
+    assert post_called is False
 
     asyncio.run(client.aclose())
 

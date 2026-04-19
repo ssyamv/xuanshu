@@ -8,6 +8,9 @@ from urllib.parse import urlencode
 
 import httpx
 
+_SUPPORTED_ORDER_TYPES = frozenset({"market", "limit"})
+_SUPPORTED_ORDER_SIDES = frozenset({"buy", "sell"})
+
 
 class OkxRestClient:
     def __init__(
@@ -67,10 +70,7 @@ class OkxRestClient:
         client_order_id: str,
         price: str | None = None,
     ) -> dict[str, str]:
-        if order_type == "limit" and price is None:
-            raise ValueError("price is required for limit orders")
-        if order_type == "market" and price is not None:
-            raise ValueError("price is not allowed for market orders")
+        self._validate_order_entry_fields(side=side, order_type=order_type, price=price)
 
         payload = {
             "instId": symbol,
@@ -85,6 +85,7 @@ class OkxRestClient:
         return payload
 
     async def place_order(self, payload: dict[str, str], timestamp: str) -> dict[str, object]:
+        self._validate_place_order_payload(payload)
         body = json.dumps(payload, separators=(",", ":"))
         headers = self.build_signed_headers("POST", "/api/v5/trade/order", body, timestamp)
         response = await self.client.post("/api/v5/trade/order", content=body, headers=headers)
@@ -110,3 +111,32 @@ class OkxRestClient:
 
     def _build_query_path(self, path: str, params: dict[str, str]) -> str:
         return f"{path}?{urlencode(params)}"
+
+    def _validate_order_entry_fields(
+        self,
+        *,
+        side: str,
+        order_type: str,
+        price: str | None,
+    ) -> None:
+        if side not in _SUPPORTED_ORDER_SIDES:
+            raise ValueError(f"unsupported side: {side}")
+        if order_type not in _SUPPORTED_ORDER_TYPES:
+            raise ValueError(f"unsupported order_type: {order_type}")
+        if order_type == "limit" and price is None:
+            raise ValueError("price is required for limit orders")
+        if order_type == "market" and price is not None:
+            raise ValueError("price is not allowed for market orders")
+
+    def _validate_place_order_payload(self, payload: dict[str, str]) -> None:
+        required_fields = {"instId", "tdMode", "side", "ordType", "sz", "clOrdId"}
+        missing_fields = sorted(required_fields - payload.keys())
+        if missing_fields:
+            raise ValueError(f"missing required place_order payload fields: {missing_fields}")
+        if payload["tdMode"] != "cross":
+            raise ValueError(f"unsupported tdMode: {payload['tdMode']}")
+        self._validate_order_entry_fields(
+            side=payload["side"],
+            order_type=payload["ordType"],
+            price=payload.get("px"),
+        )
