@@ -7,7 +7,12 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
-from xuanshu.contracts.events import AccountSnapshotEvent, OrderUpdateEvent, PositionUpdateEvent
+from xuanshu.contracts.events import (
+    AccountSnapshotEvent,
+    FaultEvent,
+    OrderUpdateEvent,
+    PositionUpdateEvent,
+)
 from xuanshu.core.enums import TraderEventType
 
 
@@ -42,48 +47,119 @@ class OkxPrivateStream:
         self,
         payload: dict[str, Any],
         sequence: str,
-    ) -> OrderUpdateEvent | PositionUpdateEvent | AccountSnapshotEvent | None:
+    ) -> tuple[OrderUpdateEvent | PositionUpdateEvent | AccountSnapshotEvent | FaultEvent, ...]:
+        event = payload.get("event")
+        if event == "login":
+            if str(payload.get("code", "0")) == "0":
+                return ()
+            return (self._build_fault(payload, code=str(payload.get("code") or "login_failed")),)
+        if event == "error":
+            return (self._build_fault(payload, code=str(payload.get("code") or "private_ws_error")),)
+
         channel = payload.get("arg", {}).get("channel")
         data = payload.get("data") or []
         if not data:
-            return None
-        item = data[0]
-        generated_at = datetime.fromtimestamp(int(item["uTime"]) / 1000, tz=UTC)
-        if channel == "orders":
-            return OrderUpdateEvent(
-                event_type=TraderEventType.ORDER_UPDATE,
-                symbol=item["instId"],
-                exchange="okx",
-                generated_at=generated_at,
-                private_sequence=sequence,
-                order_id=item["ordId"],
-                client_order_id=item["clOrdId"],
-                side=item["side"],
-                price=float(item["px"]),
-                size=float(item["sz"]),
-                filled_size=float(item["accFillSz"]),
-                status=item["state"],
-            )
-        if channel == "positions":
-            return PositionUpdateEvent(
-                event_type=TraderEventType.POSITION_UPDATE,
-                symbol=item["instId"],
-                exchange="okx",
-                generated_at=generated_at,
-                private_sequence=sequence,
-                net_quantity=float(item["pos"]),
-                average_price=float(item["avgPx"]),
-                mark_price=float(item["markPx"]),
-                unrealized_pnl=float(item["upl"]),
-            )
-        if channel == "account":
-            return AccountSnapshotEvent(
-                event_type=TraderEventType.ACCOUNT_SNAPSHOT,
-                exchange="okx",
-                generated_at=generated_at,
-                private_sequence=sequence,
-                equity=float(item["totalEq"]),
-                available_balance=float(item["availEq"]),
-                margin_ratio=float(item.get("mgnRatio", 0.0)),
-            )
-        return None
+            return ()
+
+        events: list[OrderUpdateEvent | PositionUpdateEvent | AccountSnapshotEvent | FaultEvent] = []
+        for item in data:
+            try:
+                if channel == "orders":
+                    events.append(self._decode_order(item, sequence))
+                    continue
+                if channel == "positions":
+                    events.append(self._decode_position(item, sequence))
+                    continue
+                if channel == "account":
+                    events.append(self._decode_account(item, sequence))
+            except (KeyError, TypeError, ValueError) as exc:
+                events.append(self._build_fault(payload, code=f"{channel}_decode_error", detail=str(exc)))
+        return tuple(events)
+
+    def _decode_order(self, item: dict[str, Any], sequence: str) -> OrderUpdateEvent:
+        generated_at = self._parse_timestamp(item["uTime"])
+        order_id = self._required_str(item["ordId"], field="ordId")
+        client_order_id = self._optional_str(item.get("clOrdId"), default=order_id)
+        return OrderUpdateEvent(
+            event_type=TraderEventType.ORDER_UPDATE,
+            symbol=self._required_str(item["instId"], field="instId"),
+            exchange="okx",
+            generated_at=generated_at,
+            private_sequence=sequence,
+            order_id=order_id,
+            client_order_id=client_order_id,
+            side=self._required_str(item["side"], field="side"),
+            price=self._optional_float(item.get("px"), default=0.0),
+            size=self._required_float(item["sz"], field="sz"),
+            filled_size=self._optional_float(item.get("accFillSz"), default=0.0),
+            status=self._required_str(item["state"], field="state"),
+        )
+
+    def _decode_position(self, item: dict[str, Any], sequence: str) -> PositionUpdateEvent:
+        return PositionUpdateEvent(
+            event_type=TraderEventType.POSITION_UPDATE,
+            symbol=self._required_str(item["instId"], field="instId"),
+            exchange="okx",
+            generated_at=self._parse_timestamp(item["uTime"]),
+            private_sequence=sequence,
+            net_quantity=self._optional_float(item.get("pos"), default=0.0),
+            average_price=self._optional_float(item.get("avgPx"), default=0.0),
+            mark_price=self._optional_float(item.get("markPx"), default=0.0),
+            unrealized_pnl=self._optional_float(item.get("upl"), default=0.0),
+        )
+
+    def _decode_account(self, item: dict[str, Any], sequence: str) -> AccountSnapshotEvent:
+        return AccountSnapshotEvent(
+            event_type=TraderEventType.ACCOUNT_SNAPSHOT,
+            exchange="okx",
+            generated_at=self._parse_timestamp(item["uTime"]),
+            private_sequence=sequence,
+            equity=self._optional_float(item.get("totalEq"), default=0.0),
+            available_balance=self._optional_float(item.get("availEq"), default=0.0),
+            margin_ratio=self._optional_float(item.get("mgnRatio"), default=0.0),
+        )
+
+    def _build_fault(
+        self,
+        payload: dict[str, Any],
+        *,
+        code: str,
+        detail: str | None = None,
+    ) -> FaultEvent:
+        msg = str(payload.get("msg") or detail or "private websocket fault").strip()
+        conn_id = str(payload.get("connId") or "").strip()
+        if conn_id:
+            msg = f"{msg} (connId={conn_id})"
+        return FaultEvent(
+            event_type=TraderEventType.RUNTIME_FAULT,
+            exchange="okx",
+            generated_at=datetime.now(UTC),
+            severity="critical",
+            code=code,
+            detail=msg,
+        )
+
+    def _parse_timestamp(self, value: Any) -> datetime:
+        return datetime.fromtimestamp(int(str(value).strip()) / 1000, tz=UTC)
+
+    def _required_str(self, value: Any, *, field: str) -> str:
+        normalized = str(value).strip()
+        if not normalized:
+            raise ValueError(f"{field} is required")
+        return normalized
+
+    def _optional_str(self, value: Any, *, default: str) -> str:
+        normalized = str(value or "").strip()
+        return normalized or default
+
+    def _required_float(self, value: Any, *, field: str) -> float:
+        normalized = str(value).strip()
+        if not normalized:
+            raise ValueError(f"{field} is required")
+        return float(normalized)
+
+    def _optional_float(self, value: Any, *, default: float) -> float:
+        normalized = str(value or "").strip()
+        if not normalized:
+            return default
+        return float(normalized)

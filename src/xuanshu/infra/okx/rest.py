@@ -4,6 +4,7 @@ import base64
 import hashlib
 import hmac
 import json
+from urllib.parse import urlencode
 
 import httpx
 
@@ -84,3 +85,23 @@ class OkxRestClient:
         response = await self.client.post("/api/v5/trade/order", content=body, headers=headers)
         response.raise_for_status()
         return response.json()
+
+    async def fetch_open_orders(self, symbol: str, timestamp: str) -> dict[str, object]:
+        path = self._build_query_path("/api/v5/trade/orders-pending", {"instId": symbol})
+        return await self._signed_get(path, timestamp)
+
+    async def fetch_positions(self, symbol: str, timestamp: str) -> dict[str, object]:
+        path = self._build_query_path("/api/v5/account/positions", {"instId": symbol})
+        return await self._signed_get(path, timestamp)
+
+    async def fetch_account_summary(self, timestamp: str) -> dict[str, object]:
+        return await self._signed_get("/api/v5/account/balance", timestamp)
+
+    async def _signed_get(self, path: str, timestamp: str) -> dict[str, object]:
+        headers = self.build_signed_headers("GET", path, "", timestamp)
+        response = await self.client.get(path, headers=headers)
+        response.raise_for_status()
+        return response.json()
+
+    def _build_query_path(self, path: str, params: dict[str, str]) -> str:
+        return f"{path}?{urlencode(params)}"

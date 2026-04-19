@@ -1,20 +1,28 @@
+import asyncio
 import base64
 import hashlib
 import hmac
 import json
 
-from xuanshu.contracts.events import OrderUpdateEvent, OrderbookTopEvent, PositionUpdateEvent
+from xuanshu.contracts.events import (
+    AccountSnapshotEvent,
+    FaultEvent,
+    MarketTradeEvent,
+    OrderUpdateEvent,
+    OrderbookTopEvent,
+    PositionUpdateEvent,
+)
 from xuanshu.core.enums import TraderEventType
 from xuanshu.infra.okx.private_ws import OkxPrivateStream
 from xuanshu.infra.okx.public_ws import OkxPublicStream
 from xuanshu.infra.okx.rest import OkxRestClient
 
 
-def test_okx_public_stream_builds_bbo_subscription_and_decodes_events() -> None:
+def test_okx_public_stream_builds_bbo_subscription_and_decodes_batched_events() -> None:
     stream = OkxPublicStream(url="wss://ws.okx.com:8443/ws/v5/public")
 
     payload = stream.build_subscribe_payload(("BTC-USDT-SWAP",))
-    message = {
+    ticker_message = {
         "arg": {"channel": "tickers", "instId": "BTC-USDT-SWAP"},
         "data": [
             {
@@ -23,11 +31,36 @@ def test_okx_public_stream_builds_bbo_subscription_and_decodes_events() -> None:
                 "askPx": "100.1",
                 "bidSz": "5",
                 "askSz": "6",
-            }
+            },
+            {
+                "ts": "1713484801000",
+                "bidPx": "100.1",
+                "askPx": "100.2",
+                "bidSz": "7",
+                "askSz": "8",
+            },
+        ],
+    }
+    trades_message = {
+        "arg": {"channel": "trades", "instId": "BTC-USDT-SWAP"},
+        "data": [
+            {
+                "ts": "1713484802000",
+                "px": "100.3",
+                "sz": "1.2",
+                "side": "buy",
+            },
+            {
+                "ts": "1713484803000",
+                "px": "100.4",
+                "sz": "0.4",
+                "side": "sell",
+            },
         ],
     }
 
-    event = stream.decode_message(message, sequence="pub-1")
+    ticker_events = stream.decode_message(ticker_message, sequence="pub-1")
+    trade_events = stream.decode_message(trades_message, sequence="pub-2")
 
     assert payload == {
         "op": "subscribe",
@@ -36,12 +69,23 @@ def test_okx_public_stream_builds_bbo_subscription_and_decodes_events() -> None:
             {"channel": "trades", "instId": "BTC-USDT-SWAP"},
         ],
     }
-    assert isinstance(event, OrderbookTopEvent)
-    assert event.event_type == TraderEventType.ORDERBOOK_TOP
-    assert event.bid_price == 100.0
+    assert [type(event) for event in ticker_events] == [OrderbookTopEvent, OrderbookTopEvent]
+    assert ticker_events[0].bid_price == 100.0
+    assert ticker_events[1].bid_price == 100.1
+    assert [type(event) for event in trade_events] == [MarketTradeEvent, MarketTradeEvent]
+    assert trade_events[0].side == "buy"
+    assert trade_events[1].side == "sell"
 
 
-def test_okx_private_stream_builds_login_and_decodes_order_and_position_events() -> None:
+def test_okx_public_stream_ignores_empty_data_batches() -> None:
+    stream = OkxPublicStream(url="wss://ws.okx.com:8443/ws/v5/public")
+
+    events = stream.decode_message({"arg": {"channel": "tickers"}, "data": []}, sequence="pub-1")
+
+    assert events == ()
+
+
+def test_okx_private_stream_builds_login_and_decodes_order_position_and_account_batches() -> None:
     stream = OkxPrivateStream(url="wss://ws.okx.com:8443/ws/v5/private")
 
     login = stream.build_login_payload(
@@ -63,7 +107,18 @@ def test_okx_private_stream_builds_login_and_decodes_order_and_position_events()
                 "accFillSz": "0",
                 "state": "live",
                 "uTime": "1713484800000",
-            }
+            },
+            {
+                "instId": "BTC-USDT-SWAP",
+                "ordId": "2",
+                "clOrdId": "btc-breakout-000002",
+                "side": "sell",
+                "px": "100.4",
+                "sz": "2",
+                "accFillSz": "1",
+                "state": "partially_filled",
+                "uTime": "1713484801000",
+            },
         ],
     }
     position_message = {
@@ -79,9 +134,21 @@ def test_okx_private_stream_builds_login_and_decodes_order_and_position_events()
             }
         ],
     }
+    account_message = {
+        "arg": {"channel": "account"},
+        "data": [
+            {
+                "totalEq": "1000",
+                "availEq": "800",
+                "mgnRatio": "0.15",
+                "uTime": "1713484810000",
+            }
+        ],
+    }
 
-    order_event = stream.decode_message(order_message, sequence="pri-1")
-    position_event = stream.decode_message(position_message, sequence="pri-2")
+    order_events = stream.decode_message(order_message, sequence="pri-1")
+    position_events = stream.decode_message(position_message, sequence="pri-2")
+    account_events = stream.decode_message(account_message, sequence="pri-3")
 
     expected_sign = hmac.new(
         b"test-secret",
@@ -92,11 +159,126 @@ def test_okx_private_stream_builds_login_and_decodes_order_and_position_events()
     assert login["op"] == "login"
     assert login["args"][0]["apiKey"] == "test-key"
     assert login["args"][0]["passphrase"] == "test-passphrase"
-    assert login["args"][0]["sign"] == __import__("base64").b64encode(expected_sign).decode()
-    assert isinstance(order_event, OrderUpdateEvent)
-    assert order_event.order_id == "1"
-    assert isinstance(position_event, PositionUpdateEvent)
-    assert position_event.net_quantity == 1.0
+    assert login["args"][0]["sign"] == base64.b64encode(expected_sign).decode()
+    assert [type(event) for event in order_events] == [OrderUpdateEvent, OrderUpdateEvent]
+    assert order_events[0].order_id == "1"
+    assert order_events[1].status == "partially_filled"
+    assert len(position_events) == 1
+    assert isinstance(position_events[0], PositionUpdateEvent)
+    assert position_events[0].net_quantity == 1.0
+    assert len(account_events) == 1
+    assert isinstance(account_events[0], AccountSnapshotEvent)
+    assert account_events[0].available_balance == 800.0
+
+
+def test_okx_private_stream_normalizes_fault_payloads() -> None:
+    stream = OkxPrivateStream(url="wss://ws.okx.com:8443/ws/v5/private")
+
+    login_faults = stream.decode_message(
+        {
+            "event": "login",
+            "code": "60009",
+            "msg": "Login failed.",
+            "connId": "a4d3ae55",
+        },
+        sequence="pri-1",
+    )
+    stream_faults = stream.decode_message(
+        {
+            "event": "error",
+            "code": "60012",
+            "msg": "Invalid request",
+        },
+        sequence="pri-2",
+    )
+
+    assert len(login_faults) == 1
+    assert isinstance(login_faults[0], FaultEvent)
+    assert login_faults[0].event_type == TraderEventType.RUNTIME_FAULT
+    assert login_faults[0].code == "60009"
+    assert "Login failed." in login_faults[0].detail
+    assert len(stream_faults) == 1
+    assert isinstance(stream_faults[0], FaultEvent)
+    assert stream_faults[0].code == "60012"
+
+
+def test_okx_private_stream_handles_optional_blank_fields_without_crashing() -> None:
+    stream = OkxPrivateStream(url="wss://ws.okx.com:8443/ws/v5/private")
+
+    order_events = stream.decode_message(
+        {
+            "arg": {"channel": "orders", "instType": "SWAP"},
+            "data": [
+                {
+                    "instId": "BTC-USDT-SWAP",
+                    "ordId": "1",
+                    "clOrdId": "",
+                    "side": "buy",
+                    "px": "",
+                    "sz": "1",
+                    "accFillSz": "",
+                    "state": "live",
+                    "uTime": "1713484800000",
+                }
+            ],
+        },
+        sequence="pri-1",
+    )
+    position_events = stream.decode_message(
+        {
+            "arg": {"channel": "positions", "instType": "SWAP"},
+            "data": [
+                {
+                    "instId": "BTC-USDT-SWAP",
+                    "avgPx": "",
+                    "markPx": "",
+                    "pos": "0",
+                    "upl": "0",
+                    "uTime": "1713484805000",
+                }
+            ],
+        },
+        sequence="pri-2",
+    )
+
+    assert len(order_events) == 1
+    assert isinstance(order_events[0], OrderUpdateEvent)
+    assert order_events[0].client_order_id == "1"
+    assert order_events[0].price == 0.0
+    assert order_events[0].filled_size == 0.0
+    assert len(position_events) == 1
+    assert isinstance(position_events[0], PositionUpdateEvent)
+    assert position_events[0].average_price == 0.0
+    assert position_events[0].mark_price == 0.0
+
+
+def test_okx_private_stream_normalizes_decode_failures_into_faults() -> None:
+    stream = OkxPrivateStream(url="wss://ws.okx.com:8443/ws/v5/private")
+
+    events = stream.decode_message(
+        {
+            "arg": {"channel": "orders", "instType": "SWAP"},
+            "data": [
+                {
+                    "instId": "BTC-USDT-SWAP",
+                    "ordId": "1",
+                    "clOrdId": "btc-breakout-000001",
+                    "side": "buy",
+                    "px": "100.2",
+                    "sz": "1",
+                    "accFillSz": "2",
+                    "state": "live",
+                    "uTime": "1713484800000",
+                }
+            ],
+        },
+        sequence="pri-1",
+    )
+
+    assert len(events) == 1
+    assert isinstance(events[0], FaultEvent)
+    assert events[0].code == "orders_decode_error"
+    assert "filled_size" in events[0].detail
 
 
 def test_okx_rest_client_builds_signed_headers_and_place_order_payload() -> None:
@@ -133,7 +315,7 @@ def test_okx_rest_client_builds_signed_headers_and_place_order_payload() -> None
         "clOrdId": "btc-breakout-000001",
     }
 
-    __import__("asyncio").run(client.aclose())
+    asyncio.run(client.aclose())
 
 
 def test_okx_rest_client_place_order_posts_signed_body() -> None:
@@ -178,7 +360,7 @@ def test_okx_rest_client_place_order_posts_signed_body() -> None:
 
     client.client.post = fake_post  # type: ignore[method-assign]
 
-    result = __import__("asyncio").run(client.place_order(payload, timestamp))
+    result = asyncio.run(client.place_order(payload, timestamp))
 
     assert result == {"result": "ok"}
     assert captured["path"] == "/api/v5/trade/order"
@@ -192,4 +374,45 @@ def test_okx_rest_client_place_order_posts_signed_body() -> None:
     }
     assert captured["raise_for_status_called"] is True
 
-    __import__("asyncio").run(client.aclose())
+    asyncio.run(client.aclose())
+
+
+def test_okx_rest_client_fetches_open_orders_positions_and_account_summary() -> None:
+    client = OkxRestClient(
+        base_url="https://www.okx.com",
+        api_key="api-key",
+        api_secret="api-secret",
+        passphrase="api-passphrase",
+    )
+    timestamp = "2026-04-19T00:00:00.000Z"
+    captured: list[tuple[str, str, dict[str, str]]] = []
+
+    class DummyResponse:
+        def __init__(self, payload: dict[str, object]) -> None:
+            self._payload = payload
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, object]:
+            return self._payload
+
+    async def fake_get(path: str, *, headers: dict[str, str]) -> DummyResponse:
+        captured.append((path, headers["OK-ACCESS-TIMESTAMP"], headers))
+        return DummyResponse({"path": path})
+
+    client.client.get = fake_get  # type: ignore[method-assign]
+
+    open_orders = asyncio.run(client.fetch_open_orders("BTC-USDT-SWAP", timestamp))
+    positions = asyncio.run(client.fetch_positions("BTC-USDT-SWAP", timestamp))
+    account = asyncio.run(client.fetch_account_summary(timestamp))
+
+    assert open_orders == {"path": "/api/v5/trade/orders-pending?instId=BTC-USDT-SWAP"}
+    assert positions == {"path": "/api/v5/account/positions?instId=BTC-USDT-SWAP"}
+    assert account == {"path": "/api/v5/account/balance"}
+    assert captured[0][0] == "/api/v5/trade/orders-pending?instId=BTC-USDT-SWAP"
+    assert captured[1][0] == "/api/v5/account/positions?instId=BTC-USDT-SWAP"
+    assert captured[2][0] == "/api/v5/account/balance"
+    assert all(item[1] == timestamp for item in captured)
+
+    asyncio.run(client.aclose())
