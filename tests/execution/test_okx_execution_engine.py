@@ -31,7 +31,10 @@ def test_okx_public_stream_builds_bbo_subscription_and_decodes_events() -> None:
 
     assert payload == {
         "op": "subscribe",
-        "args": [{"channel": "tickers", "instId": "BTC-USDT-SWAP"}],
+        "args": [
+            {"channel": "tickers", "instId": "BTC-USDT-SWAP"},
+            {"channel": "trades", "instId": "BTC-USDT-SWAP"},
+        ],
     }
     assert isinstance(event, OrderbookTopEvent)
     assert event.event_type == TraderEventType.ORDERBOOK_TOP

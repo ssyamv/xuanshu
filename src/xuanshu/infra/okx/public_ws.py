@@ -15,7 +15,11 @@ class OkxPublicStream:
     def build_subscribe_payload(self, symbols: tuple[str, ...]) -> dict[str, object]:
         return {
             "op": "subscribe",
-            "args": [{"channel": "tickers", "instId": symbol} for symbol in symbols],
+            "args": [
+                {"channel": channel, "instId": symbol}
+                for symbol in symbols
+                for channel in ("tickers", "trades")
+            ],
         }
 
     def decode_message(
