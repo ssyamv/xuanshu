@@ -1,3 +1,4 @@
+import asyncio
 from datetime import UTC, datetime
 
 import pytest
@@ -68,3 +69,72 @@ async def test_execution_coordinator_returns_cached_open_even_if_later_decision_
 def test_build_market_order_payload_rejects_blank_client_order_id() -> None:
     with pytest.raises(ValueError, match=r"invalid client_order_id"):
         build_market_order_payload("BTC-USDT-SWAP", "buy", 1.0, "   ")
+
+
+class _BlockingRestClient:
+    def __init__(self) -> None:
+        self.calls: list[tuple[dict[str, str], str]] = []
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def place_order(self, payload: dict[str, str], timestamp: str) -> dict[str, object]:
+        self.calls.append((payload, timestamp))
+        self.started.set()
+        await self.release.wait()
+        return {"data": [{"ordId": "1", "clOrdId": payload["clOrdId"], "sCode": "0"}]}
+
+
+@pytest.mark.asyncio
+async def test_execution_coordinator_deduplicates_inflight_open_submission() -> None:
+    rest = _BlockingRestClient()
+    coordinator = ExecutionCoordinator(rest_client=rest)
+    decision = RiskDecision(
+        decision_id="dec-1",
+        generated_at=datetime.now(UTC),
+        symbol="BTC-USDT-SWAP",
+        allow_open=True,
+        allow_close=True,
+        max_position=100.0,
+        max_order_size=1.0,
+        risk_mode=RunMode.NORMAL,
+        reason_codes=[],
+    )
+
+    first = asyncio.create_task(
+        coordinator.submit_market_open(
+            symbol="BTC-USDT-SWAP",
+            side="buy",
+            size=1.0,
+            client_order_id="btc-breakout-000002",
+            decision=decision,
+            timestamp="2026-04-19T00:00:00.000Z",
+        )
+    )
+    await rest.started.wait()
+
+    second = asyncio.create_task(
+        coordinator.submit_market_open(
+            symbol="BTC-USDT-SWAP",
+            side="buy",
+            size=1.0,
+            client_order_id="btc-breakout-000002",
+            decision=decision,
+            timestamp="2026-04-19T00:00:00.000Z",
+        )
+    )
+    await asyncio.sleep(0)
+
+    assert len(rest.calls) == 1
+
+    rest.release.set()
+    first_response = await first
+    second_response = await second
+
+    assert first_response == second_response
+    assert coordinator.inflight_by_client_order_id["btc-breakout-000002"]["response"] == first_response
+
+
+@pytest.mark.parametrize("size", ["1", None, object()])
+def test_build_market_order_payload_rejects_non_numeric_size(size: object) -> None:
+    with pytest.raises(ValueError, match=r"invalid size"):
+        build_market_order_payload("BTC-USDT-SWAP", "buy", size, "btc-breakout-000001")

@@ -29,6 +29,8 @@ def build_market_order_payload(symbol: str, side: str, size: float, client_order
     _validate_component("symbol", symbol, _SYMBOL_PATTERN)
     if side not in {"buy", "sell"}:
         raise ValueError(f"invalid side: {side!r}")
+    if not isinstance(size, int | float) or isinstance(size, bool):
+        raise ValueError(f"invalid size: {size!r}")
     if size <= 0:
         raise ValueError(f"invalid size: {size!r}")
     _validate_component("client_order_id", client_order_id, re.compile(r"^\S+$"))

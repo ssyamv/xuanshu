@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
@@ -27,14 +28,29 @@ class ExecutionCoordinator:
         timestamp: str,
     ) -> dict[str, object] | None:
         if client_order_id in self.inflight_by_client_order_id:
-            return self.inflight_by_client_order_id[client_order_id]["response"]
+            entry = self.inflight_by_client_order_id[client_order_id]
+            task = entry.get("task")
+            if task is not None:
+                response = await task
+                entry["response"] = response
+                return response
+            return entry["response"]
         if not decision.allow_open:
             return None
         payload = build_market_order_payload(symbol, side, size, client_order_id)
-        response = await self.rest_client.place_order(payload, timestamp)
-        self.inflight_by_client_order_id[client_order_id] = {
+        task = asyncio.create_task(self.rest_client.place_order(payload, timestamp))
+        entry = {
             "symbol": symbol,
             "payload": payload,
-            "response": response,
+            "task": task,
         }
+        self.inflight_by_client_order_id[client_order_id] = entry
+        try:
+            response = await task
+        except Exception:
+            if self.inflight_by_client_order_id.get(client_order_id) is entry:
+                self.inflight_by_client_order_id.pop(client_order_id, None)
+            raise
+        entry["response"] = response
+        entry.pop("task", None)
         return response
