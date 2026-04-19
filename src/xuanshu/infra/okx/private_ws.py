@@ -7,6 +7,8 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
+from pydantic import ValidationError
+
 from xuanshu.contracts.events import (
     AccountSnapshotEvent,
     FaultEvent,
@@ -83,7 +85,7 @@ class OkxPrivateStream:
                     continue
                 if channel == "account":
                     events.append(self._decode_account(item, sequence))
-            except (KeyError, TypeError, ValueError) as exc:
+            except (KeyError, TypeError, ValueError, ValidationError) as exc:
                 events.append(self._build_fault(payload, code=f"{channel}_decode_error", detail=str(exc)))
         return tuple(events)
 

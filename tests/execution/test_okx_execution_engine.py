@@ -4,6 +4,8 @@ import hashlib
 import hmac
 import json
 
+import pytest
+
 from xuanshu.contracts.events import (
     AccountSnapshotEvent,
     FaultEvent,
@@ -116,6 +118,31 @@ def test_okx_public_stream_normalizes_malformed_and_unknown_envelopes_into_fault
     assert len(unknown_channel_events) == 1
     assert isinstance(unknown_channel_events[0], FaultEvent)
     assert unknown_channel_events[0].code == "public_ws_unknown_channel"
+
+
+def test_okx_public_stream_normalizes_pydantic_validation_failures_into_faults() -> None:
+    stream = OkxPublicStream(url="wss://ws.okx.com:8443/ws/v5/public")
+
+    events = stream.decode_message(
+        {
+            "arg": {"channel": "tickers", "instId": "BTC-USDT-SWAP"},
+            "data": [
+                {
+                    "ts": "1713484800000",
+                    "bidPx": "100.2",
+                    "askPx": "100.1",
+                    "bidSz": "5",
+                    "askSz": "6",
+                }
+            ],
+        },
+        sequence="pub-1",
+    )
+
+    assert len(events) == 1
+    assert isinstance(events[0], FaultEvent)
+    assert events[0].code == "public_ws_error"
+    assert "ask_price" in events[0].detail
 
 
 def test_okx_private_stream_builds_login_and_decodes_order_position_and_account_batches() -> None:
@@ -762,5 +789,32 @@ def test_okx_rest_client_fetches_open_orders_positions_and_account_summary() -> 
     ).decode()
     assert captured[0][2]["OK-ACCESS-SIGN"] == expected_open_orders_signature
     assert captured[1][2]["OK-ACCESS-SIGN"] == expected_positions_signature
+
+    asyncio.run(client.aclose())
+
+
+def test_okx_rest_client_rejects_blank_symbols_for_signed_getters() -> None:
+    client = OkxRestClient(
+        base_url="https://www.okx.com",
+        api_key="api-key",
+        api_secret="api-secret",
+        passphrase="api-passphrase",
+    )
+    timestamp = "2026-04-19T00:00:00.000Z"
+    get_called = False
+
+    async def fake_get(path: str, *, headers: dict[str, str]) -> None:
+        nonlocal get_called
+        get_called = True
+
+    client.client.get = fake_get  # type: ignore[method-assign]
+
+    with pytest.raises(ValueError, match="blank instId is not allowed"):
+        asyncio.run(client.fetch_open_orders("   ", timestamp))
+
+    with pytest.raises(ValueError, match="blank instId is not allowed"):
+        asyncio.run(client.fetch_positions("\t", timestamp))
+
+    assert get_called is False
 
     asyncio.run(client.aclose())

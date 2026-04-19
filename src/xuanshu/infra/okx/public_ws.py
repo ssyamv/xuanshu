@@ -4,6 +4,8 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
+from pydantic import ValidationError
+
 from xuanshu.contracts.events import FaultEvent, MarketTradeEvent, OrderbookTopEvent
 from xuanshu.core.enums import TraderEventType
 
@@ -77,7 +79,7 @@ class OkxPublicStream:
                             side=item["side"],
                         )
                     )
-            except (KeyError, TypeError, ValueError) as exc:
+            except (KeyError, TypeError, ValueError, ValidationError) as exc:
                 events.append(self._build_fault(payload, detail=str(exc)))
         return tuple(events)
 

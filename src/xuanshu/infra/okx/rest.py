@@ -105,10 +105,12 @@ class OkxRestClient:
         return response.json()
 
     async def fetch_open_orders(self, symbol: str, timestamp: str) -> dict[str, object]:
+        self._validate_non_blank_fields({"instId": symbol})
         path = self._build_query_path("/api/v5/trade/orders-pending", {"instId": symbol})
         return await self._signed_get(path, timestamp)
 
     async def fetch_positions(self, symbol: str, timestamp: str) -> dict[str, object]:
+        self._validate_non_blank_fields({"instId": symbol})
         path = self._build_query_path("/api/v5/account/positions", {"instId": symbol})
         return await self._signed_get(path, timestamp)
 
