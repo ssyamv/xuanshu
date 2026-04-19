@@ -22,8 +22,8 @@ class _FakeRestClient:
         self.open_orders_calls: list[tuple[str, str]] = []
         self.positions_calls: list[tuple[str, str]] = []
         self.account_summary_calls: list[str] = []
-        self._open_orders = open_orders or [{"order_id": "ord-1", "symbol": "BTC-USDT-SWAP"}]
-        self._positions = positions or [{"symbol": "BTC-USDT-SWAP", "net_quantity": 1.0}]
+        self._open_orders = open_orders or [{"ordId": "ord-1", "instId": "BTC-USDT-SWAP"}]
+        self._positions = positions or [{"instId": "BTC-USDT-SWAP", "pos": "1"}]
 
     async def fetch_open_orders(self, symbol: str, timestamp: str) -> list[dict[str, object]]:
         self.open_orders_calls.append((symbol, timestamp))
@@ -62,6 +62,40 @@ def _build_checkpoint(
     )
 
 
+def _okx_open_order(
+    *,
+    order_id: str = "ord-1",
+    symbol: str = "BTC-USDT-SWAP",
+    side: str = "buy",
+    price: str = "100.0",
+    size: str = "1.0",
+    status: str = "live",
+) -> dict[str, object]:
+    return {
+        "ordId": order_id,
+        "instId": symbol,
+        "side": side,
+        "px": price,
+        "sz": size,
+        "state": status,
+    }
+
+
+def _okx_position(
+    *,
+    symbol: str = "BTC-USDT-SWAP",
+    net_quantity: str = "1.0",
+    mark_price: str = "102.5",
+    unrealized_pnl: str = "3.0",
+) -> dict[str, object]:
+    return {
+        "instId": symbol,
+        "pos": net_quantity,
+        "markPx": mark_price,
+        "upl": unrealized_pnl,
+    }
+
+
 @pytest.mark.asyncio
 async def test_recovery_supervisor_allows_matching_checkpoint_and_exchange_state() -> None:
     checkpoint = _build_checkpoint(
@@ -85,24 +119,8 @@ async def test_recovery_supervisor_allows_matching_checkpoint_and_exchange_state
         ],
     )
     rest_client = _FakeRestClient(
-        open_orders=[
-            {
-                "order_id": "ord-1",
-                "symbol": "BTC-USDT-SWAP",
-                "side": "buy",
-                "price": 100.0,
-                "size": 1.0,
-                "status": "live",
-            }
-        ],
-        positions=[
-            {
-                "symbol": "BTC-USDT-SWAP",
-                "net_quantity": 1.0,
-                "mark_price": 102.5,
-                "unrealized_pnl": 3.0,
-            }
-        ],
+        open_orders=[_okx_open_order()],
+        positions=[_okx_position()],
     )
     supervisor = RecoverySupervisor(rest_client=rest_client)
 
@@ -141,24 +159,8 @@ async def test_recovery_supervisor_blocks_on_equal_count_but_different_content()
         ],
     )
     rest_client = _FakeRestClient(
-        open_orders=[
-            {
-                "order_id": "ord-1",
-                "symbol": "BTC-USDT-SWAP",
-                "side": "sell",
-                "price": 100.0,
-                "size": 1.0,
-                "status": "live",
-            }
-        ],
-        positions=[
-            {
-                "symbol": "BTC-USDT-SWAP",
-                "net_quantity": 1.0,
-                "mark_price": 102.5,
-                "unrealized_pnl": 3.0,
-            }
-        ],
+        open_orders=[_okx_open_order(side="sell")],
+        positions=[_okx_position()],
     )
     supervisor = RecoverySupervisor(rest_client=rest_client)
 
