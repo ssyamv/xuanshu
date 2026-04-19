@@ -23,3 +23,19 @@ def build_client_order_id(symbol: str, strategy_id: str, sequence: int) -> str:
     if type(sequence) is not int or sequence < 0 or sequence > 999_999:
         raise ValueError(f"invalid sequence: {sequence!r}")
     return f"{symbol}-{strategy_id}-{sequence:06d}"
+
+
+def build_market_order_payload(symbol: str, side: str, size: float, client_order_id: str) -> dict[str, str]:
+    _validate_component("symbol", symbol, _SYMBOL_PATTERN)
+    if side not in {"buy", "sell"}:
+        raise ValueError(f"invalid side: {side!r}")
+    if size <= 0:
+        raise ValueError(f"invalid size: {size!r}")
+    return {
+        "instId": symbol,
+        "tdMode": "cross",
+        "side": side,
+        "ordType": "market",
+        "sz": f"{size:g}",
+        "clOrdId": client_order_id,
+    }
