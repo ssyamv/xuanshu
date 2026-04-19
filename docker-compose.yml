@@ -31,7 +31,7 @@ services:
     command: python -m xuanshu.apps.governor
     environment: *app_env
     volumes:
-      - ${XUANSHU_CODEX_AUTH_DIR:-/root/.codex}:/root/.codex:ro
+      - ${XUANSHU_CODEX_AUTH_DIR:-/root/.codex}:/root/.codex
     depends_on:
       redis:
         condition: service_healthy

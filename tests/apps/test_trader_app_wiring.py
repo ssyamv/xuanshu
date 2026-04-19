@@ -183,7 +183,8 @@ def test_single_host_deploy_doc_pins_compose_entrypoint() -> None:
     assert "/dev/tcp/127.0.0.1/6333" in compose
     assert "wget -q -O-" not in compose
     assert "XUANSHU_CODEX_AUTH_DIR" in compose
-    assert ":/root/.codex:ro" in compose
+    assert ":/root/.codex" in compose
+    assert ":/root/.codex:ro" not in compose
     assert "apt-get update" in dockerfile
     assert "nodejs npm" in dockerfile
     assert "@openai/codex@0.121.0" in dockerfile
