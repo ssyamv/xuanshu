@@ -106,7 +106,18 @@ async def _wait_for_next_poll(delay_sec: float = 1.0) -> None:
 
 
 async def _poll_notifier_once(runtime: NotifierRuntime) -> None:
-    updates = await runtime.adapter.fetch_updates(offset=runtime.next_update_offset)
+    try:
+        updates = await runtime.adapter.fetch_updates(offset=runtime.next_update_offset)
+    except Exception as exc:
+        if isinstance(exc, TimeoutError):
+            return
+        try:
+            import httpx  # local import keeps notifier adapter protocol lightweight
+        except ImportError:
+            httpx = None
+        if httpx is not None and isinstance(exc, httpx.ReadTimeout):
+            return
+        raise
     if not updates:
         return
     for update in updates:

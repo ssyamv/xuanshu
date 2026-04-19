@@ -179,6 +179,8 @@ def test_single_host_deploy_doc_pins_compose_entrypoint() -> None:
     assert "restart: unless-stopped" in compose
     assert "XUANSHU_DEFAULT_RUN_MODE:" in compose
     assert "XUANSHU_RESEARCH_PROVIDER:" in compose
+    assert "/dev/tcp/127.0.0.1/6333" in compose
+    assert "wget -q -O-" not in compose
 
 
 def test_single_host_operations_docs_cover_research_triggering_and_approval() -> None:
