@@ -82,10 +82,17 @@ class OkxPrivateStream:
                     )
                 )
             )
-            await websocket.send(json.dumps(self.build_subscribe_payload(symbols)))
             async for raw_payload in websocket:
                 sequence += 1
                 payload = json.loads(raw_payload)
+                if payload.get("event") == "login":
+                    login_events = self.decode_message(payload, sequence=f"pri-{sequence}")
+                    if login_events:
+                        for event in login_events:
+                            yield event
+                        return
+                    await websocket.send(json.dumps(self.build_subscribe_payload(symbols)))
+                    continue
                 for event in self.decode_message(payload, sequence=f"pri-{sequence}"):
                     yield event
 

@@ -37,6 +37,28 @@ class _FakeWebSocket:
         return _generator()
 
 
+class _GuardedPrivateWebSocket(_FakeWebSocket):
+    def __init__(self, messages: list[str]) -> None:
+        super().__init__(messages)
+        self.login_ack_consumed = False
+
+    async def send(self, payload: str) -> None:
+        message = json.loads(payload)
+        if message.get("op") == "subscribe" and not self.login_ack_consumed:
+            raise AssertionError("subscribe sent before login ack was consumed")
+        await super().send(payload)
+
+    def __aiter__(self):
+        async def _generator():
+            for message in self.messages:
+                payload = json.loads(message)
+                if payload.get("event") == "login":
+                    self.login_ack_consumed = True
+                yield message
+
+        return _generator()
+
+
 class _FakeConnect:
     def __init__(self, websocket: _FakeWebSocket) -> None:
         self.websocket = websocket
@@ -544,6 +566,80 @@ async def test_okx_private_stream_iter_events_logs_in_subscribes_and_decodes_mes
         epoch_seconds=1713484800,
     )
     assert subscribe_payload == stream.build_subscribe_payload(("BTC-USDT-SWAP",))
+
+
+@pytest.mark.asyncio
+async def test_okx_private_stream_waits_for_login_ack_before_subscribing() -> None:
+    websocket = _GuardedPrivateWebSocket(
+        [
+            json.dumps({"event": "login", "code": "0", "msg": "", "connId": "abc"}),
+        ]
+    )
+    connect = _FakeConnect(websocket)
+    stream = OkxPrivateStream(
+        url="wss://ws.okx.com:8443/ws/v5/private",
+        connect_factory=connect,
+        epoch_seconds_factory=lambda: 1713484800,
+    )
+
+    events = [
+        event
+        async for event in stream.iter_events(
+            symbols=("BTC-USDT-SWAP",),
+            api_key="test-key",
+            api_secret="test-secret",
+            passphrase="test-passphrase",
+        )
+    ]
+
+    assert events == []
+    assert len(websocket.sent) == 2
+    assert json.loads(websocket.sent[0])["op"] == "login"
+    assert json.loads(websocket.sent[1])["op"] == "subscribe"
+
+
+@pytest.mark.asyncio
+async def test_okx_private_stream_ignores_prelogin_errors_and_subscribes_only_after_success() -> None:
+    websocket = _FakeWebSocket(
+        [
+            json.dumps({"event": "error", "code": "60011", "msg": "Please log in", "connId": "abc"}),
+            json.dumps({"event": "login", "code": "0", "msg": "", "connId": "abc"}),
+            json.dumps(
+                {
+                    "arg": {"channel": "account"},
+                    "data": [
+                        {
+                            "totalEq": "1000",
+                            "availEq": "800",
+                            "mgnRatio": "0.15",
+                            "uTime": "1713484810000",
+                        }
+                    ],
+                }
+            ),
+        ]
+    )
+    connect = _FakeConnect(websocket)
+    stream = OkxPrivateStream(
+        url="wss://ws.okx.com:8443/ws/v5/private",
+        connect_factory=connect,
+        epoch_seconds_factory=lambda: 1713484800,
+    )
+
+    events = [
+        event
+        async for event in stream.iter_events(
+            symbols=("BTC-USDT-SWAP",),
+            api_key="test-key",
+            api_secret="test-secret",
+            passphrase="test-passphrase",
+        )
+    ]
+
+    assert [type(event) for event in events] == [FaultEvent, AccountSnapshotEvent]
+    assert events[0].code == "60011"
+    assert events[1].private_sequence == "pri-3"
+    assert len(websocket.sent) == 2
 
 
 def test_okx_rest_client_builds_signed_headers_and_place_order_payload() -> None:
