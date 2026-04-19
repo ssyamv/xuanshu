@@ -6,6 +6,7 @@ from pydantic import ValidationError
 from pydantic import SecretStr
 
 import xuanshu.infra.ai.governor_client as governor_client_module
+from xuanshu.contracts.research import ResearchTrigger, StrategyPackage
 from xuanshu.contracts.strategy import StrategyConfigSnapshot
 from xuanshu.core.enums import ApprovalState, RunMode
 from xuanshu.infra.ai.governor_client import ConfiguredGovernorAgentRunner, GovernorClient
@@ -312,6 +313,79 @@ def test_governor_builds_expert_opinions_and_halted_committee_summary() -> None:
         "requires_human_review": True,
         "active_experts": ["market_structure", "risk", "event_filter"],
     }
+
+
+def test_governor_committee_summary_includes_research_candidates() -> None:
+    service = GovernorService()
+    package = StrategyPackage(
+        strategy_package_id="pkg-001",
+        generated_at=datetime.now(UTC),
+        trigger=ResearchTrigger.MANUAL,
+        symbol_scope=["BTC-USDT-SWAP"],
+        market_environment_scope=["trend"],
+        strategy_family="breakout",
+        directionality="long_short",
+        entry_rules={"signal": "breakout_confirmed"},
+        exit_rules={"stop_loss_bps": 50},
+        position_sizing_rules={"risk_fraction": 0.0025},
+        risk_constraints={"max_hold_minutes": 60},
+        parameter_set={"lookback_fast": 20},
+        backtest_summary={"total_return": 0.18},
+        performance_summary={"sharpe": 1.4},
+        failure_modes=[],
+        invalidating_conditions=[],
+        research_reason="manual study",
+    )
+
+    summary = service.build_committee_summary(
+        expert_opinions=[],
+        research_candidates=[package],
+    )
+
+    assert summary["research_candidate_count"] == 1
+    assert summary["approved_research_candidates"] == ["pkg-001"]
+
+
+def test_governor_committee_summary_rejects_research_candidates_when_tightened() -> None:
+    service = GovernorService()
+    expert_opinions = service.build_expert_opinions(
+        {
+            "latest_snapshot_version": "snap-tightened",
+            "current_run_mode": RunMode.DEGRADED.value,
+            "active_fault_flags": [],
+            "recent_risk_events": [{"event_type": "recovery_failed"}],
+            "symbol_summaries": [{"symbol": "BTC-USDT-SWAP"}],
+        },
+        now=datetime.now(UTC),
+    )
+    package = StrategyPackage(
+        strategy_package_id="pkg-002",
+        generated_at=datetime.now(UTC),
+        trigger=ResearchTrigger.MANUAL,
+        symbol_scope=["BTC-USDT-SWAP"],
+        market_environment_scope=["trend"],
+        strategy_family="breakout",
+        directionality="long_short",
+        entry_rules={"signal": "breakout_confirmed"},
+        exit_rules={"stop_loss_bps": 50},
+        position_sizing_rules={"risk_fraction": 0.0025},
+        risk_constraints={"max_hold_minutes": 60},
+        parameter_set={"lookback_fast": 20},
+        backtest_summary={"total_return": 0.18},
+        performance_summary={"sharpe": 1.4},
+        failure_modes=[],
+        invalidating_conditions=[],
+        research_reason="manual study",
+    )
+
+    summary = service.build_committee_summary(
+        expert_opinions=expert_opinions,
+        research_candidates=[package],
+    )
+
+    assert summary["consensus_decision"] == "tighten_risk"
+    assert summary["research_candidate_count"] == 1
+    assert summary["approved_research_candidates"] == []
 
 
 def test_governor_builds_qdrant_case_query_from_committee_context() -> None:

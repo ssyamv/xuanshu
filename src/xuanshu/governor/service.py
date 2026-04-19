@@ -6,6 +6,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Protocol
 
 from xuanshu.contracts.governance import ExpertOpinion
+from xuanshu.contracts.research import StrategyPackage
 from xuanshu.contracts.strategy import StrategyConfigSnapshot
 from xuanshu.core.enums import ApprovalState, RunMode
 from xuanshu.infra.ai.governor_client import GovernorClient
@@ -193,7 +194,13 @@ class GovernorService:
             ),
         ]
 
-    def build_committee_summary(self, expert_opinions: list[ExpertOpinion]) -> dict[str, object]:
+    def build_committee_summary(
+        self,
+        expert_opinions: list[ExpertOpinion],
+        *,
+        research_candidates: list[StrategyPackage] | None = None,
+    ) -> dict[str, object]:
+        research_candidates = research_candidates or []
         blocking_flags = sorted({flag for opinion in expert_opinions for flag in opinion.risk_flags})
         if any(flag in {"event:recovery_failed", "fault:manual_takeover", "mode:halted"} for flag in blocking_flags):
             recommended_mode_floor = RunMode.HALTED.value
@@ -216,7 +223,7 @@ class GovernorService:
             if all(opinion.decision in benign_decisions for opinion in expert_opinions)
             else "tighten_risk"
         )
-        return {
+        summary: dict[str, object] = {
             "consensus_decision": consensus_decision,
             "recommended_mode_floor": recommended_mode_floor,
             "blocking_flags": blocking_flags,
@@ -226,6 +233,31 @@ class GovernorService:
             ),
             "active_experts": [opinion.expert_type for opinion in expert_opinions],
         }
+        if research_candidates:
+            summary["research_candidate_count"] = len(research_candidates)
+            summary["approved_research_candidates"] = (
+                [candidate.strategy_package_id for candidate in research_candidates]
+                if self._committee_can_approve_research(
+                    expert_opinions=expert_opinions,
+                    blocking_flags=blocking_flags,
+                    consensus_decision=consensus_decision,
+                    requires_human_review=bool(summary["requires_human_review"]),
+                )
+                else []
+            )
+        return summary
+
+    @staticmethod
+    def _committee_can_approve_research(
+        *,
+        expert_opinions: list[ExpertOpinion],
+        blocking_flags: list[str],
+        consensus_decision: str,
+        requires_human_review: bool,
+    ) -> bool:
+        if not expert_opinions:
+            return True
+        return not blocking_flags and consensus_decision == "maintain" and not requires_human_review
 
     def build_governance_case_query(
         self,

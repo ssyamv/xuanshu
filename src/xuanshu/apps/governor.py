@@ -5,9 +5,11 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 
 from xuanshu.config.settings import GovernorRuntimeSettings
+from xuanshu.contracts.research import ResearchTrigger, StrategyPackage
 from xuanshu.contracts.strategy import StrategyConfigSnapshot
 from xuanshu.core.enums import ApprovalState, RunMode
 from xuanshu.governor.service import GovernorService
+from xuanshu.governor.research import StrategyResearchEngine
 from xuanshu.infra.ai.governor_client import ConfiguredGovernorAgentRunner, GovernorClient
 from xuanshu.infra.storage.postgres_store import PostgresRuntimeStore
 from xuanshu.infra.storage.qdrant_store import QdrantCaseStore
@@ -17,6 +19,8 @@ from xuanshu.infra.storage.redis_store import (
     RuntimeStateStore,
     SnapshotStore,
 )
+
+_APPROVED_RESEARCH_SOURCE_REASON = "approved research package"
 
 
 @dataclass(slots=True)
@@ -60,6 +64,115 @@ def build_history_store(settings: GovernorRuntimeSettings) -> PostgresRuntimeSto
 
 def build_case_store(settings: GovernorRuntimeSettings) -> QdrantCaseStore:
     return QdrantCaseStore(qdrant_url=str(settings.qdrant_url))
+
+
+def _build_research_candidates(
+    runtime: GovernorRuntime,
+    state_summary: dict[str, object],
+) -> list[StrategyPackage]:
+    symbol_summaries = state_summary.get("symbol_summaries")
+    if not isinstance(symbol_summaries, list) or not symbol_summaries:
+        return []
+
+    symbol_scope: list[str] = []
+    for summary in symbol_summaries:
+        if not isinstance(summary, dict):
+            continue
+        symbol = summary.get("symbol")
+        if isinstance(symbol, str) and symbol not in symbol_scope:
+            symbol_scope.append(symbol)
+    if not symbol_scope:
+        return []
+
+    historical_rows = _load_research_historical_rows(runtime, symbol_scope)
+    if not historical_rows:
+        return []
+
+    return [
+        StrategyResearchEngine().build_candidate_package(
+            trigger=ResearchTrigger.SCHEDULE,
+            symbol_scope=symbol_scope,
+            market_environment="trend",
+            historical_rows=historical_rows,
+            research_reason="governor strategy research",
+        )
+    ]
+
+
+def _load_research_historical_rows(
+    runtime: GovernorRuntime,
+    symbol_scope: list[str],
+) -> list[dict[str, object]]:
+    historical_rows: list[dict[str, object]] = []
+    for table in ("orders", "fills", "positions"):
+        for row in reversed(runtime.history_store.list_recent_rows(table, limit=20)):
+            historical_row = _coerce_historical_row(row, symbol_scope)
+            if historical_row is not None:
+                historical_rows.append(historical_row)
+    return historical_rows
+
+
+def _coerce_historical_row(
+    row: object,
+    symbol_scope: list[str],
+) -> dict[str, object] | None:
+    if not isinstance(row, dict):
+        return None
+    symbol = row.get("symbol")
+    if not isinstance(symbol, str) or symbol not in symbol_scope:
+        return None
+    close = _coerce_historical_close(
+        row.get("mark_price"),
+        row.get("price"),
+        row.get("average_price"),
+    )
+    if close is None:
+        return None
+    timestamp = _coerce_historical_timestamp(
+        row.get("generated_at") or row.get("timestamp") or row.get("created_at")
+    )
+    if timestamp is None:
+        return None
+    return {
+        "timestamp": timestamp,
+        "close": close,
+    }
+
+
+def _coerce_historical_close(*values: object) -> float | None:
+    for value in values:
+        if isinstance(value, int | float):
+            return float(value)
+        if isinstance(value, str):
+            normalized = value.strip()
+            if not normalized:
+                continue
+            try:
+                return float(normalized)
+            except ValueError:
+                continue
+    return None
+
+
+def _coerce_historical_timestamp(value: object) -> datetime | None:
+    if isinstance(value, datetime):
+        if value.tzinfo is None or value.utcoffset() is None:
+            return None
+        return value.astimezone(UTC)
+    if isinstance(value, str):
+        normalized = value.strip()
+        if not normalized:
+            return None
+        if normalized.endswith("Z"):
+            normalized = normalized[:-1] + "+00:00"
+        try:
+            parsed = datetime.fromisoformat(normalized)
+        except ValueError:
+            return None
+        if parsed.tzinfo is None or parsed.utcoffset() is None:
+            return None
+        return parsed.astimezone(UTC)
+    return None
 
 
 def _build_bootstrap_snapshot() -> StrategyConfigSnapshot:
@@ -131,9 +244,49 @@ async def _run_governor_cycle(runtime: GovernorRuntime) -> None:
         if isinstance(opinion, dict):
             runtime.history_store.append_expert_opinion(opinion)
 
-    cycle_status = "published"
+    research_candidates = _build_research_candidates(runtime, state_summary)
+    approved_research_candidates: list[StrategyPackage] = []
+    if research_candidates:
+        expert_opinions = runtime.service.build_expert_opinions(
+            state_summary,
+            now=datetime.now(UTC),
+        )
+        committee_summary = runtime.service.build_committee_summary(
+            expert_opinions,
+            research_candidates=research_candidates,
+        )
+        approved_candidate_ids = committee_summary.get("approved_research_candidates")
+        if isinstance(approved_candidate_ids, list):
+            approved_candidate_ids = {
+                candidate_id for candidate_id in approved_candidate_ids if isinstance(candidate_id, str)
+            }
+            approved_research_candidates = [
+                candidate for candidate in research_candidates if candidate.strategy_package_id in approved_candidate_ids
+            ]
+        state_summary = {
+            **state_summary,
+            "committee_summary": committee_summary,
+        }
+        if approved_research_candidates:
+            state_summary["research_candidates"] = [
+                candidate.model_dump(mode="json") for candidate in approved_research_candidates
+            ]
+
+    published_snapshot: StrategyConfigSnapshot | None = None
+    approved_research_candidate_ids: list[str] = []
+    committee_summary = state_summary.get("committee_summary")
+    if isinstance(committee_summary, dict):
+        approved_candidates = committee_summary.get("approved_research_candidates")
+        if isinstance(approved_candidates, list):
+            approved_research_candidate_ids = [
+                candidate_id for candidate_id in approved_candidates if isinstance(candidate_id, str)
+            ]
 
     def _publish_snapshot(snapshot: StrategyConfigSnapshot) -> None:
+        nonlocal published_snapshot
+        if snapshot.approval_state == ApprovalState.APPROVED and approved_research_candidate_ids:
+            snapshot = snapshot.model_copy(update={"source_reason": _APPROVED_RESEARCH_SOURCE_REASON})
+        published_snapshot = snapshot
         runtime.snapshot_store.set_latest_snapshot(snapshot.version_id, snapshot)
         runtime.published_snapshots.append(snapshot)
         runtime.history_store.append_strategy_snapshot(
@@ -143,12 +296,6 @@ async def _run_governor_cycle(runtime: GovernorRuntime) -> None:
                 "approval_state": snapshot.approval_state.value,
             }
         )
-        runtime.history_store.append_governor_run(
-            {
-                "version_id": snapshot.version_id,
-                "status": cycle_status,
-            }
-        )
 
     result = await runtime.service.run_cycle(
         state_summary=state_summary,
@@ -156,8 +303,13 @@ async def _run_governor_cycle(runtime: GovernorRuntime) -> None:
         governor_client=runtime.governor_client,
         publish_snapshot=_publish_snapshot,
     )
-    cycle_status = result.status
-    runtime.last_snapshot = result.snapshot
+    runtime.last_snapshot = published_snapshot or result.snapshot
+    runtime.history_store.append_governor_run(
+        {
+            "version_id": runtime.last_snapshot.version_id,
+            "status": result.status,
+        }
+    )
     runtime.consecutive_failures = 0 if result.status == "published" else runtime.consecutive_failures + 1
     runtime.runtime_store.set_governor_health_summary(
         runtime.service.build_health_summary(

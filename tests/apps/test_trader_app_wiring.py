@@ -161,6 +161,35 @@ def test_trader_runtime_contract_lists_starting_nav() -> None:
     assert "XUANSHU_TRADER_STARTING_NAV:" in compose
 
 
+def test_single_host_deploy_contract_lists_prod_env_template() -> None:
+    prod_env = Path(".env.prod.example").read_text(encoding="utf-8")
+
+    assert "XUANSHU_ENV=prod" in prod_env
+    assert "XUANSHU_DEFAULT_RUN_MODE=halted" in prod_env
+    assert "OKX_API_KEY=" in prod_env
+    assert "OPENAI_API_KEY=" in prod_env
+    assert "TELEGRAM_BOT_TOKEN=" in prod_env
+
+
+def test_single_host_deploy_doc_pins_compose_entrypoint() -> None:
+    deploy_doc = Path("docs/operations/single-host-deploy.md").read_text(encoding="utf-8")
+    compose = Path("docker-compose.yml").read_text(encoding="utf-8")
+
+    assert "docker compose --env-file .env.prod up -d --build" in deploy_doc
+    assert "restart: unless-stopped" in compose
+
+
+def test_single_host_operations_docs_cover_research_triggering_and_approval() -> None:
+    alerts = Path("docs/operations/alerts.md").read_text(encoding="utf-8")
+    runbook = Path("docs/operations/runbook.md").read_text(encoding="utf-8")
+
+    assert "manual research" in runbook
+    assert "schedule-driven research" in runbook
+    assert "event-triggered research" in runbook
+    assert "committee approval" in runbook
+    assert "committee approval" in alerts
+
+
 def test_trader_runtime_loads_starting_nav_from_settings(monkeypatch) -> None:
     monkeypatch.setenv("XUANSHU_TRADER_STARTING_NAV", "250000")
     monkeypatch.setenv("OKX_API_KEY", "api-key")
@@ -168,6 +197,19 @@ def test_trader_runtime_loads_starting_nav_from_settings(monkeypatch) -> None:
     monkeypatch.setenv("OKX_API_PASSPHRASE", "api-passphrase")
     runtime = trader_app.build_trader_runtime()
     assert runtime.starting_nav == 250000.0
+
+
+def test_trader_runtime_starts_in_default_run_mode_from_settings(monkeypatch) -> None:
+    monkeypatch.setenv("XUANSHU_DEFAULT_RUN_MODE", "halted")
+    monkeypatch.setenv("OKX_API_KEY", "api-key")
+    monkeypatch.setenv("OKX_API_SECRET", "api-secret")
+    monkeypatch.setenv("OKX_API_PASSPHRASE", "api-passphrase")
+
+    runtime = trader_app.build_trader_runtime()
+
+    assert runtime.current_mode == RunMode.HALTED
+    assert runtime.startup_snapshot.market_mode == RunMode.HALTED
+    assert runtime.startup_checkpoint.current_mode == RunMode.HALTED
 
 
 def test_trader_runtime_reads_latest_snapshot_from_shared_store(monkeypatch) -> None:

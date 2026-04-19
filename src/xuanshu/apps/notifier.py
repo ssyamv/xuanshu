@@ -7,9 +7,12 @@ from typing import Protocol
 from xuanshu.config.settings import NotifierRuntimeSettings
 from xuanshu.core.enums import RunMode
 from xuanshu.infra.notifier.telegram import TelegramInboundMessage, TextMessagePayload
+from xuanshu.ops.runtime_logging import configure_runtime_logger
 from xuanshu.infra.storage.postgres_store import PostgresRuntimeStore
 from xuanshu.infra.storage.redis_store import RedisRuntimeStateStore, RedisSnapshotStore
 from xuanshu.notifier.service import NotifierService
+
+_LOGGER = configure_runtime_logger("xuanshu.notifier")
 
 
 class NotifierAdapter(Protocol):
@@ -120,6 +123,10 @@ async def _poll_notifier_once(runtime: NotifierRuntime) -> None:
                 dedupe_key=f"command:{update.update_id}",
             )
         except Exception:
+            _LOGGER.exception(
+                "command_delivery_failed",
+                extra={"service": "notifier", "update_id": update.update_id},
+            )
             continue
 
 
@@ -132,6 +139,7 @@ async def _run_command_loop(runtime: NotifierRuntime) -> None:
 
 
 async def _run_notifier(runtime: NotifierRuntime) -> None:
+    _LOGGER.info("runtime_started", extra={"service": "notifier", "mode": runtime.mode.value})
     try:
         await runtime.service.deliver_text(
             adapter=runtime.adapter,
@@ -141,6 +149,7 @@ async def _run_notifier(runtime: NotifierRuntime) -> None:
             dedupe_key="runtime_started",
         )
     except Exception:
+        _LOGGER.exception("startup_notification_failed", extra={"service": "notifier"})
         pass
 
     if hasattr(runtime.adapter, "fetch_updates"):
@@ -150,8 +159,13 @@ async def _run_notifier(runtime: NotifierRuntime) -> None:
 
 
 def main() -> int:
-    asyncio.run(_run_notifier(build_notifier_runtime()))
+    try:
+        asyncio.run(_run_notifier(build_notifier_runtime()))
+    except Exception as exc:
+        _LOGGER.exception("runtime_failed", extra={"service": "notifier", "error": str(exc)})
+        raise
     return 0
+
 
 
 if __name__ == "__main__":

@@ -39,12 +39,14 @@ from xuanshu.infra.storage.redis_store import (
 from xuanshu.risk.kernel import RiskKernel
 from xuanshu.state.engine import StateEngine
 from xuanshu.strategies.signals import build_candidate_signals
+from xuanshu.ops.runtime_logging import configure_runtime_logger
 from xuanshu.trader.dispatcher import dispatch_event
 from xuanshu.trader.recovery import RecoverySupervisor
 
 _OKX_REST_BASE_URL = "https://www.okx.com"
 _OKX_PUBLIC_WS_URL = "wss://ws.okx.com:8443/ws/v5/public"
 _OKX_PRIVATE_WS_URL = "wss://ws.okx.com:8443/ws/v5/private"
+_LOGGER = configure_runtime_logger("xuanshu.trader")
 _RUN_MODE_PRIORITY = {
     RunMode.NORMAL: 0,
     RunMode.DEGRADED: 1,
@@ -84,31 +86,31 @@ class TraderRuntime:
     execution_sequence: int = 0
 
 
-def _build_startup_snapshot() -> StrategyConfigSnapshot:
+def _build_startup_snapshot(settings: TraderRuntimeSettings) -> StrategyConfigSnapshot:
     generated_at = datetime.now(UTC)
     return StrategyConfigSnapshot(
         version_id="bootstrap",
         generated_at=generated_at,
         effective_from=generated_at,
         expires_at=generated_at + timedelta(minutes=5),
-        symbol_whitelist=["BTC-USDT-SWAP"],
+        symbol_whitelist=list(settings.okx_symbols),
         strategy_enable_flags={"breakout": True, "mean_reversion": False, "risk_pause": True},
         risk_multiplier=0.5,
         per_symbol_max_position=0.12,
         max_leverage=3,
-        market_mode=RunMode.NORMAL,
+        market_mode=settings.default_run_mode,
         approval_state=ApprovalState.APPROVED,
         source_reason="bootstrap",
         ttl_sec=300,
     )
 
 
-def _build_startup_checkpoint(startup_snapshot: StrategyConfigSnapshot) -> ExecutionCheckpoint:
+def _build_startup_checkpoint(startup_snapshot: StrategyConfigSnapshot, current_mode: RunMode) -> ExecutionCheckpoint:
     return ExecutionCheckpoint(
         checkpoint_id="startup",
         created_at=datetime.now(UTC),
         active_snapshot_version=startup_snapshot.version_id,
-        current_mode=RunMode.NORMAL,
+        current_mode=current_mode,
         positions_snapshot=[],
         open_orders_snapshot=[],
         budget_state=CheckpointBudgetState(
@@ -162,10 +164,18 @@ def build_trader_runtime() -> TraderRuntime:
     settings = TraderRuntimeSettings()
     components = build_trader_components(settings)
     snapshot_store = build_snapshot_store(settings)
-    startup_snapshot = _build_startup_snapshot()
+    startup_snapshot = _build_startup_snapshot(settings)
     latest_snapshot = snapshot_store.get_latest_snapshot()
     if latest_snapshot is not None:
-        startup_snapshot = latest_snapshot
+        startup_snapshot = latest_snapshot.model_copy(
+            update={
+                "market_mode": _more_restrictive_mode(
+                    settings.default_run_mode,
+                    latest_snapshot.market_mode,
+                )
+            }
+        )
+    initial_mode = startup_snapshot.market_mode
     return TraderRuntime(
         settings=settings,
         components=components,
@@ -176,7 +186,8 @@ def build_trader_runtime() -> TraderRuntime:
         recovery_supervisor=RecoverySupervisor(rest_client=components.okx_rest_client),
         starting_nav=settings.trader_starting_nav,
         startup_snapshot=startup_snapshot,
-        startup_checkpoint=_build_startup_checkpoint(startup_snapshot),
+        startup_checkpoint=_build_startup_checkpoint(startup_snapshot, initial_mode),
+        current_mode=initial_mode,
     )
 
 
@@ -417,6 +428,14 @@ async def _dispatch_runtime_event(runtime: TraderRuntime, event: object) -> None
 
 
 async def _run_trader(runtime: TraderRuntime) -> None:
+    _LOGGER.info(
+        "runtime_started",
+        extra={
+            "service": "trader",
+            "mode": runtime.current_mode.value,
+            "symbols": list(runtime.settings.okx_symbols),
+        },
+    )
     latest_snapshot = runtime.snapshot_store.get_latest_snapshot()
     if latest_snapshot is not None:
         runtime.startup_snapshot = latest_snapshot
@@ -491,7 +510,11 @@ def main() -> int:
         finally:
             await runtime.components.aclose()
 
-    asyncio.run(_main())
+    try:
+        asyncio.run(_main())
+    except Exception as exc:
+        _LOGGER.exception("runtime_failed", extra={"service": "trader", "error": str(exc)})
+        raise
     return 0
 
 

@@ -1,10 +1,11 @@
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, timedelta, timezone
 
 import pytest
 from pydantic import ValidationError
 
 from xuanshu.config.settings import Settings, TraderRuntimeSettings
 from xuanshu.contracts.checkpoint import CheckpointBudgetState, CheckpointOrder, CheckpointPosition, ExecutionCheckpoint
+from xuanshu.contracts.research import ResearchTrigger, StrategyPackage
 from xuanshu.contracts.risk import CandidateSignal
 from xuanshu.contracts.market import MarketStateSnapshot
 from xuanshu.contracts.governance import ExpertOpinion
@@ -42,6 +43,135 @@ def test_strategy_snapshot_and_expert_opinion_are_stable_contracts() -> None:
 
     assert snapshot.is_expired(datetime.now(UTC)) is False
     assert opinion.expert_type == "risk"
+
+
+def test_strategy_package_contract_is_typed() -> None:
+    package = StrategyPackage(
+        strategy_package_id="pkg-001",
+        generated_at=datetime.now(UTC),
+        trigger=ResearchTrigger.MANUAL,
+        symbol_scope=["BTC-USDT-SWAP", "ETH-USDT-SWAP"],
+        market_environment_scope=["trend"],
+        strategy_family="breakout",
+        directionality="long_short",
+        entry_rules={"signal": "breakout_confirmed"},
+        exit_rules={"stop_loss_bps": 50, "take_profit_bps": 120},
+        position_sizing_rules={"risk_fraction": 0.0025},
+        risk_constraints={"max_hold_minutes": 60},
+        parameter_set={"lookback_fast": 20, "lookback_slow": 60},
+        backtest_summary={"total_return": 0.18},
+        performance_summary={"sharpe": 1.4},
+        failure_modes=["range_whipsaw"],
+        invalidating_conditions=["liquidity_collapse"],
+        research_reason="manual research run",
+    )
+
+    assert package.directionality == "long_short"
+
+
+def test_strategy_package_rejects_unknown_trigger_value() -> None:
+    payload = {
+        "strategy_package_id": "pkg-001",
+        "generated_at": datetime.now(UTC),
+        "trigger": "not-a-trigger",
+        "symbol_scope": ["BTC-USDT-SWAP", "ETH-USDT-SWAP"],
+        "market_environment_scope": ["trend"],
+        "strategy_family": "breakout",
+        "directionality": "long_short",
+        "entry_rules": {"signal": "breakout_confirmed"},
+        "exit_rules": {"stop_loss_bps": 50, "take_profit_bps": 120},
+        "position_sizing_rules": {"risk_fraction": 0.0025},
+        "risk_constraints": {"max_hold_minutes": 60},
+        "parameter_set": {"lookback_fast": 20, "lookback_slow": 60},
+        "backtest_summary": {"total_return": 0.18},
+        "performance_summary": {"sharpe": 1.4},
+        "failure_modes": ["range_whipsaw"],
+        "invalidating_conditions": ["liquidity_collapse"],
+        "research_reason": "manual research run",
+    }
+
+    with pytest.raises(ValidationError):
+        StrategyPackage(**payload)
+
+
+@pytest.mark.parametrize(
+    "field_name",
+    ["symbol_scope", "market_environment_scope"],
+)
+def test_strategy_package_rejects_blank_entries(field_name: str) -> None:
+    payload = {
+        "strategy_package_id": "pkg-001",
+        "generated_at": datetime.now(UTC),
+        "trigger": ResearchTrigger.MANUAL,
+        "symbol_scope": ["BTC-USDT-SWAP"],
+        "market_environment_scope": ["trend"],
+        "strategy_family": "breakout",
+        "directionality": "long_short",
+        "entry_rules": {"signal": "breakout_confirmed"},
+        "exit_rules": {"stop_loss_bps": 50, "take_profit_bps": 120},
+        "position_sizing_rules": {"risk_fraction": 0.0025},
+        "risk_constraints": {"max_hold_minutes": 60},
+        "parameter_set": {"lookback_fast": 20, "lookback_slow": 60},
+        "backtest_summary": {"total_return": 0.18},
+        "performance_summary": {"sharpe": 1.4},
+        "failure_modes": ["range_whipsaw"],
+        "invalidating_conditions": ["liquidity_collapse"],
+        "research_reason": "manual research run",
+    }
+    payload[field_name] = ["", "trend"] if field_name == "market_environment_scope" else ["BTC-USDT-SWAP", " "]
+
+    with pytest.raises(ValidationError):
+        StrategyPackage(**payload)
+
+
+def test_strategy_package_rejects_naive_generated_at() -> None:
+    payload = {
+        "strategy_package_id": "pkg-001",
+        "generated_at": datetime.now(),
+        "trigger": ResearchTrigger.MANUAL,
+        "symbol_scope": ["BTC-USDT-SWAP", "ETH-USDT-SWAP"],
+        "market_environment_scope": ["trend"],
+        "strategy_family": "breakout",
+        "directionality": "long_short",
+        "entry_rules": {"signal": "breakout_confirmed"},
+        "exit_rules": {"stop_loss_bps": 50, "take_profit_bps": 120},
+        "position_sizing_rules": {"risk_fraction": 0.0025},
+        "risk_constraints": {"max_hold_minutes": 60},
+        "parameter_set": {"lookback_fast": 20, "lookback_slow": 60},
+        "backtest_summary": {"total_return": 0.18},
+        "performance_summary": {"sharpe": 1.4},
+        "failure_modes": ["range_whipsaw"],
+        "invalidating_conditions": ["liquidity_collapse"],
+        "research_reason": "manual research run",
+    }
+
+    with pytest.raises(ValidationError, match="timezone-aware"):
+        StrategyPackage(**payload)
+
+
+def test_strategy_package_normalizes_generated_at_to_utc() -> None:
+    package = StrategyPackage(
+        strategy_package_id="pkg-001",
+        generated_at=datetime(2026, 1, 1, 12, 0, tzinfo=timezone(timedelta(hours=8))),
+        trigger=ResearchTrigger.MANUAL,
+        symbol_scope=["BTC-USDT-SWAP", "ETH-USDT-SWAP"],
+        market_environment_scope=["trend"],
+        strategy_family="breakout",
+        directionality="long_short",
+        entry_rules={"signal": "breakout_confirmed"},
+        exit_rules={"stop_loss_bps": 50, "take_profit_bps": 120},
+        position_sizing_rules={"risk_fraction": 0.0025},
+        risk_constraints={"max_hold_minutes": 60},
+        parameter_set={"lookback_fast": 20, "lookback_slow": 60},
+        backtest_summary={"total_return": 0.18},
+        performance_summary={"sharpe": 1.4},
+        failure_modes=["range_whipsaw"],
+        invalidating_conditions=["liquidity_collapse"],
+        research_reason="manual research run",
+    )
+
+    assert package.generated_at == datetime(2026, 1, 1, 4, 0, tzinfo=UTC)
+    assert package.generated_at.tzinfo == UTC
 
 
 @pytest.mark.parametrize("field_name", ["generated_at", "effective_from", "expires_at"])
@@ -132,6 +262,17 @@ def test_settings_load_okx_symbols_from_csv_env(monkeypatch: pytest.MonkeyPatch,
     settings = Settings()
 
     assert settings.okx_symbols == expected
+
+
+def test_trader_runtime_settings_load_default_run_mode_from_prefixed_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("OKX_API_KEY", "okx-key")
+    monkeypatch.setenv("OKX_API_SECRET", "okx-secret")
+    monkeypatch.setenv("OKX_API_PASSPHRASE", "okx-passphrase")
+    monkeypatch.setenv("XUANSHU_DEFAULT_RUN_MODE", "halted")
+
+    settings = TraderRuntimeSettings()
+
+    assert settings.default_run_mode == RunMode.HALTED
 
 
 @pytest.mark.parametrize(
