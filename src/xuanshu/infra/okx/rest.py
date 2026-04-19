@@ -96,35 +96,45 @@ class OkxRestClient:
             payload["px"] = price
         return payload
 
-    async def place_order(self, payload: dict[str, str], timestamp: str) -> dict[str, object]:
+    async def place_order(self, payload: dict[str, str], timestamp: str) -> list[dict[str, object]]:
         self._validate_place_order_payload(payload)
         body = json.dumps(payload, separators=(",", ":"))
         headers = self.build_signed_headers("POST", "/api/v5/trade/order", body, timestamp)
         response = await self.client.post("/api/v5/trade/order", content=body, headers=headers)
         response.raise_for_status()
-        return response.json()
+        return self._extract_data_payload(response.json())
 
-    async def fetch_open_orders(self, symbol: str, timestamp: str) -> dict[str, object]:
+    async def fetch_open_orders(self, symbol: str, timestamp: str) -> list[dict[str, object]]:
         self._validate_non_blank_fields({"instId": symbol})
         path = self._build_query_path("/api/v5/trade/orders-pending", {"instId": symbol})
         return await self._signed_get(path, timestamp)
 
-    async def fetch_positions(self, symbol: str, timestamp: str) -> dict[str, object]:
+    async def fetch_positions(self, symbol: str, timestamp: str) -> list[dict[str, object]]:
         self._validate_non_blank_fields({"instId": symbol})
         path = self._build_query_path("/api/v5/account/positions", {"instId": symbol})
         return await self._signed_get(path, timestamp)
 
-    async def fetch_account_summary(self, timestamp: str) -> dict[str, object]:
+    async def fetch_account_summary(self, timestamp: str) -> list[dict[str, object]]:
         return await self._signed_get("/api/v5/account/balance", timestamp)
 
-    async def _signed_get(self, path: str, timestamp: str) -> dict[str, object]:
+    async def _signed_get(self, path: str, timestamp: str) -> list[dict[str, object]]:
         headers = self.build_signed_headers("GET", path, "", timestamp)
         response = await self.client.get(path, headers=headers)
         response.raise_for_status()
-        return response.json()
+        return self._extract_data_payload(response.json())
 
     def _build_query_path(self, path: str, params: dict[str, str]) -> str:
         return f"{path}?{urlencode(params)}"
+
+    def _extract_data_payload(self, payload: object) -> list[dict[str, object]]:
+        if not isinstance(payload, dict):
+            raise ValueError("OKX response payload must be an object")
+        data = payload.get("data")
+        if not isinstance(data, list):
+            raise ValueError("OKX response payload data must be a list")
+        if any(not isinstance(item, dict) for item in data):
+            raise ValueError("OKX response payload data items must be objects")
+        return data
 
     def _validate_order_entry_fields(
         self,

@@ -307,9 +307,52 @@ def test_okx_private_stream_handles_optional_blank_fields_without_crashing() -> 
     assert order_events[0].price == 0.0
     assert order_events[0].filled_size == 0.0
     assert len(position_events) == 1
-    assert isinstance(position_events[0], PositionUpdateEvent)
-    assert position_events[0].average_price == 0.0
-    assert position_events[0].mark_price == 0.0
+    assert isinstance(position_events[0], FaultEvent)
+    assert position_events[0].code == "positions_decode_error"
+
+
+def test_okx_private_stream_normalizes_blank_account_and_position_numerics_into_faults() -> None:
+    stream = OkxPrivateStream(url="wss://ws.okx.com:8443/ws/v5/private")
+
+    position_events = stream.decode_message(
+        {
+            "arg": {"channel": "positions", "instType": "SWAP"},
+            "data": [
+                {
+                    "instId": "BTC-USDT-SWAP",
+                    "avgPx": "",
+                    "markPx": "100.4",
+                    "pos": "1",
+                    "upl": "0.2",
+                    "uTime": "1713484805000",
+                }
+            ],
+        },
+        sequence="pri-2",
+    )
+    account_events = stream.decode_message(
+        {
+            "arg": {"channel": "account"},
+            "data": [
+                {
+                    "totalEq": "1000",
+                    "availEq": "",
+                    "mgnRatio": "0.15",
+                    "uTime": "1713484810000",
+                }
+            ],
+        },
+        sequence="pri-3",
+    )
+
+    assert len(position_events) == 1
+    assert isinstance(position_events[0], FaultEvent)
+    assert position_events[0].code == "positions_decode_error"
+    assert "avgPx" in position_events[0].detail
+    assert len(account_events) == 1
+    assert isinstance(account_events[0], FaultEvent)
+    assert account_events[0].code == "account_decode_error"
+    assert "availEq" in account_events[0].detail
 
 
 def test_okx_private_stream_normalizes_decode_failures_into_faults() -> None:
@@ -530,7 +573,7 @@ def test_okx_rest_client_place_order_posts_signed_body() -> None:
             captured["raise_for_status_called"] = True
 
         def json(self) -> dict[str, object]:
-            return {"result": "ok"}
+            return {"code": "0", "data": [{"ordId": "12345", "sCode": "0"}]}
 
     async def fake_post(path: str, *, content: str, headers: dict[str, str]) -> DummyResponse:
         captured["path"] = path
@@ -542,7 +585,7 @@ def test_okx_rest_client_place_order_posts_signed_body() -> None:
 
     result = asyncio.run(client.place_order(payload, timestamp))
 
-    assert result == {"result": "ok"}
+    assert result == [{"ordId": "12345", "sCode": "0"}]
     assert captured["path"] == "/api/v5/trade/order"
     assert captured["content"] == expected_body
     assert captured["headers"] == {
@@ -758,7 +801,7 @@ def test_okx_rest_client_fetches_open_orders_positions_and_account_summary() -> 
 
     async def fake_get(path: str, *, headers: dict[str, str]) -> DummyResponse:
         captured.append((path, headers["OK-ACCESS-TIMESTAMP"], headers))
-        return DummyResponse({"path": path})
+        return DummyResponse({"code": "0", "data": [{"path": path}]})
 
     client.client.get = fake_get  # type: ignore[method-assign]
 
@@ -766,9 +809,9 @@ def test_okx_rest_client_fetches_open_orders_positions_and_account_summary() -> 
     positions = asyncio.run(client.fetch_positions("BTC-USDT-SWAP", timestamp))
     account = asyncio.run(client.fetch_account_summary(timestamp))
 
-    assert open_orders == {"path": "/api/v5/trade/orders-pending?instId=BTC-USDT-SWAP"}
-    assert positions == {"path": "/api/v5/account/positions?instId=BTC-USDT-SWAP"}
-    assert account == {"path": "/api/v5/account/balance"}
+    assert open_orders == [{"path": "/api/v5/trade/orders-pending?instId=BTC-USDT-SWAP"}]
+    assert positions == [{"path": "/api/v5/account/positions?instId=BTC-USDT-SWAP"}]
+    assert account == [{"path": "/api/v5/account/balance"}]
     assert captured[0][0] == "/api/v5/trade/orders-pending?instId=BTC-USDT-SWAP"
     assert captured[1][0] == "/api/v5/account/positions?instId=BTC-USDT-SWAP"
     assert captured[2][0] == "/api/v5/account/balance"

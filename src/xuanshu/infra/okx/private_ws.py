@@ -151,10 +151,10 @@ class OkxPrivateStream:
             exchange="okx",
             generated_at=self._parse_timestamp(item["uTime"]),
             private_sequence=sequence,
-            net_quantity=self._optional_float(item.get("pos"), default=0.0),
-            average_price=self._optional_float(item.get("avgPx"), default=0.0),
-            mark_price=self._optional_float(item.get("markPx"), default=0.0),
-            unrealized_pnl=self._optional_float(item.get("upl"), default=0.0),
+            net_quantity=self._required_float(item["pos"], field="pos"),
+            average_price=self._required_float(item["avgPx"], field="avgPx"),
+            mark_price=self._required_float(item["markPx"], field="markPx"),
+            unrealized_pnl=self._required_float(item["upl"], field="upl"),
         )
 
     def _decode_account(self, item: dict[str, Any], sequence: str) -> AccountSnapshotEvent:
@@ -163,9 +163,9 @@ class OkxPrivateStream:
             exchange="okx",
             generated_at=self._parse_timestamp(item["uTime"]),
             private_sequence=sequence,
-            equity=self._optional_float(item.get("totalEq"), default=0.0),
-            available_balance=self._optional_float(item.get("availEq"), default=0.0),
-            margin_ratio=self._optional_float(item.get("mgnRatio"), default=0.0),
+            equity=self._required_float(item["totalEq"], field="totalEq"),
+            available_balance=self._required_float(item["availEq"], field="availEq"),
+            margin_ratio=self._required_float(item["mgnRatio"], field="mgnRatio"),
         )
 
     def _build_fault(
