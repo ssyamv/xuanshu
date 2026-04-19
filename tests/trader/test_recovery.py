@@ -62,6 +62,30 @@ class _ConcurrentProbeRestClient(_FakeRestClient):
         return self._positions
 
 
+class _FailingRestClient(_FakeRestClient):
+    def __init__(
+        self,
+        *,
+        open_orders_error: Exception | None = None,
+        positions_error: Exception | None = None,
+    ) -> None:
+        super().__init__()
+        self._open_orders_error = open_orders_error
+        self._positions_error = positions_error
+
+    async def fetch_open_orders(self, symbol: str, timestamp: str) -> list[dict[str, object]]:
+        self.open_orders_calls.append((symbol, timestamp))
+        if self._open_orders_error is not None:
+            raise self._open_orders_error
+        return await super().fetch_open_orders(symbol, timestamp)
+
+    async def fetch_positions(self, symbol: str, timestamp: str) -> list[dict[str, object]]:
+        self.positions_calls.append((symbol, timestamp))
+        if self._positions_error is not None:
+            raise self._positions_error
+        return await super().fetch_positions(symbol, timestamp)
+
+
 def _build_checkpoint(
     *,
     positions_snapshot: list[CheckpointPosition] | None = None,
@@ -272,6 +296,55 @@ async def test_recovery_supervisor_blocks_when_checkpoint_and_exchange_diverge()
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
+    ("open_orders_error", "positions_error"),
+    [
+        (RuntimeError("open-orders fetch failed"), None),
+        (None, RuntimeError("positions fetch failed")),
+    ],
+)
+async def test_recovery_supervisor_fails_safe_when_exchange_fetches_raise(
+    open_orders_error: Exception | None,
+    positions_error: Exception | None,
+) -> None:
+    checkpoint = _build_checkpoint(
+        positions_snapshot=[
+            CheckpointPosition(
+                symbol="BTC-USDT-SWAP",
+                net_quantity=1.0,
+                mark_price=102.5,
+                unrealized_pnl=3.0,
+            )
+        ],
+        open_orders_snapshot=[
+            CheckpointOrder(
+                order_id="ord-1",
+                symbol="BTC-USDT-SWAP",
+                side="buy",
+                price=100.0,
+                size=1.0,
+                status="live",
+            )
+        ],
+    )
+    rest_client = _FailingRestClient(
+        open_orders_error=open_orders_error,
+        positions_error=positions_error,
+    )
+    supervisor = RecoverySupervisor(rest_client=rest_client)
+
+    result = await supervisor.run_startup_recovery(
+        "BTC-USDT-SWAP",
+        checkpoint,
+        timestamp="2026-04-19T00:00:00.000Z",
+    )
+
+    assert result["run_mode"] == "halted"
+    assert result["needs_reconcile"] is True
+    assert result["reason"] == "exchange_state_mismatch"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
     ("open_orders", "positions"),
     [
         ([_okx_open_order(price="not-a-number")], [_okx_position()]),
@@ -311,6 +384,55 @@ async def test_recovery_supervisor_fails_safe_on_malformed_exchange_numeric_fiel
                 symbol="BTC-USDT-SWAP",
                 side="buy",
                 price=100.0,
+                size=1.0,
+                status="live",
+            )
+        ],
+    )
+    supervisor = RecoverySupervisor(
+        rest_client=_FakeRestClient(open_orders=open_orders, positions=positions)
+    )
+
+    result = await supervisor.run_startup_recovery(
+        "BTC-USDT-SWAP",
+        checkpoint,
+        timestamp="2026-04-19T00:00:00.000Z",
+    )
+
+    assert result["run_mode"] == "halted"
+    assert result["needs_reconcile"] is True
+    assert result["reason"] == "exchange_state_mismatch"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("open_orders", "positions", "checkpoint_price", "checkpoint_quantity"),
+    [
+        ([_okx_open_order(price=True)], [_okx_position()], 1.0, 1.0),
+        ([_okx_open_order()], [_okx_position(net_quantity=False)], 100.0, 0.0),
+    ],
+)
+async def test_recovery_supervisor_rejects_bool_like_numeric_payloads(
+    open_orders: list[dict[str, object]],
+    positions: list[dict[str, object]],
+    checkpoint_price: float,
+    checkpoint_quantity: float,
+) -> None:
+    checkpoint = _build_checkpoint(
+        positions_snapshot=[
+            CheckpointPosition(
+                symbol="BTC-USDT-SWAP",
+                net_quantity=checkpoint_quantity,
+                mark_price=102.5,
+                unrealized_pnl=3.0,
+            )
+        ],
+        open_orders_snapshot=[
+            CheckpointOrder(
+                order_id="ord-1",
+                symbol="BTC-USDT-SWAP",
+                side="buy",
+                price=checkpoint_price,
                 size=1.0,
                 status="live",
             )

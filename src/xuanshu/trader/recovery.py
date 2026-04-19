@@ -43,10 +43,17 @@ class RecoverySupervisor:
         checkpoint: ExecutionCheckpoint,
         timestamp: str,
     ) -> dict[str, object]:
-        open_orders, positions = await asyncio.gather(
-            self.rest_client.fetch_open_orders(symbol, timestamp),
-            self.rest_client.fetch_positions(symbol, timestamp),
-        )
+        try:
+            open_orders, positions = await asyncio.gather(
+                self.rest_client.fetch_open_orders(symbol, timestamp),
+                self.rest_client.fetch_positions(symbol, timestamp),
+            )
+        except Exception:
+            return {
+                "run_mode": "halted",
+                "needs_reconcile": True,
+                "reason": "exchange_state_mismatch",
+            }
         checkpoint_orders = _normalize_checkpoint_items(checkpoint.open_orders_snapshot, fields=_ORDER_FIELDS)
         exchange_orders = _normalize_exchange_items(open_orders, field_aliases=_ORDER_FIELD_ALIASES)
         checkpoint_positions = _normalize_checkpoint_items(checkpoint.positions_snapshot, fields=_POSITION_FIELDS)
@@ -117,6 +124,8 @@ def _normalize_exchange_value(field: str, value: object) -> object:
 def _coerce_float(value: object) -> object:
     if value is None:
         return None
+    if isinstance(value, bool):
+        return float("nan")
     if isinstance(value, (int, float)):
         return float(value)
     if isinstance(value, str):
