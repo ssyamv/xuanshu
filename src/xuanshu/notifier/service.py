@@ -471,7 +471,7 @@ class NotifierService:
                 continue
             if "recovery_failed" in event_type:
                 continue
-            if event_type == "account_snapshot_updated":
+            if event_type in {"account_snapshot_updated", "signal_blocked"}:
                 continue
             if not isinstance(detail, str):
                 detail = str(detail)
