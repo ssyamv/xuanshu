@@ -137,12 +137,14 @@ class Settings(_XuanshuBaseSettings):
 class TraderRuntimeSettings(_XuanshuBaseSettings):
     okx_symbols: tuple[str, ...] = Field(default=("BTC-USDT-SWAP", "ETH-USDT-SWAP"), min_length=1)
     trader_starting_nav: float = Field(default=250_000.0, gt=0.0)
+    redis_url: RedisDsn = Field(default="redis://redis:6379/0", validation_alias="REDIS_URL")
     okx_api_key: SecretStr = Field(validation_alias="OKX_API_KEY")
     okx_api_secret: SecretStr = Field(validation_alias="OKX_API_SECRET")
     okx_api_passphrase: SecretStr = Field(validation_alias="OKX_API_PASSPHRASE")
 
 
 class GovernorRuntimeSettings(_XuanshuBaseSettings):
+    redis_url: RedisDsn = Field(default="redis://redis:6379/0", validation_alias="REDIS_URL")
     openai_api_key: SecretStr = Field(validation_alias="OPENAI_API_KEY")
     ai_timeout_sec: int = Field(default=12, gt=0, le=300)
 

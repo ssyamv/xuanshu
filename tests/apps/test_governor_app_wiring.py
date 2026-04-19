@@ -6,6 +6,19 @@ from pydantic import ValidationError
 import xuanshu.apps.governor as governor_app
 from xuanshu.core.enums import ApprovalState, RunMode
 from xuanshu.infra.ai.governor_client import ConfiguredGovernorAgentRunner, GovernorClient
+from xuanshu.infra.storage.redis_store import RedisSnapshotStore
+
+
+class _FakeRedis:
+    def __init__(self) -> None:
+        self.values: dict[str, bytes] = {}
+
+    def set(self, key: str, value: str) -> bool:
+        self.values[key] = value.encode("utf-8")
+        return True
+
+    def get(self, key: str) -> bytes | None:
+        return self.values.get(key)
 
 
 def _set_required_settings_env(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -108,7 +121,7 @@ def test_governor_runtime_runs_one_cycle_and_publishes_snapshot(monkeypatch) -> 
     assert [snapshot.version_id for snapshot in runtime.published_snapshots] == ["snap-new"]
 
 
-def test_governor_runtime_publishes_snapshot_to_shared_file_store(monkeypatch, tmp_path) -> None:
+def test_governor_runtime_publishes_snapshot_to_shared_redis_store(monkeypatch) -> None:
     _set_required_settings_env(monkeypatch)
     _clear_unrelated_settings_env(monkeypatch)
 
@@ -133,9 +146,13 @@ def test_governor_runtime_publishes_snapshot_to_shared_file_store(monkeypatch, t
     async def _noop_wait_forever() -> None:
         return None
 
-    monkeypatch.setenv("XUANSHU_SHARED_STATE_DIR", str(tmp_path))
     monkeypatch.setattr(governor_app, "_wait_forever", _noop_wait_forever)
     monkeypatch.setattr(governor_app, "build_governor_client", lambda settings: GovernorClient(_Runner()))
+    monkeypatch.setattr(
+        governor_app,
+        "build_snapshot_store",
+        lambda settings: RedisSnapshotStore(redis_client=_FakeRedis()),
+    )
 
     runtime = governor_app.build_governor_runtime()
     asyncio.run(governor_app._run_governor(runtime))
