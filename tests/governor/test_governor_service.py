@@ -417,6 +417,90 @@ def test_governor_builds_expert_opinions_and_halted_committee_summary() -> None:
     }
 
 
+def test_governor_build_state_summary_exposes_manual_release_target() -> None:
+    service = GovernorService()
+    history = PostgresRuntimeStore(dsn="postgresql://xuanshu:xuanshu@localhost:5432/xuanshu")
+
+    class _RuntimeStore:
+        def get_run_mode(self) -> RunMode | None:
+            return RunMode.HALTED
+
+        def get_fault_flags(self) -> dict[str, object] | None:
+            return {}
+
+        def get_symbol_runtime_summary(self, symbol: str) -> dict[str, object] | None:
+            return {"symbol": symbol}
+
+        def get_manual_release_target(self) -> str | None:
+            return "degraded"
+
+    class _SnapshotStore:
+        def get_latest_snapshot(self):
+            return snapshot
+
+    snapshot = StrategyConfigSnapshot(
+        version_id="snap-001",
+        generated_at=datetime.now(UTC),
+        effective_from=datetime.now(UTC),
+        expires_at=datetime.now(UTC) + timedelta(minutes=5),
+        symbol_whitelist=["BTC-USDT-SWAP"],
+        strategy_enable_flags={"breakout": True, "mean_reversion": False, "risk_pause": True},
+        risk_multiplier=0.7,
+        per_symbol_max_position=0.12,
+        max_leverage=3,
+        market_mode=RunMode.HALTED,
+        approval_state=ApprovalState.REJECTED,
+        source_reason="cached",
+        ttl_sec=300,
+    )
+
+    summary = service.build_state_summary(
+        runtime_store=_RuntimeStore(),
+        snapshot_store=_SnapshotStore(),
+        history_store=history,
+        symbols=snapshot.symbol_whitelist,
+        now=datetime(2026, 4, 18, tzinfo=UTC),
+    )
+
+    assert summary["manual_release_target"] == "degraded"
+
+
+def test_governor_applies_manual_release_override_to_halted_candidate() -> None:
+    service = GovernorService()
+    candidate = StrategyConfigSnapshot(
+        version_id="snap-candidate",
+        generated_at=datetime.now(UTC),
+        effective_from=datetime.now(UTC),
+        expires_at=datetime.now(UTC) + timedelta(minutes=5),
+        symbol_whitelist=["SYSTEM"],
+        strategy_enable_flags={"default": False},
+        risk_multiplier=0.0,
+        per_symbol_max_position=0.0,
+        max_leverage=1,
+        market_mode=RunMode.HALTED,
+        approval_state=ApprovalState.REJECTED,
+        source_reason="governor_ai",
+        ttl_sec=300,
+    )
+
+    governed = service.apply_guardrails(
+        candidate,
+        {
+            "current_run_mode": "halted",
+            "active_fault_flags": [],
+            "recent_risk_events": [{"event_type": "manual_release_requested"}],
+            "manual_release_target": "degraded",
+            "symbol_summaries": [{"symbol": "BTC-USDT-SWAP"}],
+        },
+    )
+
+    assert governed.market_mode == RunMode.DEGRADED
+    assert governed.approval_state == ApprovalState.APPROVED
+    assert governed.risk_multiplier == 0.25
+    assert governed.per_symbol_max_position == 0.12
+    assert governed.symbol_whitelist == ["SYSTEM", "BTC-USDT-SWAP"]
+
+
 def test_governor_committee_summary_includes_research_candidates() -> None:
     service = GovernorService()
     package = StrategyPackage(

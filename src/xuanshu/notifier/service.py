@@ -61,6 +61,15 @@ class RuntimeStateReader(Protocol):
     def get_governor_health_summary(self) -> dict[str, object] | None:
         ...
 
+    def set_manual_release_target(self, mode: str) -> None:
+        ...
+
+    def get_manual_release_target(self) -> str | None:
+        ...
+
+    def clear_manual_release_target(self) -> None:
+        ...
+
 
 class SnapshotReader(Protocol):
     def get_latest_snapshot(self) -> object | None:
@@ -108,8 +117,10 @@ class NotifierService:
             return render_text_message(self._render_risk())
         if command == "/takeover":
             return render_text_message(self._handle_takeover_command(text))
+        if command == "/release":
+            return render_text_message(self._handle_release_command(text))
         return render_text_message(
-            "Supported commands: /status /positions /orders /risk /mode /market /takeover"
+            "Supported commands: /status /positions /orders /risk /mode /market /takeover /release"
         )
 
     async def flush_pending_notifications(self, *, adapter: object, limit: int = 20) -> int:
@@ -221,6 +232,24 @@ class NotifierService:
             }
         )
         return f"Manual takeover requested: {effective_mode.value} (reason={reason})"
+
+    def _handle_release_command(self, text: str) -> str:
+        parts = text.strip().split(maxsplit=2)
+        if len(parts) < 2:
+            return "Usage: /release <degraded> [reason]"
+        requested_mode = parts[1].lower()
+        if requested_mode != "degraded":
+            return "Usage: /release <degraded> [reason]"
+        reason = parts[2].strip() if len(parts) >= 3 and parts[2].strip() else "operator approved release"
+        self._runtime_store.set_manual_release_target(requested_mode)
+        self._history_store.append_risk_event(
+            {
+                "event_type": "manual_release_requested",
+                "symbol": "system",
+                "detail": f"requested {requested_mode}: {reason}",
+            }
+        )
+        return f"Manual release requested: {requested_mode} (reason={reason})"
 
     def _render_status(self) -> str:
         mode = self._render_mode()

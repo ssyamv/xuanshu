@@ -308,14 +308,18 @@ def _next_client_order_id(runtime: TraderRuntime, signal: CandidateSignal) -> st
 async def _evaluate_symbol(runtime: TraderRuntime, symbol: str) -> None:
     latest_snapshot = runtime.snapshot_store.get_latest_snapshot()
     if latest_snapshot is not None:
-        runtime.startup_snapshot = latest_snapshot.model_copy(
-            update={
-                "market_mode": _more_restrictive_mode(
-                    runtime.current_mode,
-                    latest_snapshot.market_mode,
-                )
-            }
-        )
+        runtime.startup_snapshot = latest_snapshot
+        if (
+            runtime.current_mode == RunMode.HALTED
+            and latest_snapshot.approval_state == ApprovalState.APPROVED
+            and latest_snapshot.market_mode != RunMode.HALTED
+            and runtime.components.checkpoint_service.can_open_new_risk(runtime.startup_checkpoint)
+            and not runtime.components.state_engine.fault_flags
+        ):
+            runtime.current_mode = latest_snapshot.market_mode
+            runtime.components.state_engine.set_run_mode(runtime.current_mode)
+            runtime.opening_allowed = True
+            _publish_runtime_state(runtime)
     snapshot = runtime.components.state_engine.snapshot(symbol)
     signals = build_candidate_signals(snapshot)
     open_orders = runtime.components.state_engine.open_orders_by_symbol.get(symbol, {})

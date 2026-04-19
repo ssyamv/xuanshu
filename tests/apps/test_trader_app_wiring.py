@@ -457,6 +457,70 @@ def test_trader_runtime_dispatches_market_event_updates_summary_and_mode(monkeyp
     assert runtime.runtime_store.get_run_mode() == RunMode.HALTED
 
 
+def test_trader_runtime_relaxes_from_halted_when_approved_degraded_snapshot_arrives(monkeypatch) -> None:
+    _set_required_settings_env(monkeypatch)
+    fake_redis = _FakeRedis()
+
+    monkeypatch.setattr(
+        trader_app,
+        "build_snapshot_store",
+        lambda settings: RedisSnapshotStore(redis_client=fake_redis),
+    )
+    monkeypatch.setattr(
+        trader_app,
+        "build_runtime_state_store",
+        lambda settings: RedisRuntimeStateStore(redis_client=fake_redis),
+    )
+
+    async def _noop_wait_forever() -> None:
+        return None
+
+    monkeypatch.setattr(trader_app, "_wait_forever", _noop_wait_forever)
+    runtime = trader_app.build_trader_runtime()
+    _replace_runtime_streams_with_empty_event_streams(runtime)
+    runtime.current_mode = RunMode.HALTED
+    runtime.components.state_engine.set_run_mode(RunMode.HALTED)
+    runtime.snapshot_store.set_latest_snapshot(
+        "snap-release",
+        runtime.startup_snapshot.model_copy(
+            update={
+                "version_id": "snap-release",
+                "market_mode": RunMode.DEGRADED,
+                "approval_state": ApprovalState.APPROVED,
+                "symbol_whitelist": ["BTC-USDT-SWAP", "ETH-USDT-SWAP"],
+                "strategy_enable_flags": {"breakout": True, "mean_reversion": False, "risk_pause": True},
+                "risk_multiplier": 0.25,
+                "per_symbol_max_position": 0.12,
+            }
+        ),
+    )
+
+    async def _exercise_runtime() -> None:
+        try:
+            await trader_app._run_trader(runtime)
+            await trader_app._dispatch_runtime_event(
+                runtime,
+                OrderbookTopEvent(
+                    event_type=TraderEventType.ORDERBOOK_TOP,
+                    symbol="BTC-USDT-SWAP",
+                    exchange="okx",
+                    generated_at=datetime.now(UTC),
+                    public_sequence="pub-1",
+                    bid_price=100.0,
+                    ask_price=100.1,
+                    bid_size=5.0,
+                    ask_size=6.0,
+                ),
+            )
+        finally:
+            await runtime.components.aclose()
+
+    asyncio.run(_exercise_runtime())
+
+    assert runtime.current_mode == RunMode.DEGRADED
+    assert runtime.runtime_store.get_run_mode() == RunMode.DEGRADED
+
+
 def test_trader_runtime_does_not_record_account_snapshot_as_risk_event(monkeypatch) -> None:
     _set_required_settings_env(monkeypatch)
     fake_redis = _FakeRedis()

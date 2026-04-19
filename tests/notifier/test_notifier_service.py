@@ -28,6 +28,7 @@ class _RuntimeStore:
         self.faults = {"public_ws_disconnected": {"severity": "warn"}}
         self.budget = {"remaining_notional": 120.0, "remaining_order_count": 8, "current_mode": "degraded"}
         self.governor_health = {"status": "published", "trigger": "risk_event", "health_state": "healthy"}
+        self.manual_release_target: str | None = None
 
     def get_run_mode(self) -> RunMode | None:
         return self.mode
@@ -49,6 +50,15 @@ class _RuntimeStore:
 
     def set_fault_flags(self, flags: dict[str, object]) -> None:
         self.faults = flags
+
+    def set_manual_release_target(self, mode: str) -> None:
+        self.manual_release_target = mode
+
+    def get_manual_release_target(self) -> str | None:
+        return self.manual_release_target
+
+    def clear_manual_release_target(self) -> None:
+        self.manual_release_target = None
 
 
 class _SnapshotStore:
@@ -152,6 +162,30 @@ async def test_notifier_service_rejects_manual_takeover_without_supported_mode()
     assert payload.text == "Usage: /takeover <degraded|reduce_only|halted> [reason]"
     assert runtime.mode == RunMode.DEGRADED
     assert history.list_recent_rows("risk_events", limit=1) == []
+
+
+@pytest.mark.asyncio
+async def test_notifier_service_accepts_manual_release_to_degraded() -> None:
+    runtime = _RuntimeStore()
+    history = PostgresRuntimeStore(dsn="postgresql://xuanshu:xuanshu@localhost:5432/xuanshu")
+    service = NotifierService(
+        okx_symbols=("BTC-USDT-SWAP",),
+        runtime_store=runtime,
+        snapshot_store=_SnapshotStore(),
+        history_store=history,
+    )
+
+    payload = await service.handle_command("/release degraded operator approved first release")
+
+    assert payload.text == "Manual release requested: degraded (reason=operator approved first release)"
+    assert runtime.manual_release_target == "degraded"
+    assert history.list_recent_rows("risk_events", limit=1) == [
+        {
+            "event_type": "manual_release_requested",
+            "symbol": "system",
+            "detail": "requested degraded: operator approved first release",
+        }
+    ]
 
 
 @pytest.mark.asyncio

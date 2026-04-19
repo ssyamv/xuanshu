@@ -41,6 +41,10 @@ class RedisKeys:
     def governor_health_summary() -> str:
         return "xuanshu:runtime:governor_health"
 
+    @staticmethod
+    def manual_release_target() -> str:
+        return "xuanshu:runtime:manual_release_target"
+
 
 class SnapshotStore(Protocol):
     def set_latest_snapshot(self, version_id: str, snapshot: StrategyConfigSnapshot) -> None:
@@ -79,6 +83,15 @@ class RuntimeStateStore(Protocol):
         ...
 
     def get_governor_health_summary(self) -> dict[str, object] | None:
+        ...
+
+    def set_manual_release_target(self, mode: str) -> None:
+        ...
+
+    def get_manual_release_target(self) -> str | None:
+        ...
+
+    def clear_manual_release_target(self) -> None:
         ...
 
 
@@ -132,7 +145,9 @@ class RedisRuntimeStateStore:
     ) -> None:
         self._redis = redis_client or Redis.from_url(redis_url)
         self._key = RedisKeys.run_mode()
+        self._manual_release_key = RedisKeys.manual_release_target()
         self._latest_mode: RunMode | None = None
+        self._latest_manual_release_target: str | None = None
 
     def set_run_mode(self, mode: RunMode) -> None:
         self._latest_mode = mode
@@ -265,3 +280,39 @@ class RedisRuntimeStateStore:
         except (TypeError, ValueError):
             return None
         return summary if isinstance(summary, dict) else None
+
+    def set_manual_release_target(self, mode: str) -> None:
+        normalized = str(mode).strip()
+        self._latest_manual_release_target = normalized or None
+        try:
+            if self._latest_manual_release_target is None:
+                self._redis.delete(self._manual_release_key)
+            else:
+                self._redis.set(self._manual_release_key, self._latest_manual_release_target)
+        except RedisError:
+            return
+
+    def get_manual_release_target(self) -> str | None:
+        try:
+            payload = self._redis.get(self._manual_release_key)
+        except RedisError:
+            return self._latest_manual_release_target
+        if payload is None:
+            return self._latest_manual_release_target
+        if isinstance(payload, bytes):
+            try:
+                payload = payload.decode("utf-8")
+            except UnicodeDecodeError:
+                return self._latest_manual_release_target
+        if not isinstance(payload, str):
+            return self._latest_manual_release_target
+        normalized = payload.strip()
+        self._latest_manual_release_target = normalized or None
+        return self._latest_manual_release_target
+
+    def clear_manual_release_target(self) -> None:
+        self._latest_manual_release_target = None
+        try:
+            self._redis.delete(self._manual_release_key)
+        except RedisError:
+            return

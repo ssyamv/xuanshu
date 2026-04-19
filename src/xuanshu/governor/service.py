@@ -73,6 +73,7 @@ class GovernorService:
         ]
         recent_risk_events = history_store.list_recent_rows("risk_events", limit=5)
         recent_governor_runs = history_store.list_recent_rows("governor_runs", limit=5)
+        manual_release_target = getattr(runtime_store, "get_manual_release_target", lambda: None)()
         summary = {
             "scope": "governor",
             "current_run_mode": current_mode.value if current_mode is not None else "unknown",
@@ -82,6 +83,8 @@ class GovernorService:
             "recent_risk_events": recent_risk_events,
             "recent_governor_runs": recent_governor_runs,
         }
+        if isinstance(manual_release_target, str) and manual_release_target:
+            summary["manual_release_target"] = manual_release_target
         expert_opinions = self.build_expert_opinions(summary, now=timestamp)
         summary["expert_opinions"] = [self._serialize_expert_opinion(opinion) for opinion in expert_opinions]
         summary["committee_summary"] = self.build_committee_summary(expert_opinions)
@@ -98,13 +101,25 @@ class GovernorService:
         symbol_scope = self._extract_symbol_scope(state_summary)
         active_fault_flags = self._coerce_string_list(state_summary.get("active_fault_flags"))
         recent_risk_events = self._coerce_mapping_list(state_summary.get("recent_risk_events"))
+        manual_release_target = str(state_summary.get("manual_release_target") or "").strip().lower()
+        blocking_risk_events = [
+            event
+            for event in recent_risk_events
+            if isinstance(event.get("event_type"), str)
+            and event.get("event_type") not in {"signal_blocked", "account_snapshot_updated", "manual_release_requested"}
+        ]
         current_mode = str(state_summary.get("current_run_mode", "unknown"))
         recognized_current_mode = (
             current_mode if current_mode in RunMode._value2member_map_ else RunMode.NORMAL.value
         )
+        if manual_release_target == RunMode.DEGRADED.value and recognized_current_mode == RunMode.HALTED.value:
+            recognized_current_mode = RunMode.DEGRADED.value
 
         market_supporting_facts = [f"symbols={len(symbol_scope)}"]
         market_risk_flags: list[str] = []
+        if manual_release_target == RunMode.DEGRADED.value:
+            market_supporting_facts.insert(0, "manual_release_target=degraded")
+            market_risk_flags.append("release:degraded")
         if active_fault_flags:
             market_supporting_facts.insert(0, f"fault_flags={','.join(active_fault_flags)}")
             market_risk_flags = [f"fault:{flag}" for flag in active_fault_flags]
@@ -119,19 +134,22 @@ class GovernorService:
 
         risk_supporting_facts: list[str] = []
         risk_flags: list[str] = []
-        if recent_risk_events:
-            risk_supporting_facts.append(f"risk_events={len(recent_risk_events)}")
+        if blocking_risk_events:
+            risk_supporting_facts.append(f"risk_events={len(blocking_risk_events)}")
             risk_flags.extend(
                 f"event:{event_type}"
-                for event in recent_risk_events
+                for event in blocking_risk_events
                 if isinstance((event_type := event.get("event_type")), str)
             )
         if recognized_current_mode != RunMode.NORMAL.value:
             risk_supporting_facts.append(f"current_run_mode={recognized_current_mode}")
             risk_flags.append(f"mode:{recognized_current_mode}")
-        if recent_risk_events or recognized_current_mode != RunMode.NORMAL.value:
+        if manual_release_target == RunMode.DEGRADED.value:
+            risk_supporting_facts.append("manual_release_target=degraded")
+            risk_flags.append("release:degraded")
+        if blocking_risk_events or recognized_current_mode != RunMode.NORMAL.value:
             risk_decision = "tighten_risk"
-            risk_confidence = 0.9 if recent_risk_events else 0.7
+            risk_confidence = 0.9 if blocking_risk_events else 0.7
         else:
             risk_decision = "maintain_risk"
             risk_confidence = 0.55
@@ -139,11 +157,11 @@ class GovernorService:
 
         event_supporting_facts: list[str] = []
         event_risk_flags: list[str] = []
-        if recent_risk_events:
-            event_supporting_facts.append(f"recent_risk_events={len(recent_risk_events)}")
+        if blocking_risk_events:
+            event_supporting_facts.append(f"recent_risk_events={len(blocking_risk_events)}")
             event_risk_flags.extend(
                 f"event:{event_type}"
-                for event in recent_risk_events
+                for event in blocking_risk_events
                 if isinstance((event_type := event.get("event_type")), str)
             )
             event_decision = "block_event_driven_risk"
@@ -202,7 +220,12 @@ class GovernorService:
     ) -> dict[str, object]:
         research_candidates = research_candidates or []
         blocking_flags = sorted({flag for opinion in expert_opinions for flag in opinion.risk_flags})
-        if any(flag in {"event:recovery_failed", "fault:manual_takeover", "mode:halted"} for flag in blocking_flags):
+        manual_release_target = RunMode.DEGRADED.value if "release:degraded" in blocking_flags else None
+        if manual_release_target:
+            blocking_flags = [flag for flag in blocking_flags if flag not in {"release:degraded", "mode:halted"}]
+        if manual_release_target:
+            recommended_mode_floor = manual_release_target
+        elif any(flag in {"event:recovery_failed", "fault:manual_takeover", "mode:halted"} for flag in blocking_flags):
             recommended_mode_floor = RunMode.HALTED.value
         elif "mode:reduce_only" in blocking_flags:
             recommended_mode_floor = RunMode.REDUCE_ONLY.value
@@ -227,12 +250,14 @@ class GovernorService:
             "consensus_decision": consensus_decision,
             "recommended_mode_floor": recommended_mode_floor,
             "blocking_flags": blocking_flags,
-            "requires_human_review": any(
+            "requires_human_review": False if manual_release_target else any(
                 flag in {"event:recovery_failed", "fault:manual_takeover", "mode:halted"}
                 for flag in blocking_flags
             ),
             "active_experts": [opinion.expert_type for opinion in expert_opinions],
         }
+        if manual_release_target:
+            summary["manual_release_target"] = manual_release_target
         if research_candidates:
             summary["research_candidate_count"] = len(research_candidates)
             summary["approved_research_candidates"] = (
@@ -285,18 +310,31 @@ class GovernorService:
         candidate: StrategyConfigSnapshot,
         state_summary: Mapping[str, object],
     ) -> StrategyConfigSnapshot:
+        manual_release_target_value = str(state_summary.get("manual_release_target") or "").strip().lower()
+        manual_release_target = (
+            RunMode(manual_release_target_value)
+            if manual_release_target_value in RunMode._value2member_map_
+            else None
+        )
         current_run_mode_value = state_summary.get("current_run_mode")
         current_run_mode = (
             RunMode(current_run_mode_value)
             if isinstance(current_run_mode_value, str) and current_run_mode_value in RunMode._value2member_map_
             else None
         )
+        if manual_release_target == RunMode.DEGRADED and current_run_mode == RunMode.HALTED:
+            current_run_mode = RunMode.DEGRADED
         active_fault_flags = state_summary.get("active_fault_flags", [])
         if not isinstance(active_fault_flags, list):
             active_fault_flags = []
         recent_risk_events = state_summary.get("recent_risk_events", [])
         if not isinstance(recent_risk_events, list):
             recent_risk_events = []
+        recent_risk_events = [
+            item
+            for item in recent_risk_events
+            if isinstance(item, Mapping) and item.get("event_type") not in {"signal_blocked", "account_snapshot_updated", "manual_release_requested"}
+        ]
 
         symbol_summaries = state_summary.get("symbol_summaries", [])
         observed_symbols: list[str] = []
@@ -325,6 +363,7 @@ class GovernorService:
                 symbol_whitelist.append(symbol)
 
         approval_state = candidate.approval_state
+        per_symbol_max_position = candidate.per_symbol_max_position
         if any(
             isinstance(item, Mapping) and item.get("event_type") == "recovery_failed"
             for item in recent_risk_events
@@ -332,6 +371,12 @@ class GovernorService:
             approval_state = ApprovalState.PENDING
             market_mode = RunMode.HALTED
             risk_multiplier = 0.0
+
+        if manual_release_target == RunMode.DEGRADED:
+            market_mode = RunMode.DEGRADED
+            approval_state = ApprovalState.APPROVED
+            risk_multiplier = max(risk_multiplier, 0.25)
+            per_symbol_max_position = max(per_symbol_max_position, 0.12)
 
         source_reason = candidate.source_reason
         if source_reason.endswith("|guardrailed"):
@@ -343,6 +388,7 @@ class GovernorService:
             update={
                 "market_mode": market_mode,
                 "risk_multiplier": risk_multiplier,
+                "per_symbol_max_position": per_symbol_max_position,
                 "approval_state": approval_state,
                 "symbol_whitelist": symbol_whitelist,
                 "source_reason": updated_reason,
