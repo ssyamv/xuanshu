@@ -8,14 +8,22 @@ from xuanshu.trader.recovery import RecoverySupervisor
 
 
 class _FakeRestClient:
-    async def fetch_open_orders(self, symbol: str) -> list[dict[str, object]]:
+    def __init__(self) -> None:
+        self.open_orders_calls: list[tuple[str, str]] = []
+        self.positions_calls: list[tuple[str, str]] = []
+        self.account_summary_calls: list[str] = []
+
+    async def fetch_open_orders(self, symbol: str, timestamp: str) -> list[dict[str, object]]:
+        self.open_orders_calls.append((symbol, timestamp))
         return [{"order_id": "ord-1", "symbol": symbol}]
 
-    async def fetch_positions(self, symbol: str) -> list[dict[str, object]]:
+    async def fetch_positions(self, symbol: str, timestamp: str) -> list[dict[str, object]]:
+        self.positions_calls.append((symbol, timestamp))
         return [{"symbol": symbol, "net_quantity": 1.0}]
 
-    async def fetch_account_summary(self) -> dict[str, object]:
-        return {"equity": 1000.0, "available_balance": 800.0}
+    async def fetch_account_summary(self, timestamp: str) -> list[dict[str, object]]:
+        self.account_summary_calls.append(timestamp)
+        return [{"totalEq": "1000.0", "availEq": "800.0"}]
 
 
 @pytest.mark.asyncio
@@ -38,9 +46,17 @@ async def test_recovery_supervisor_blocks_when_checkpoint_and_exchange_diverge()
         needs_reconcile=False,
     )
 
-    supervisor = RecoverySupervisor(rest_client=_FakeRestClient())
-    result = await supervisor.run_startup_recovery("BTC-USDT-SWAP", checkpoint)
+    rest_client = _FakeRestClient()
+    supervisor = RecoverySupervisor(rest_client=rest_client)
+    result = await supervisor.run_startup_recovery(
+        "BTC-USDT-SWAP",
+        checkpoint,
+        timestamp="2026-04-19T00:00:00.000Z",
+    )
 
     assert result["run_mode"] == "halted"
     assert result["needs_reconcile"] is True
     assert result["reason"] == "exchange_state_mismatch"
+    assert rest_client.open_orders_calls == [("BTC-USDT-SWAP", "2026-04-19T00:00:00.000Z")]
+    assert rest_client.positions_calls == [("BTC-USDT-SWAP", "2026-04-19T00:00:00.000Z")]
+    assert rest_client.account_summary_calls == ["2026-04-19T00:00:00.000Z"]

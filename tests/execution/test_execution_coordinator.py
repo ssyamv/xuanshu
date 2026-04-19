@@ -13,9 +13,9 @@ class _FakeRestClient:
     def __init__(self) -> None:
         self.calls: list[tuple[dict[str, str], str]] = []
 
-    async def place_order(self, payload: dict[str, str], timestamp: str) -> dict[str, object]:
+    async def place_order(self, payload: dict[str, str], timestamp: str) -> list[dict[str, object]]:
         self.calls.append((payload, timestamp))
-        return {"data": [{"ordId": "1", "clOrdId": payload["clOrdId"], "sCode": "0"}]}
+        return [{"ordId": "1", "clOrdId": payload["clOrdId"], "sCode": "0"}]
 
 
 @pytest.mark.asyncio
@@ -61,7 +61,7 @@ async def test_execution_coordinator_returns_cached_open_even_if_later_decision_
         timestamp="2026-04-19T00:00:00.000Z",
     )
 
-    assert cached_response == {"data": [{"ordId": "1", "clOrdId": "btc-breakout-000001", "sCode": "0"}]}
+    assert cached_response == [{"ordId": "1", "clOrdId": "btc-breakout-000001", "sCode": "0"}]
     assert len(rest.calls) == 1
     assert coordinator.inflight_by_client_order_id["btc-breakout-000001"]["symbol"] == "BTC-USDT-SWAP"
 
@@ -82,11 +82,11 @@ class _BlockingRestClient:
         self.started = asyncio.Event()
         self.release = asyncio.Event()
 
-    async def place_order(self, payload: dict[str, str], timestamp: str) -> dict[str, object]:
+    async def place_order(self, payload: dict[str, str], timestamp: str) -> list[dict[str, object]]:
         self.calls.append((payload, timestamp))
         self.started.set()
         await self.release.wait()
-        return {"data": [{"ordId": "1", "clOrdId": payload["clOrdId"], "sCode": "0"}]}
+        return [{"ordId": "1", "clOrdId": payload["clOrdId"], "sCode": "0"}]
 
 
 @pytest.mark.asyncio
@@ -137,6 +137,44 @@ async def test_execution_coordinator_deduplicates_inflight_open_submission() -> 
 
     assert first_response == second_response
     assert coordinator.inflight_by_client_order_id["btc-breakout-000002"]["response"] == first_response
+
+
+@pytest.mark.asyncio
+async def test_execution_coordinator_rejects_cached_client_order_id_reuse_with_different_order_parameters() -> None:
+    rest = _FakeRestClient()
+    coordinator = ExecutionCoordinator(rest_client=rest)
+    decision = RiskDecision(
+        decision_id="dec-1",
+        generated_at=datetime.now(UTC),
+        symbol="BTC-USDT-SWAP",
+        allow_open=True,
+        allow_close=True,
+        max_position=100.0,
+        max_order_size=1.0,
+        risk_mode=RunMode.NORMAL,
+        reason_codes=[],
+    )
+
+    await coordinator.submit_market_open(
+        symbol="BTC-USDT-SWAP",
+        side="buy",
+        size=1.0,
+        client_order_id="btc-breakout-000003",
+        decision=decision,
+        timestamp="2026-04-19T00:00:00.000Z",
+    )
+
+    with pytest.raises(ValueError, match=r"client_order_id .* original order parameters"):
+        await coordinator.submit_market_open(
+            symbol="BTC-USDT-SWAP",
+            side="sell",
+            size=1.0,
+            client_order_id="btc-breakout-000003",
+            decision=decision,
+            timestamp="2026-04-19T00:00:00.000Z",
+        )
+
+    assert len(rest.calls) == 1
 
 
 @pytest.mark.parametrize("size", ["1", None, object()])

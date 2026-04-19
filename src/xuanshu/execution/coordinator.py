@@ -9,7 +9,7 @@ from xuanshu.execution.engine import build_market_order_payload
 
 
 class ExecutionRestClient(Protocol):
-    async def place_order(self, payload: dict[str, str], timestamp: str) -> dict[str, object]:
+    async def place_order(self, payload: dict[str, str], timestamp: str) -> list[dict[str, object]]:
         ...
 
 
@@ -26,9 +26,14 @@ class ExecutionCoordinator:
         client_order_id: str,
         decision: RiskDecision,
         timestamp: str,
-    ) -> dict[str, object] | None:
+    ) -> list[dict[str, object]] | None:
         if client_order_id in self.inflight_by_client_order_id:
             entry = self.inflight_by_client_order_id[client_order_id]
+            payload = build_market_order_payload(symbol, side, size, client_order_id)
+            if entry.get("payload") != payload:
+                raise ValueError(
+                    f"client_order_id {client_order_id!r} collides with original order parameters"
+                )
             task = entry.get("task")
             if task is not None:
                 response = await task
