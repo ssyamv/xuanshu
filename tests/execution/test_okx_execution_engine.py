@@ -1,5 +1,7 @@
+import base64
 import hashlib
 import hmac
+import json
 
 from xuanshu.contracts.events import OrderUpdateEvent, OrderbookTopEvent, PositionUpdateEvent
 from xuanshu.core.enums import TraderEventType
@@ -127,5 +129,64 @@ def test_okx_rest_client_builds_signed_headers_and_place_order_payload() -> None
         "sz": "1",
         "clOrdId": "btc-breakout-000001",
     }
+
+    __import__("asyncio").run(client.aclose())
+
+
+def test_okx_rest_client_place_order_posts_signed_body() -> None:
+    client = OkxRestClient(
+        base_url="https://www.okx.com",
+        api_key="api-key",
+        api_secret="api-secret",
+        passphrase="api-passphrase",
+    )
+    payload = {
+        "instId": "BTC-USDT-SWAP",
+        "tdMode": "cross",
+        "side": "buy",
+        "ordType": "market",
+        "sz": "1",
+        "clOrdId": "btc-breakout-000001",
+    }
+    timestamp = "2026-04-19T00:00:00.000Z"
+    expected_body = json.dumps(payload, separators=(",", ":"))
+    expected_signature = base64.b64encode(
+        hmac.new(
+            b"api-secret",
+            f"{timestamp}POST/api/v5/trade/order{expected_body}".encode(),
+            hashlib.sha256,
+        ).digest()
+    ).decode()
+
+    captured: dict[str, object] = {}
+
+    class DummyResponse:
+        def raise_for_status(self) -> None:
+            captured["raise_for_status_called"] = True
+
+        def json(self) -> dict[str, object]:
+            return {"result": "ok"}
+
+    async def fake_post(path: str, *, content: str, headers: dict[str, str]) -> DummyResponse:
+        captured["path"] = path
+        captured["content"] = content
+        captured["headers"] = headers
+        return DummyResponse()
+
+    client.client.post = fake_post  # type: ignore[method-assign]
+
+    result = __import__("asyncio").run(client.place_order(payload, timestamp))
+
+    assert result == {"result": "ok"}
+    assert captured["path"] == "/api/v5/trade/order"
+    assert captured["content"] == expected_body
+    assert captured["headers"] == {
+        "OK-ACCESS-KEY": "api-key",
+        "OK-ACCESS-PASSPHRASE": "api-passphrase",
+        "OK-ACCESS-TIMESTAMP": timestamp,
+        "OK-ACCESS-SIGN": expected_signature,
+        "Content-Type": "application/json",
+    }
+    assert captured["raise_for_status_called"] is True
 
     __import__("asyncio").run(client.aclose())
