@@ -13,7 +13,14 @@ _DEFAULT_GOVERNOR_MODEL = "gpt-4.1-mini"
 _RESPONSES_API_URL = "https://api.openai.com/v1/responses"
 _GOVERNOR_INSTRUCTIONS = (
     "You are the Governor Service for a live trading system. "
-    "Given a state summary, return exactly one JSON object matching the StrategyConfigSnapshot schema. "
+    "Given a state summary, return exactly one JSON object matching this schema and nothing else: "
+    '{"version_id": string, "generated_at": RFC3339 string, "effective_from": RFC3339 string, '
+    '"expires_at": RFC3339 string, "symbol_whitelist": string[], '
+    '"strategy_enable_flags": object<string, boolean>, "risk_multiplier": number, '
+    '"per_symbol_max_position": number, "max_leverage": integer, '
+    '"market_mode": "normal"|"degraded"|"reduce_only"|"halted", '
+    '"approval_state": "approved"|"rejected", "source_reason": string, "ttl_sec": integer}. '
+    "Do not return keys outside this schema. "
     "Return JSON only with no commentary."
 )
 

@@ -9,7 +9,11 @@ import xuanshu.infra.ai.governor_client as governor_client_module
 from xuanshu.contracts.research import ResearchTrigger, StrategyPackage
 from xuanshu.contracts.strategy import StrategyConfigSnapshot
 from xuanshu.core.enums import ApprovalState, RunMode
-from xuanshu.infra.ai.governor_client import ConfiguredGovernorAgentRunner, GovernorClient
+from xuanshu.infra.ai.governor_client import (
+    CodexCliGovernorAgentRunner,
+    ConfiguredGovernorAgentRunner,
+    GovernorClient,
+)
 from xuanshu.infra.storage.postgres_store import PostgresRuntimeStore
 from xuanshu.governor.service import GovernorService
 
@@ -172,6 +176,67 @@ async def test_configured_governor_runner_rejects_empty_response(monkeypatch) ->
 
     with pytest.raises(RuntimeError, match="Governor AI response did not contain text output"):
         await runner.run({"scope": "governor"})
+
+
+@pytest.mark.asyncio
+async def test_codex_cli_governor_runner_invokes_codex_exec_with_snapshot_schema(monkeypatch) -> None:
+    captured = {}
+
+    def _fake_run(cmd: list[str], *, capture_output: bool, text: bool, check: bool, cwd: str | None) -> object:
+        captured["cmd"] = cmd
+        captured["capture_output"] = capture_output
+        captured["text"] = text
+        captured["check"] = check
+        captured["cwd"] = cwd
+        return governor_client_module.subprocess.CompletedProcess(
+            args=cmd,
+            returncode=0,
+            stdout="""```json
+{
+  "version_id": "snap-live",
+  "generated_at": "2026-04-19T00:00:00Z",
+  "effective_from": "2026-04-19T00:00:00Z",
+  "expires_at": "2026-04-19T00:05:00Z",
+  "symbol_whitelist": ["BTC-USDT-SWAP"],
+  "strategy_enable_flags": {"breakout": true, "mean_reversion": false, "risk_pause": true},
+  "risk_multiplier": 0.5,
+  "per_symbol_max_position": 0.12,
+  "max_leverage": 3,
+  "market_mode": "normal",
+  "approval_state": "approved",
+  "source_reason": "governor_ai",
+  "ttl_sec": 300
+}
+```""",
+            stderr="",
+        )
+
+    monkeypatch.setattr(governor_client_module.subprocess, "run", _fake_run)
+
+    runner = CodexCliGovernorAgentRunner(command="codex", cwd="/tmp/xuanshu")
+    result = await runner.run({"scope": "governor", "current_run_mode": "halted"})
+
+    assert result["version_id"] == "snap-live"
+    assert captured["cmd"][:3] == ["codex", "exec", "--skip-git-repo-check"]
+    assert captured["cwd"] == "/tmp/xuanshu"
+    assert captured["capture_output"] is True
+    assert captured["text"] is True
+    assert captured["check"] is False
+    prompt = captured["cmd"][3]
+    assert '"version_id": string' in prompt
+    assert '"generated_at": RFC3339 string' in prompt
+    assert '"effective_from": RFC3339 string' in prompt
+    assert '"expires_at": RFC3339 string' in prompt
+    assert '"symbol_whitelist": string[]' in prompt
+    assert '"strategy_enable_flags": object<string, boolean>' in prompt
+    assert '"risk_multiplier": number' in prompt
+    assert '"per_symbol_max_position": number' in prompt
+    assert '"max_leverage": integer' in prompt
+    assert '"market_mode": "normal"|"degraded"|"reduce_only"|"halted"' in prompt
+    assert '"approval_state": "approved"|"rejected"' in prompt
+    assert '"source_reason": string' in prompt
+    assert '"ttl_sec": integer' in prompt
+    assert "Do not return keys outside this schema." in prompt
 
 
 def test_governor_builds_state_summary_from_runtime_and_history() -> None:
