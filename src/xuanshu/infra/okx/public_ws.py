@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Callable
+
+import websockets
 
 from pydantic import ValidationError
 
@@ -13,6 +16,7 @@ from xuanshu.core.enums import TraderEventType
 @dataclass(frozen=True, slots=True)
 class OkxPublicStream:
     url: str
+    connect_factory: Callable[..., object] = websockets.connect
 
     def build_subscribe_payload(self, symbols: tuple[str, ...]) -> dict[str, object]:
         return {
@@ -23,6 +27,16 @@ class OkxPublicStream:
                 for channel in ("tickers", "trades")
             ],
         }
+
+    async def iter_events(self, *, symbols: tuple[str, ...]):
+        sequence = 0
+        async with self.connect_factory(self.url) as websocket:
+            await websocket.send(json.dumps(self.build_subscribe_payload(symbols)))
+            async for raw_payload in websocket:
+                sequence += 1
+                payload = json.loads(raw_payload)
+                for event in self.decode_message(payload, sequence=f"pub-{sequence}"):
+                    yield event
 
     def decode_message(
         self, payload: dict[str, Any], sequence: str

@@ -3,6 +3,7 @@ import base64
 import hashlib
 import hmac
 import json
+from datetime import UTC, datetime
 
 import pytest
 
@@ -18,6 +19,41 @@ from xuanshu.core.enums import TraderEventType
 from xuanshu.infra.okx.private_ws import OkxPrivateStream
 from xuanshu.infra.okx.public_ws import OkxPublicStream
 from xuanshu.infra.okx.rest import OkxBusinessError, OkxRestClient
+
+
+class _FakeWebSocket:
+    def __init__(self, messages: list[str]) -> None:
+        self.messages = list(messages)
+        self.sent: list[str] = []
+
+    async def send(self, payload: str) -> None:
+        self.sent.append(payload)
+
+    def __aiter__(self):
+        async def _generator():
+            for message in self.messages:
+                yield message
+
+        return _generator()
+
+
+class _FakeConnect:
+    def __init__(self, websocket: _FakeWebSocket) -> None:
+        self.websocket = websocket
+        self.calls: list[tuple[str, dict[str, object]]] = []
+
+    def __call__(self, url: str, **kwargs: object):
+        self.calls.append((url, dict(kwargs)))
+        websocket = self.websocket
+
+        class _ContextManager:
+            async def __aenter__(self_nonlocal):
+                return websocket
+
+            async def __aexit__(self_nonlocal, exc_type, exc, tb) -> None:
+                return None
+
+        return _ContextManager()
 
 
 def test_okx_public_stream_builds_bbo_subscription_and_decodes_batched_events() -> None:
@@ -415,6 +451,99 @@ def test_okx_private_stream_normalizes_malformed_and_unknown_envelopes_into_faul
     assert len(unknown_channel_events) == 1
     assert isinstance(unknown_channel_events[0], FaultEvent)
     assert unknown_channel_events[0].code == "private_ws_unknown_channel"
+
+
+@pytest.mark.asyncio
+async def test_okx_public_stream_iter_events_subscribes_and_decodes_messages() -> None:
+    websocket = _FakeWebSocket(
+        [
+            json.dumps(
+                {
+                    "arg": {"channel": "tickers", "instId": "BTC-USDT-SWAP"},
+                    "data": [
+                        {
+                            "ts": "1713484800000",
+                            "bidPx": "100.0",
+                            "askPx": "100.1",
+                            "bidSz": "5",
+                            "askSz": "6",
+                        }
+                    ],
+                }
+            ),
+            json.dumps(
+                {
+                    "arg": {"channel": "trades", "instId": "BTC-USDT-SWAP"},
+                    "data": [{"ts": "1713484802000", "px": "100.3", "sz": "1.2", "side": "buy"}],
+                }
+            ),
+        ]
+    )
+    connect = _FakeConnect(websocket)
+    stream = OkxPublicStream(url="wss://ws.okx.com:8443/ws/v5/public", connect_factory=connect)
+
+    events = [event async for event in stream.iter_events(symbols=("BTC-USDT-SWAP",))]
+
+    assert [type(event) for event in events] == [OrderbookTopEvent, MarketTradeEvent]
+    assert events[0].public_sequence == "pub-1"
+    assert events[1].public_sequence == "pub-2"
+    assert json.loads(websocket.sent[0]) == stream.build_subscribe_payload(("BTC-USDT-SWAP",))
+    assert connect.calls[0][0] == "wss://ws.okx.com:8443/ws/v5/public"
+
+
+@pytest.mark.asyncio
+async def test_okx_private_stream_iter_events_logs_in_subscribes_and_decodes_messages() -> None:
+    websocket = _FakeWebSocket(
+        [
+            json.dumps({"event": "login", "code": "0", "msg": "", "connId": "abc"}),
+            json.dumps(
+                {
+                    "arg": {"channel": "orders", "instType": "SWAP"},
+                    "data": [
+                        {
+                            "instId": "BTC-USDT-SWAP",
+                            "ordId": "1",
+                            "clOrdId": "btc-breakout-000001",
+                            "side": "buy",
+                            "px": "100.2",
+                            "sz": "1",
+                            "accFillSz": "0",
+                            "state": "live",
+                            "uTime": "1713484800000",
+                        }
+                    ],
+                }
+            ),
+        ]
+    )
+    connect = _FakeConnect(websocket)
+    stream = OkxPrivateStream(
+        url="wss://ws.okx.com:8443/ws/v5/private",
+        connect_factory=connect,
+        epoch_seconds_factory=lambda: 1713484800,
+    )
+
+    events = [
+        event
+        async for event in stream.iter_events(
+            symbols=("BTC-USDT-SWAP",),
+            api_key="test-key",
+            api_secret="test-secret",
+            passphrase="test-passphrase",
+        )
+    ]
+
+    assert [type(event) for event in events] == [OrderUpdateEvent]
+    assert events[0].private_sequence == "pri-2"
+    login_payload = json.loads(websocket.sent[0])
+    subscribe_payload = json.loads(websocket.sent[1])
+    assert login_payload == stream.build_login_payload(
+        api_key="test-key",
+        api_secret="test-secret",
+        passphrase="test-passphrase",
+        epoch_seconds=1713484800,
+    )
+    assert subscribe_payload == stream.build_subscribe_payload(("BTC-USDT-SWAP",))
 
 
 def test_okx_rest_client_builds_signed_headers_and_place_order_payload() -> None:

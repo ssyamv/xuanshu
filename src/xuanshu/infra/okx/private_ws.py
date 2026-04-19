@@ -3,9 +3,12 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
+import json
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Callable
+
+import websockets
 
 from pydantic import ValidationError
 
@@ -21,6 +24,8 @@ from xuanshu.core.enums import TraderEventType
 @dataclass(frozen=True, slots=True)
 class OkxPrivateStream:
     url: str
+    connect_factory: Callable[..., object] = websockets.connect
+    epoch_seconds_factory: Callable[[], int] = lambda: int(datetime.now(UTC).timestamp())
 
     def build_login_payload(
         self,
@@ -44,6 +49,45 @@ class OkxPrivateStream:
                 }
             ],
         }
+
+    def build_subscribe_payload(self, symbols: tuple[str, ...]) -> dict[str, object]:
+        if not symbols:
+            raise ValueError("symbols must not be empty")
+        return {
+            "op": "subscribe",
+            "args": [
+                {"channel": "orders", "instType": "SWAP"},
+                {"channel": "positions", "instType": "SWAP"},
+                {"channel": "account"},
+            ],
+        }
+
+    async def iter_events(
+        self,
+        *,
+        symbols: tuple[str, ...],
+        api_key: str,
+        api_secret: str,
+        passphrase: str,
+    ):
+        sequence = 0
+        async with self.connect_factory(self.url) as websocket:
+            await websocket.send(
+                json.dumps(
+                    self.build_login_payload(
+                        api_key=api_key,
+                        api_secret=api_secret,
+                        passphrase=passphrase,
+                        epoch_seconds=self.epoch_seconds_factory(),
+                    )
+                )
+            )
+            await websocket.send(json.dumps(self.build_subscribe_payload(symbols)))
+            async for raw_payload in websocket:
+                sequence += 1
+                payload = json.loads(raw_payload)
+                for event in self.decode_message(payload, sequence=f"pri-{sequence}"):
+                    yield event
 
     def decode_message(
         self,

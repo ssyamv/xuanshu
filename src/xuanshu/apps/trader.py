@@ -7,7 +7,7 @@ from datetime import UTC, datetime, timedelta
 
 from xuanshu.checkpoints.service import CheckpointService
 from xuanshu.config.settings import TraderRuntimeSettings
-from xuanshu.core.enums import ApprovalState, EntryType, OrderSide, RunMode
+from xuanshu.core.enums import ApprovalState, EntryType, OrderSide, RunMode, TraderEventType
 from xuanshu.contracts.checkpoint import (
     CheckpointBudgetState,
     CheckpointOrder,
@@ -361,9 +361,25 @@ async def _consume_stream(runtime: TraderRuntime, adapter: object, **kwargs: obj
     iterator_factory = getattr(adapter, "iter_events", None)
     if not callable(iterator_factory):
         return False
-    async for event in iterator_factory(**kwargs):
-        await _dispatch_runtime_event(runtime, event)
-    return True
+    consumed_any = False
+    try:
+        async for event in iterator_factory(**kwargs):
+            consumed_any = True
+            await _dispatch_runtime_event(runtime, event)
+    except Exception as exc:
+        await _dispatch_runtime_event(
+            runtime,
+            FaultEvent(
+                event_type=TraderEventType.RUNTIME_FAULT,
+                exchange="okx",
+                generated_at=datetime.now(UTC),
+                severity="critical",
+                code=f"{adapter.__class__.__name__.lower()}_stream_failed",
+                detail=str(exc),
+            ),
+        )
+        return False
+    return consumed_any
 
 
 async def _dispatch_runtime_event(runtime: TraderRuntime, event: object) -> None:
@@ -493,6 +509,9 @@ async def _run_trader(runtime: TraderRuntime) -> None:
                 runtime,
                 runtime.components.okx_private_stream,
                 symbols=runtime.settings.okx_symbols,
+                api_key=runtime.settings.okx_api_key.get_secret_value(),
+                api_secret=runtime.settings.okx_api_secret.get_secret_value(),
+                passphrase=runtime.settings.okx_api_passphrase.get_secret_value(),
             )
         ),
     ]

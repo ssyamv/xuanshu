@@ -72,6 +72,18 @@ class _FakeEventStream:
         return _generator()
 
 
+def _replace_runtime_streams_with_empty_event_streams(runtime: trader_app.TraderRuntime) -> None:
+    runtime.components = trader_app.TraderComponents(
+        state_engine=runtime.components.state_engine,
+        risk_kernel=runtime.components.risk_kernel,
+        checkpoint_service=runtime.components.checkpoint_service,
+        okx_rest_client=runtime.components.okx_rest_client,
+        okx_public_stream=_FakeEventStream([]),
+        okx_private_stream=_FakeEventStream([]),
+        client_order_id_builder=runtime.components.client_order_id_builder,
+    )
+
+
 def _set_required_settings_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("XUANSHU_OKX_SYMBOLS", "BTC-USDT-SWAP, ETH-USDT-SWAP")
     monkeypatch.setenv("XUANSHU_TRADER_STARTING_NAV", "250000")
@@ -271,8 +283,8 @@ def test_trader_runtime_checks_checkpoint_before_waiting(monkeypatch) -> None:
         risk_kernel=runtime.components.risk_kernel,
         checkpoint_service=_CheckpointProbe(),
         okx_rest_client=runtime.components.okx_rest_client,
-        okx_public_stream=runtime.components.okx_public_stream,
-        okx_private_stream=runtime.components.okx_private_stream,
+        okx_public_stream=_FakeEventStream([]),
+        okx_private_stream=_FakeEventStream([]),
         client_order_id_builder=runtime.components.client_order_id_builder,
     )
 
@@ -307,8 +319,8 @@ def test_trader_runtime_stays_alive_when_startup_gating_blocks_opening(monkeypat
         risk_kernel=runtime.components.risk_kernel,
         checkpoint_service=_CheckpointProbe(),
         okx_rest_client=runtime.components.okx_rest_client,
-        okx_public_stream=runtime.components.okx_public_stream,
-        okx_private_stream=runtime.components.okx_private_stream,
+        okx_public_stream=_FakeEventStream([]),
+        okx_private_stream=_FakeEventStream([]),
         client_order_id_builder=runtime.components.client_order_id_builder,
     )
 
@@ -338,6 +350,7 @@ def test_trader_runtime_applies_snapshot_mode_to_runtime_and_risk(monkeypatch) -
     )
 
     runtime = trader_app.build_trader_runtime()
+    _replace_runtime_streams_with_empty_event_streams(runtime)
     runtime.snapshot_store.set_latest_snapshot(
         "snap-halted",
         runtime.startup_snapshot.model_copy(
@@ -403,6 +416,7 @@ def test_trader_runtime_dispatches_market_event_updates_summary_and_mode(monkeyp
 
     monkeypatch.setattr(trader_app, "_wait_forever", _noop_wait_forever)
     runtime = trader_app.build_trader_runtime()
+    _replace_runtime_streams_with_empty_event_streams(runtime)
     runtime.snapshot_store.set_latest_snapshot(
         "snap-halted",
         runtime.startup_snapshot.model_copy(
@@ -463,6 +477,7 @@ def test_trader_runtime_dispatches_fault_event_updates_fault_flags(monkeypatch) 
 
     monkeypatch.setattr(trader_app, "_wait_forever", _noop_wait_forever)
     runtime = trader_app.build_trader_runtime()
+    _replace_runtime_streams_with_empty_event_streams(runtime)
 
     async def _exercise_runtime() -> None:
         try:
@@ -516,6 +531,7 @@ def test_trader_runtime_rejects_unsupported_dispatch_event(monkeypatch) -> None:
 
     monkeypatch.setattr(trader_app, "_wait_forever", _noop_wait_forever)
     runtime = trader_app.build_trader_runtime()
+    _replace_runtime_streams_with_empty_event_streams(runtime)
 
     class _UnsupportedEvent:
         pass
@@ -565,8 +581,8 @@ def test_trader_runtime_records_recovery_mode_change_for_notifier(monkeypatch) -
         risk_kernel=runtime.components.risk_kernel,
         checkpoint_service=_CheckpointProbe(),
         okx_rest_client=runtime.components.okx_rest_client,
-        okx_public_stream=runtime.components.okx_public_stream,
-        okx_private_stream=runtime.components.okx_private_stream,
+        okx_public_stream=_FakeEventStream([]),
+        okx_private_stream=_FakeEventStream([]),
         client_order_id_builder=runtime.components.client_order_id_builder,
     )
 
@@ -622,8 +638,8 @@ def test_trader_runtime_runs_startup_recovery_against_persisted_checkpoint(monke
         risk_kernel=runtime.components.risk_kernel,
         checkpoint_service=runtime.components.checkpoint_service,
         okx_rest_client=fake_rest,
-        okx_public_stream=runtime.components.okx_public_stream,
-        okx_private_stream=runtime.components.okx_private_stream,
+        okx_public_stream=_FakeEventStream([]),
+        okx_private_stream=_FakeEventStream([]),
         client_order_id_builder=runtime.components.client_order_id_builder,
     )
     runtime.execution_coordinator = trader_app.ExecutionCoordinator(rest_client=fake_rest)
