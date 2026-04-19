@@ -294,3 +294,59 @@ def test_build_market_order_payload_rejects_non_numeric_size(size: object) -> No
 def test_build_market_order_payload_rejects_non_finite_size(size: float) -> None:
     with pytest.raises(ValueError, match=r"invalid size"):
         build_market_order_payload("BTC-USDT-SWAP", "buy", size, "btc-breakout-000001")
+
+
+@pytest.mark.asyncio
+async def test_execution_coordinator_bounds_completed_entry_retention() -> None:
+    rest = _FakeRestClient()
+    coordinator = ExecutionCoordinator(rest_client=rest, max_completed_entries=2)
+    allow_open_decision = RiskDecision(
+        decision_id="dec-1",
+        generated_at=datetime.now(UTC),
+        symbol="BTC-USDT-SWAP",
+        allow_open=True,
+        allow_close=True,
+        max_position=100.0,
+        max_order_size=1.0,
+        risk_mode=RunMode.NORMAL,
+        reason_codes=[],
+    )
+
+    for client_order_id in (
+        "btc-breakout-000006",
+        "btc-breakout-000007",
+        "btc-breakout-000008",
+    ):
+        await coordinator.submit_market_open(
+            symbol="BTC-USDT-SWAP",
+            side="buy",
+            size=1.0,
+            client_order_id=client_order_id,
+            decision=allow_open_decision,
+            timestamp="2026-04-19T00:00:00.000Z",
+        )
+
+    cached_response = await coordinator.submit_market_open(
+        symbol="BTC-USDT-SWAP",
+        side="buy",
+        size=1.0,
+        client_order_id="btc-breakout-000008",
+        decision=RiskDecision(
+            decision_id="dec-2",
+            generated_at=datetime.now(UTC),
+            symbol="BTC-USDT-SWAP",
+            allow_open=False,
+            allow_close=True,
+            max_position=100.0,
+            max_order_size=1.0,
+            risk_mode=RunMode.NORMAL,
+            reason_codes=[],
+        ),
+        timestamp="2026-04-19T00:00:00.000Z",
+    )
+
+    assert "btc-breakout-000006" not in coordinator.inflight_by_client_order_id
+    assert "btc-breakout-000007" in coordinator.inflight_by_client_order_id
+    assert "btc-breakout-000008" in coordinator.inflight_by_client_order_id
+    assert cached_response == [{"ordId": "1", "clOrdId": "btc-breakout-000008", "sCode": "0"}]
+    assert len(rest.calls) == 3

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections import deque
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
@@ -16,7 +17,9 @@ class ExecutionRestClient(Protocol):
 @dataclass
 class ExecutionCoordinator:
     rest_client: ExecutionRestClient
+    max_completed_entries: int = 1024
     inflight_by_client_order_id: dict[str, dict[str, Any]] = field(default_factory=dict)
+    completed_client_order_ids: deque[str] = field(default_factory=deque)
 
     async def submit_market_open(
         self,
@@ -77,3 +80,13 @@ class ExecutionCoordinator:
             return
         entry["response"] = task.result()
         entry.pop("task", None)
+        self.completed_client_order_ids.append(client_order_id)
+        self._prune_completed_entries()
+
+    def _prune_completed_entries(self) -> None:
+        while len(self.completed_client_order_ids) > self.max_completed_entries:
+            oldest_client_order_id = self.completed_client_order_ids.popleft()
+            entry = self.inflight_by_client_order_id.get(oldest_client_order_id)
+            if entry is None or "task" in entry:
+                continue
+            self.inflight_by_client_order_id.pop(oldest_client_order_id, None)

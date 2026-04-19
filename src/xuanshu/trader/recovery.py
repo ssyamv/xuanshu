@@ -95,5 +95,8 @@ def _coerce_float(value: object) -> object:
         stripped = value.strip()
         if not stripped:
             return None
-        return float(stripped)
-    return value
+        try:
+            return float(stripped)
+        except ValueError:
+            return float("nan")
+    return float("nan")

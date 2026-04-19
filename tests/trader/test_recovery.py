@@ -194,3 +194,50 @@ async def test_recovery_supervisor_blocks_when_checkpoint_and_exchange_diverge()
     assert rest_client.open_orders_calls == [("BTC-USDT-SWAP", "2026-04-19T00:00:00.000Z")]
     assert rest_client.positions_calls == [("BTC-USDT-SWAP", "2026-04-19T00:00:00.000Z")]
     assert rest_client.account_summary_calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("open_orders", "positions"),
+    [
+        ([_okx_open_order(price="not-a-number")], [_okx_position()]),
+        ([_okx_open_order()], [_okx_position(net_quantity="not-a-number")]),
+    ],
+)
+async def test_recovery_supervisor_fails_safe_on_malformed_exchange_numeric_fields(
+    open_orders: list[dict[str, object]],
+    positions: list[dict[str, object]],
+) -> None:
+    checkpoint = _build_checkpoint(
+        positions_snapshot=[
+            CheckpointPosition(
+                symbol="BTC-USDT-SWAP",
+                net_quantity=1.0,
+                mark_price=102.5,
+                unrealized_pnl=3.0,
+            )
+        ],
+        open_orders_snapshot=[
+            CheckpointOrder(
+                order_id="ord-1",
+                symbol="BTC-USDT-SWAP",
+                side="buy",
+                price=100.0,
+                size=1.0,
+                status="live",
+            )
+        ],
+    )
+    supervisor = RecoverySupervisor(
+        rest_client=_FakeRestClient(open_orders=open_orders, positions=positions)
+    )
+
+    result = await supervisor.run_startup_recovery(
+        "BTC-USDT-SWAP",
+        checkpoint,
+        timestamp="2026-04-19T00:00:00.000Z",
+    )
+
+    assert result["run_mode"] == "halted"
+    assert result["needs_reconcile"] is True
+    assert result["reason"] == "exchange_state_mismatch"
