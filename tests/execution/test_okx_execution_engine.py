@@ -570,6 +570,145 @@ def test_okx_rest_client_place_order_rejects_malformed_payload_before_post() -> 
     asyncio.run(client.aclose())
 
 
+def test_okx_rest_client_place_order_rejects_blank_required_payload_values() -> None:
+    client = OkxRestClient(
+        base_url="https://www.okx.com",
+        api_key="api-key",
+        api_secret="api-secret",
+        passphrase="api-passphrase",
+    )
+    timestamp = "2026-04-19T00:00:00.000Z"
+    post_called = False
+
+    async def fake_post(path: str, *, content: str, headers: dict[str, str]) -> None:
+        nonlocal post_called
+        post_called = True
+
+    client.client.post = fake_post  # type: ignore[method-assign]
+
+    invalid_payloads = (
+        {
+            "instId": "",
+            "tdMode": "cross",
+            "side": "buy",
+            "ordType": "market",
+            "sz": "1",
+            "clOrdId": "btc-breakout-000006",
+        },
+        {
+            "instId": "BTC-USDT-SWAP",
+            "tdMode": "cross",
+            "side": "buy",
+            "ordType": "market",
+            "sz": "",
+            "clOrdId": "btc-breakout-000007",
+        },
+        {
+            "instId": "BTC-USDT-SWAP",
+            "tdMode": "cross",
+            "side": "buy",
+            "ordType": "market",
+            "sz": "1",
+            "clOrdId": "",
+        },
+    )
+
+    for payload in invalid_payloads:
+        try:
+            asyncio.run(client.place_order(payload, timestamp))
+        except ValueError as exc:
+            assert "blank" in str(exc)
+        else:
+            raise AssertionError("expected ValueError for blank required payload value")
+
+    assert post_called is False
+
+    asyncio.run(client.aclose())
+
+
+def test_okx_rest_client_rejects_blank_limit_price() -> None:
+    client = OkxRestClient(
+        base_url="https://www.okx.com",
+        api_key="api-key",
+        api_secret="api-secret",
+        passphrase="api-passphrase",
+    )
+    timestamp = "2026-04-19T00:00:00.000Z"
+    post_called = False
+
+    async def fake_post(path: str, *, content: str, headers: dict[str, str]) -> None:
+        nonlocal post_called
+        post_called = True
+
+    client.client.post = fake_post  # type: ignore[method-assign]
+
+    try:
+        asyncio.run(
+            client.place_order(
+                {
+                    "instId": "BTC-USDT-SWAP",
+                    "tdMode": "cross",
+                    "side": "buy",
+                    "ordType": "limit",
+                    "sz": "1",
+                    "clOrdId": "btc-breakout-000008",
+                    "px": "",
+                },
+                timestamp,
+            )
+        )
+    except ValueError as exc:
+        assert "blank" in str(exc)
+        assert "price" in str(exc)
+    else:
+        raise AssertionError("expected ValueError for blank limit price")
+
+    assert post_called is False
+
+    asyncio.run(client.aclose())
+
+
+def test_okx_rest_client_place_order_rejects_unexpected_extra_payload_keys() -> None:
+    client = OkxRestClient(
+        base_url="https://www.okx.com",
+        api_key="api-key",
+        api_secret="api-secret",
+        passphrase="api-passphrase",
+    )
+    timestamp = "2026-04-19T00:00:00.000Z"
+    post_called = False
+
+    async def fake_post(path: str, *, content: str, headers: dict[str, str]) -> None:
+        nonlocal post_called
+        post_called = True
+
+    client.client.post = fake_post  # type: ignore[method-assign]
+
+    try:
+        asyncio.run(
+            client.place_order(
+                {
+                    "instId": "BTC-USDT-SWAP",
+                    "tdMode": "cross",
+                    "side": "buy",
+                    "ordType": "market",
+                    "sz": "1",
+                    "clOrdId": "btc-breakout-000009",
+                    "foo": "bar",
+                },
+                timestamp,
+            )
+        )
+    except ValueError as exc:
+        assert "unexpected" in str(exc)
+    else:
+        raise AssertionError("expected ValueError for unexpected direct place_order payload key")
+
+    assert post_called is False
+
+    asyncio.run(client.aclose())
+
+
 def test_okx_rest_client_fetches_open_orders_positions_and_account_summary() -> None:
     client = OkxRestClient(
         base_url="https://www.okx.com",

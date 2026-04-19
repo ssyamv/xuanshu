@@ -10,6 +10,9 @@ import httpx
 
 _SUPPORTED_ORDER_TYPES = frozenset({"market", "limit"})
 _SUPPORTED_ORDER_SIDES = frozenset({"buy", "sell"})
+_PLACE_ORDER_REQUIRED_FIELDS = frozenset({"instId", "tdMode", "side", "ordType", "sz", "clOrdId"})
+_PLACE_ORDER_OPTIONAL_FIELDS = frozenset({"px"})
+_PLACE_ORDER_ALLOWED_FIELDS = _PLACE_ORDER_REQUIRED_FIELDS | _PLACE_ORDER_OPTIONAL_FIELDS
 
 
 class OkxRestClient:
@@ -71,6 +74,15 @@ class OkxRestClient:
         price: str | None = None,
     ) -> dict[str, str]:
         self._validate_order_entry_fields(side=side, order_type=order_type, price=price)
+        self._validate_non_blank_fields(
+            {
+                "instId": symbol,
+                "sz": size,
+                "clOrdId": client_order_id,
+            }
+        )
+        if price is not None:
+            self._validate_non_blank_fields({"price": price})
 
         payload = {
             "instId": symbol,
@@ -129,10 +141,21 @@ class OkxRestClient:
             raise ValueError("price is not allowed for market orders")
 
     def _validate_place_order_payload(self, payload: dict[str, str]) -> None:
-        required_fields = {"instId", "tdMode", "side", "ordType", "sz", "clOrdId"}
-        missing_fields = sorted(required_fields - payload.keys())
+        missing_fields = sorted(_PLACE_ORDER_REQUIRED_FIELDS - payload.keys())
         if missing_fields:
             raise ValueError(f"missing required place_order payload fields: {missing_fields}")
+        unexpected_fields = sorted(payload.keys() - _PLACE_ORDER_ALLOWED_FIELDS)
+        if unexpected_fields:
+            raise ValueError(
+                f"unexpected place_order payload fields: {unexpected_fields}"
+            )
+        self._validate_non_blank_fields(
+            {
+                "instId": payload["instId"],
+                "sz": payload["sz"],
+                "clOrdId": payload["clOrdId"],
+            }
+        )
         if payload["tdMode"] != "cross":
             raise ValueError(f"unsupported tdMode: {payload['tdMode']}")
         self._validate_order_entry_fields(
@@ -140,3 +163,10 @@ class OkxRestClient:
             order_type=payload["ordType"],
             price=payload.get("px"),
         )
+        if "px" in payload:
+            self._validate_non_blank_fields({"price": payload["px"]})
+
+    def _validate_non_blank_fields(self, fields: dict[str, str]) -> None:
+        for field_name, value in fields.items():
+            if not value.strip():
+                raise ValueError(f"blank {field_name} is not allowed")
