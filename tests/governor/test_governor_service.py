@@ -1,11 +1,14 @@
 from datetime import UTC, datetime, timedelta
 
+import httpx
 import pytest
 from pydantic import ValidationError
+from pydantic import SecretStr
 
+import xuanshu.infra.ai.governor_client as governor_client_module
 from xuanshu.contracts.strategy import StrategyConfigSnapshot
 from xuanshu.core.enums import ApprovalState, RunMode
-from xuanshu.infra.ai.governor_client import GovernorClient
+from xuanshu.infra.ai.governor_client import ConfiguredGovernorAgentRunner, GovernorClient
 from xuanshu.infra.storage.postgres_store import PostgresRuntimeStore
 from xuanshu.governor.service import GovernorService
 
@@ -50,6 +53,124 @@ async def test_governor_client_validates_agent_output() -> None:
 
     with pytest.raises(ValidationError):
         await client.generate_snapshot({"version_id": "snap-invalid"})
+
+
+@pytest.mark.asyncio
+async def test_configured_governor_runner_posts_state_summary_and_parses_fenced_json(monkeypatch) -> None:
+    captured = {}
+
+    class _Response:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, object]:
+            return {
+                "output_text": """```json
+{
+  "version_id": "snap-live",
+  "generated_at": "2026-04-19T00:00:00Z",
+  "effective_from": "2026-04-19T00:00:00Z",
+  "expires_at": "2026-04-19T00:05:00Z",
+  "symbol_whitelist": ["BTC-USDT-SWAP"],
+  "strategy_enable_flags": {"breakout": true, "mean_reversion": false, "risk_pause": true},
+  "risk_multiplier": 0.5,
+  "per_symbol_max_position": 0.12,
+  "max_leverage": 3,
+  "market_mode": "normal",
+  "approval_state": "approved",
+  "source_reason": "governor_ai",
+  "ttl_sec": 300
+}
+```"""
+            }
+
+    class _AsyncClient:
+        def __init__(self, *, timeout: float, headers: dict[str, str]) -> None:
+            captured["timeout"] = timeout
+            captured["headers"] = headers
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        async def post(self, url: str, json: dict[str, object]) -> _Response:
+            captured["url"] = url
+            captured["payload"] = json
+            return _Response()
+
+    monkeypatch.setattr(governor_client_module.httpx, "AsyncClient", _AsyncClient)
+
+    runner = ConfiguredGovernorAgentRunner(api_key=SecretStr("openai-key"), timeout_sec=9)
+    result = await runner.run(
+        {
+            "scope": "governor",
+            "current_run_mode": "degraded",
+            "committee_summary": {"recommended_mode_floor": "degraded"},
+        }
+    )
+
+    assert result["version_id"] == "snap-live"
+    assert captured["timeout"] == 9
+    assert captured["headers"]["Authorization"] == "Bearer openai-key"
+    assert captured["url"] == "https://api.openai.com/v1/responses"
+    assert captured["payload"]["input"][1]["content"][0]["text"].startswith("State summary JSON:")
+
+
+@pytest.mark.asyncio
+async def test_configured_governor_runner_raises_runtime_error_on_timeout(monkeypatch) -> None:
+    class _AsyncClient:
+        def __init__(self, *, timeout: float, headers: dict[str, str]) -> None:
+            self.timeout = timeout
+            self.headers = headers
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        async def post(self, url: str, json: dict[str, object]) -> object:
+            raise httpx.TimeoutException("timed out")
+
+    monkeypatch.setattr(governor_client_module.httpx, "AsyncClient", _AsyncClient)
+
+    runner = ConfiguredGovernorAgentRunner(api_key=SecretStr("openai-key"), timeout_sec=9)
+
+    with pytest.raises(RuntimeError, match="Governor AI request timed out"):
+        await runner.run({"scope": "governor"})
+
+
+@pytest.mark.asyncio
+async def test_configured_governor_runner_rejects_empty_response(monkeypatch) -> None:
+    class _Response:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, object]:
+            return {"output": []}
+
+    class _AsyncClient:
+        def __init__(self, *, timeout: float, headers: dict[str, str]) -> None:
+            self.timeout = timeout
+            self.headers = headers
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        async def post(self, url: str, json: dict[str, object]) -> _Response:
+            return _Response()
+
+    monkeypatch.setattr(governor_client_module.httpx, "AsyncClient", _AsyncClient)
+
+    runner = ConfiguredGovernorAgentRunner(api_key=SecretStr("openai-key"), timeout_sec=9)
+
+    with pytest.raises(RuntimeError, match="Governor AI response did not contain text output"):
+        await runner.run({"scope": "governor"})
 
 
 def test_governor_builds_state_summary_from_runtime_and_history() -> None:

@@ -1,9 +1,20 @@
 from dataclasses import dataclass
 from collections.abc import Mapping
+import json
 from typing import Protocol
+
+import httpx
 from pydantic import SecretStr
 
 from xuanshu.contracts.strategy import StrategyConfigSnapshot
+
+_DEFAULT_GOVERNOR_MODEL = "gpt-4.1-mini"
+_RESPONSES_API_URL = "https://api.openai.com/v1/responses"
+_GOVERNOR_INSTRUCTIONS = (
+    "You are the Governor Service for a live trading system. "
+    "Given a state summary, return exactly one JSON object matching the StrategyConfigSnapshot schema. "
+    "Return JSON only with no commentary."
+)
 
 
 class GovernorAgentRunner(Protocol):
@@ -17,7 +28,50 @@ class ConfiguredGovernorAgentRunner:
     timeout_sec: int
 
     async def run(self, state_summary: Mapping[str, object]) -> object:
-        raise NotImplementedError("configured governor agent runner is not implemented in the skeleton")
+        payload = {
+            "model": _DEFAULT_GOVERNOR_MODEL,
+            "input": [
+                {
+                    "role": "system",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": _GOVERNOR_INSTRUCTIONS,
+                        }
+                    ],
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": f"State summary JSON:\n{json.dumps(state_summary, ensure_ascii=True, sort_keys=True)}",
+                        }
+                    ],
+                },
+            ],
+        }
+        headers = {
+            "Authorization": f"Bearer {self.api_key.get_secret_value()}",
+            "Content-Type": "application/json",
+        }
+        try:
+            async with httpx.AsyncClient(timeout=float(self.timeout_sec), headers=headers) as client:
+                response = await client.post(_RESPONSES_API_URL, json=payload)
+                response.raise_for_status()
+        except httpx.TimeoutException as exc:
+            raise RuntimeError("Governor AI request timed out") from exc
+        except httpx.HTTPError as exc:
+            raise RuntimeError(f"Governor AI request failed: {exc}") from exc
+
+        text = _extract_response_text(response.json())
+        if text is None:
+            raise RuntimeError("Governor AI response did not contain text output")
+
+        try:
+            return json.loads(_extract_json_object(text))
+        except json.JSONDecodeError as exc:
+            raise RuntimeError("Governor AI response did not contain valid JSON") from exc
 
 
 class GovernorClient:
@@ -27,3 +81,50 @@ class GovernorClient:
     async def generate_snapshot(self, state_summary: Mapping[str, object]) -> StrategyConfigSnapshot:
         result = await self.agent_runner.run(state_summary)
         return StrategyConfigSnapshot.model_validate(result)
+
+
+def _extract_response_text(payload: object) -> str | None:
+    if not isinstance(payload, Mapping):
+        return None
+
+    output_text = payload.get("output_text")
+    if isinstance(output_text, str) and output_text.strip():
+        return output_text.strip()
+
+    output = payload.get("output")
+    if not isinstance(output, list):
+        return None
+
+    text_chunks: list[str] = []
+    for item in output:
+        if not isinstance(item, Mapping):
+            continue
+        content = item.get("content")
+        if not isinstance(content, list):
+            continue
+        for block in content:
+            if not isinstance(block, Mapping):
+                continue
+            text = block.get("text")
+            if isinstance(text, str) and text.strip():
+                text_chunks.append(text.strip())
+    if not text_chunks:
+        return None
+    return "\n".join(text_chunks)
+
+
+def _extract_json_object(text: str) -> str:
+    stripped = text.strip()
+    if stripped.startswith("```"):
+        lines = stripped.splitlines()
+        if lines:
+            lines = lines[1:]
+        while lines and lines[-1].strip() == "```":
+            lines.pop()
+        stripped = "\n".join(lines).strip()
+
+    start = stripped.find("{")
+    end = stripped.rfind("}")
+    if start == -1 or end == -1 or end < start:
+        return stripped
+    return stripped[start : end + 1]
