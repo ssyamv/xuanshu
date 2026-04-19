@@ -15,11 +15,12 @@ _GOVERNOR_INSTRUCTIONS = (
     "You are the Governor Service for a live trading system. "
     "Given a state summary, return exactly one JSON object matching this schema and nothing else: "
     '{"version_id": string, "generated_at": RFC3339 string, "effective_from": RFC3339 string, '
-    '"expires_at": RFC3339 string, "symbol_whitelist": string[], '
+    '"expires_at": RFC3339 string, "symbol_whitelist": non-empty string[], '
     '"strategy_enable_flags": object<string, boolean>, "risk_multiplier": number, '
     '"per_symbol_max_position": number, "max_leverage": integer, '
     '"market_mode": "normal"|"degraded"|"reduce_only"|"halted", '
     '"approval_state": "approved"|"rejected", "source_reason": string, "ttl_sec": integer}. '
+    "If state_summary contains symbol_summaries, derive symbol_whitelist from those symbols and never return an empty list. "
     "Do not return keys outside this schema. "
     "Return JSON only with no commentary."
 )
@@ -115,6 +116,12 @@ class GovernorClient:
 
     async def generate_snapshot(self, state_summary: Mapping[str, object]) -> StrategyConfigSnapshot:
         result = await self.agent_runner.run(state_summary)
+        if isinstance(result, dict):
+            symbol_whitelist = result.get("symbol_whitelist")
+            if not isinstance(symbol_whitelist, list) or not symbol_whitelist:
+                backfilled_symbols = _extract_symbol_scope(state_summary)
+                if backfilled_symbols:
+                    result = {**result, "symbol_whitelist": backfilled_symbols}
         return StrategyConfigSnapshot.model_validate(result)
 
 
@@ -163,3 +170,17 @@ def _extract_json_object(text: str) -> str:
     if start == -1 or end == -1 or end < start:
         return stripped
     return stripped[start : end + 1]
+
+
+def _extract_symbol_scope(state_summary: Mapping[str, object]) -> list[str]:
+    symbol_summaries = state_summary.get("symbol_summaries")
+    if not isinstance(symbol_summaries, list):
+        return []
+    symbols: list[str] = []
+    for summary in symbol_summaries:
+        if not isinstance(summary, Mapping):
+            continue
+        symbol = summary.get("symbol")
+        if isinstance(symbol, str) and symbol and symbol not in symbols:
+            symbols.append(symbol)
+    return symbols

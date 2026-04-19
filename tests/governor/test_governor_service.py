@@ -227,7 +227,7 @@ async def test_codex_cli_governor_runner_invokes_codex_exec_with_snapshot_schema
     assert '"generated_at": RFC3339 string' in prompt
     assert '"effective_from": RFC3339 string' in prompt
     assert '"expires_at": RFC3339 string' in prompt
-    assert '"symbol_whitelist": string[]' in prompt
+    assert '"symbol_whitelist": non-empty string[]' in prompt
     assert '"strategy_enable_flags": object<string, boolean>' in prompt
     assert '"risk_multiplier": number' in prompt
     assert '"per_symbol_max_position": number' in prompt
@@ -237,6 +237,43 @@ async def test_codex_cli_governor_runner_invokes_codex_exec_with_snapshot_schema
     assert '"source_reason": string' in prompt
     assert '"ttl_sec": integer' in prompt
     assert "Do not return keys outside this schema." in prompt
+    assert "If state_summary contains symbol_summaries" in prompt
+
+
+class _GovernorRunnerWithEmptyWhitelist:
+    async def run(self, state_summary: dict[str, object]) -> dict[str, object]:
+        return {
+            "version_id": "snap-live",
+            "generated_at": "2026-04-19T00:00:00Z",
+            "effective_from": "2026-04-19T00:00:00Z",
+            "expires_at": "2026-04-19T00:05:00Z",
+            "symbol_whitelist": [],
+            "strategy_enable_flags": {"breakout": True, "mean_reversion": False, "risk_pause": True},
+            "risk_multiplier": 0.5,
+            "per_symbol_max_position": 0.12,
+            "max_leverage": 3,
+            "market_mode": "normal",
+            "approval_state": "approved",
+            "source_reason": "governor_ai",
+            "ttl_sec": 300,
+        }
+
+
+@pytest.mark.asyncio
+async def test_governor_client_backfills_empty_symbol_whitelist_from_state_summary() -> None:
+    client = GovernorClient(agent_runner=_GovernorRunnerWithEmptyWhitelist())
+
+    snapshot = await client.generate_snapshot(
+        {
+            "symbol_summaries": [
+                {"symbol": "BTC-USDT-SWAP"},
+                {"symbol": "ETH-USDT-SWAP"},
+                {"symbol": "BTC-USDT-SWAP"},
+            ]
+        }
+    )
+
+    assert snapshot.symbol_whitelist == ["BTC-USDT-SWAP", "ETH-USDT-SWAP"]
 
 
 def test_governor_builds_state_summary_from_runtime_and_history() -> None:
