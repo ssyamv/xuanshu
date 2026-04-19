@@ -321,6 +321,13 @@ async def test_notifier_service_emits_proactive_notifications_from_history_rows(
             "detail": "startup gating tightened runtime to reduce_only",
         }
     )
+    history.append_risk_event(
+        {
+            "event_type": "startup_recovery_failed",
+            "symbol": "system",
+            "detail": "exchange_state_mismatch",
+        }
+    )
     service = NotifierService(
         okx_symbols=("BTC-USDT-SWAP",),
         runtime_store=_RuntimeStore(),
@@ -336,12 +343,48 @@ async def test_notifier_service_emits_proactive_notifications_from_history_rows(
 
     flushed = await service.flush_proactive_notifications(adapter=_Adapter())
 
-    assert flushed == 3
+    assert flushed == 4
     assert delivered == [
         "Mode changed to reduce-only",
         "Snapshot published: snap-002 (mode=degraded, approval=approved)",
+        "Recovery failed: exchange_state_mismatch",
         "Risk event: runtime_mode_changed startup gating tightened runtime to reduce_only",
     ]
+
+
+@pytest.mark.asyncio
+async def test_notifier_service_marks_recovery_failures_as_critical_retriable_notifications() -> None:
+    history = PostgresRuntimeStore(dsn="postgresql://xuanshu:xuanshu@localhost:5432/xuanshu")
+    history.append_risk_event(
+        {
+            "event_type": "startup_recovery_failed",
+            "symbol": "system",
+            "detail": "exchange_state_mismatch",
+        }
+    )
+    service = NotifierService(
+        okx_symbols=("BTC-USDT-SWAP",),
+        runtime_store=_RuntimeStore(),
+        snapshot_store=_SnapshotStore(),
+        history_store=history,
+    )
+
+    class _Adapter:
+        async def send_text(self, payload: TextMessagePayload) -> None:
+            raise RuntimeError("telegram down")
+
+    with pytest.raises(RuntimeError, match="telegram down"):
+        await service.flush_proactive_notifications(adapter=_Adapter())
+
+    assert history.written_rows["notification_events"][-1] == {
+        "category": "recovery_failed",
+        "dedupe_key": "recovery_failed:startup_recovery_failed:exchange_state_mismatch",
+        "severity": "CRITICAL",
+        "status": "failed",
+        "attempt_count": 3,
+        "needs_retry": True,
+        "text": "Recovery failed: exchange_state_mismatch",
+    }
 
 
 @pytest.mark.asyncio

@@ -78,12 +78,13 @@
 
 - Trader：`T1` 到 `T12`
 - Governor：`G1` 到 `G9`
+- Notifier：`N1` 到 `N5`
 
 ### 4.2 未完成项
 
 以下功能当前都属于 `1.0` 未完成项：
 
-- Notifier：`N1` 到 `N5`
+- 无
 
 ## 5. Trader Service 业务功能清单
 
@@ -443,14 +444,15 @@
 
 ## 7. Notifier Service 业务功能清单
 
-### [部分完成] N1. 主动推送
+### [已完成] N1. 主动推送
 
 - 功能说明：
   向 Telegram 推送关键业务事件，包括模式变化、治理更新、风险事件、恢复失败等。
-- 当前状态：`部分完成`
+- 当前状态：`已完成`
 - 当前依据：
-  - Telegram 发送路径已存在
-  - Notifier 已能投递 runtime started、pending/proactive notifications
+  - Telegram 发送路径已稳定接通
+  - Notifier 已能主动投递模式变化、snapshot 发布、风险事件、恢复失败等关键业务通知
+  - 恢复失败类通知已提升为 `CRITICAL` 并进入高优先级重试路径
 - 依赖：
   - `T11`
   - `G6`
@@ -463,13 +465,14 @@
     - 恢复失败
   - `CRITICAL` 消息具备更高重试优先级
 
-### [部分完成] N2. 查询命令面
+### [已完成] N2. 查询命令面
 
 - 功能说明：
   通过 Telegram 命令查询当前模式、市场摘要、仓位、订单、风险状态。
-- 当前状态：`部分完成`
+- 当前状态：`已完成`
 - 当前依据：
   - 已支持 `/status /positions /orders /risk /mode /market /takeover`
+  - 命令响应直接读取现有 Redis 热状态与 PostgreSQL 历史事实
 - 依赖：
   - `T3`
   - `T11`
@@ -479,14 +482,14 @@
   - 命令响应来源于现有热状态与历史事实，而不是 Notifier 自己推导
   - 查询失败不影响交易主链路
 
-### [部分完成] N3. 人工接管
+### [已完成] N3. 人工接管
 
 - 功能说明：
   允许人工通过命令发起受控 takeover，请求系统进入更保守的运行模式。
-- 当前状态：`部分完成`
+- 当前状态：`已完成`
 - 当前依据：
   - `/takeover` 已存在
-  - 已能提升 mode 并写入 fault flag / risk event
+  - 已能仅朝更保守方向提升 mode，并写入 fault flag / risk event 审计事实
 - 依赖：
   - `T11`
 - 验收标准：
@@ -494,14 +497,15 @@
   - 请求会留下结构化审计事实
   - Trader / Governor 后续都能读取到该变化
 
-### [部分完成] N4. 通知分级与补发
+### [已完成] N4. 通知分级与补发
 
 - 功能说明：
   对通知做 `INFO / WARN / CRITICAL` 分级，失败后记录可补发状态，关键消息允许重试。
-- 当前状态：`部分完成`
+- 当前状态：`已完成`
 - 当前依据：
   - `deliver_text()` 已实现 severity 差异化重试
   - 已有 pending / proactive 两类刷新逻辑
+  - `CRITICAL` 失败事件会记录 retry 标记并进入补发队列
 - 依赖：
   - `N1`
 - 验收标准：
@@ -510,14 +514,14 @@
   - `CRITICAL` 失败后带 retry 标记
   - flush 过程不会阻塞核心业务进程
 
-### [部分完成] N5. 运行可见性闭环
+### [已完成] N5. 运行可见性闭环
 
 - 功能说明：
   让人工监督者能够持续看到当前模式、风险状态、最近治理结果和关键异常。
-- 当前状态：`部分完成`
+- 当前状态：`已完成`
 - 当前依据：
-  - 当前 `status`、`risk`、`market` 已有雏形
-  - 但效果取决于上游 Trader/Governor 是否把摘要真正发布完整
+  - 当前 `/status`、`/risk`、`/market` 已能直接呈现 mode、snapshot、faults、budget、governor health、risk events、symbol runtime summaries
+  - 上游 Trader/Governor 已发布 Notifier 所需摘要，运行可见性闭环已经成立
 - 依赖：
   - `T3`
   - `T11`
@@ -621,18 +625,18 @@
 
 - `Trader Service`：`已完成`
 - `Governor Service`：`已完成`
-- `Notifier Service`：`部分完成`
+- `Notifier Service`：`已完成`
 
 更具体地说：
 
 - 契约、基础模块、适配器和运行骨架已经基本具备
 - Trader 的完整 live 主闭环已经接通
 - Governor 的慢路径治理闭环已经接通，能够生成、护栏化、发布或冻结正式 snapshot
-- Notifier 已有较完整的交互面，但其最终价值仍取决于上游业务闭环补齐
+- Notifier 的主动通知、查询命令、人工接管、通知补发和运行可见性闭环已全部兑现
 
-因此，当前项目还不能视为接近 `1.0` 完成状态，而是处在：
+因此，当前项目已经可以视为达到 `1.0` 业务功能完成状态：
 
-**Trader 快路径闭环与 Governor 慢路径治理闭环已完成，当前只剩 Notifier 运行面闭环待补齐。**
+**Trader 快路径闭环、Governor 慢路径治理闭环与 Notifier 运行可见性/人工接管闭环均已完成。**
 
 ## 10. 逐项开发的执行原则
 

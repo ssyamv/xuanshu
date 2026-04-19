@@ -313,6 +313,13 @@ def test_notifier_command_loop_flushes_proactive_notifications(monkeypatch) -> N
             "needs_reconcile": False,
         }
     )
+    store.append_risk_event(
+        {
+            "event_type": "startup_recovery_failed",
+            "symbol": "system",
+            "detail": "exchange_state_mismatch",
+        }
+    )
 
     monkeypatch.setattr(notifier_app, "build_notifier_adapter", lambda settings: adapter)
     monkeypatch.setattr(
@@ -337,4 +344,7 @@ def test_notifier_command_loop_flushes_proactive_notifications(monkeypatch) -> N
     with pytest.raises(RuntimeError, match="stop loop"):
         asyncio.run(notifier_app._run_command_loop(runtime))
 
-    assert adapter.sent == ["Mode changed to reduce-only"]
+    assert adapter.sent == [
+        "Mode changed to reduce-only",
+        "Recovery failed: exchange_state_mismatch",
+    ]

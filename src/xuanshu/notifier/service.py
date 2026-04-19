@@ -27,7 +27,8 @@ _RETRY_PRIORITY: dict[NotificationSeverity, int] = {
 _PROACTIVE_CATEGORY_PRIORITY: dict[str, int] = {
     "mode_change": 0,
     "snapshot_published": 1,
-    "risk_event": 2,
+    "recovery_failed": 2,
+    "risk_event": 3,
 }
 
 
@@ -353,6 +354,7 @@ class NotifierService:
         candidates: list[dict[str, str]] = []
         candidates.extend(self._collect_checkpoint_candidates(limit=limit))
         candidates.extend(self._collect_governor_candidates(limit=limit))
+        candidates.extend(self._collect_recovery_failure_candidates(limit=limit))
         candidates.extend(self._collect_risk_event_candidates(limit=limit))
         candidates.sort(
             key=lambda item: (
@@ -410,6 +412,26 @@ class NotifierService:
             )
         return candidates
 
+    def _collect_recovery_failure_candidates(self, *, limit: int) -> list[dict[str, str]]:
+        rows = self._history_store.list_recent_rows("risk_events", limit=limit)
+        candidates: list[dict[str, str]] = []
+        for row in rows:
+            event_type = row.get("event_type")
+            detail = row.get("detail", "")
+            if not isinstance(event_type, str) or "recovery_failed" not in event_type:
+                continue
+            if not isinstance(detail, str):
+                detail = str(detail)
+            candidates.append(
+                {
+                    "category": "recovery_failed",
+                    "dedupe_key": f"recovery_failed:{event_type}:{detail}",
+                    "severity": "CRITICAL",
+                    "text": f"Recovery failed: {detail or event_type}",
+                }
+            )
+        return candidates
+
     def _collect_risk_event_candidates(self, *, limit: int) -> list[dict[str, str]]:
         rows = self._history_store.list_recent_rows("risk_events", limit=limit)
         candidates: list[dict[str, str]] = []
@@ -417,6 +439,8 @@ class NotifierService:
             event_type = row.get("event_type")
             detail = row.get("detail", "")
             if not isinstance(event_type, str):
+                continue
+            if "recovery_failed" in event_type:
                 continue
             if not isinstance(detail, str):
                 detail = str(detail)
