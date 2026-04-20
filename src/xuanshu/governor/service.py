@@ -3,6 +3,8 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from hashlib import sha256
+import json
 from typing import Protocol
 
 from pydantic import ValidationError
@@ -70,6 +72,62 @@ class GovernorService:
             return ApprovalRecord.model_validate(dict(payload))
         except ValidationError as exc:
             raise ValueError(f"invalid approval record: {exc}") from exc
+
+    def build_auto_approval_record(
+        self,
+        *,
+        state_summary: Mapping[str, object],
+        strategy_package_id: str,
+        backtest_report_id: str,
+        created_at: datetime,
+    ) -> ApprovalRecord:
+        committee_summary = (
+            state_summary.get("committee_summary")
+            if isinstance(state_summary.get("committee_summary"), Mapping)
+            else {}
+        )
+        approved_candidates = committee_summary.get("approved_research_candidates")
+        approved_candidate_ids = {
+            candidate_id for candidate_id in approved_candidates
+            if isinstance(candidate_id, str)
+        } if isinstance(approved_candidates, list) else set()
+        blocking_flags = committee_summary.get("blocking_flags")
+        normalized_blocking_flags = [
+            flag for flag in blocking_flags if isinstance(flag, str)
+        ] if isinstance(blocking_flags, list) else []
+        recommended_mode_floor = str(committee_summary.get("recommended_mode_floor") or "").strip().lower()
+        guardrails: dict[str, object] = {}
+        decision = ApprovalDecision.REJECTED
+        decision_reason = "committee rejected research candidate"
+
+        if strategy_package_id in approved_candidate_ids:
+            if recommended_mode_floor and recommended_mode_floor != RunMode.NORMAL.value:
+                guardrails["market_mode"] = recommended_mode_floor
+                decision = ApprovalDecision.APPROVED_WITH_GUARDRAILS
+                decision_reason = "committee auto-approved candidate with guardrails"
+            else:
+                decision = ApprovalDecision.APPROVED
+                decision_reason = "committee auto-approved candidate"
+        elif normalized_blocking_flags:
+            decision_reason = f"committee rejected candidate due to blocking flags: {','.join(normalized_blocking_flags)}"
+
+        approval_payload = {
+            "strategy_package_id": strategy_package_id,
+            "backtest_report_id": backtest_report_id,
+            "decision": decision.value,
+            "decision_reason": decision_reason,
+            "guardrails": guardrails,
+            "reviewed_by": "committee",
+            "review_source": "system",
+        }
+        fingerprint = sha256(
+            json.dumps(approval_payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("utf-8")
+        ).hexdigest()[:12]
+        return ApprovalRecord(
+            approval_record_id=f"apr-{fingerprint}",
+            created_at=created_at,
+            **approval_payload,
+        )
 
     @staticmethod
     def _resolve_prepublication_block(

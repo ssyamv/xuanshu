@@ -465,23 +465,6 @@ def test_governor_cycle_can_publish_snapshot_from_approved_research(monkeypatch)
     monkeypatch.setattr(governor_app, "build_governor_client", lambda settings: GovernorClient(_Runner()))
 
     runtime = governor_app.build_governor_runtime()
-    backtest_report = runtime.backtest_validator.validate(
-        package=research_package,
-        historical_rows=historical_rows,
-    )
-    runtime.history_store.append_approval_record(
-        {
-            "approval_record_id": "apr-legacy-approved",
-            "strategy_package_id": research_package.strategy_package_id,
-            "backtest_report_id": backtest_report.backtest_report_id,
-            "decision": ApprovalDecision.APPROVED.value,
-            "decision_reason": "committee approved package",
-            "guardrails": {},
-            "reviewed_by": "committee",
-            "review_source": "manual",
-            "created_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
-        }
-    )
     asyncio.run(governor_app._run_governor_cycle(runtime))
 
     assert captured_state_summary is not None
@@ -492,6 +475,8 @@ def test_governor_cycle_can_publish_snapshot_from_approved_research(monkeypatch)
     assert [snapshot.source_reason for snapshot in runtime.published_snapshots] == [
         "approved research package"
     ]
+    assert len(runtime.history_store.written_rows["approval_records"]) == 1
+    assert runtime.history_store.written_rows["approval_records"][0]["decision"] == "approved"
 
 
 def test_governor_cycle_does_not_send_unapproved_research_downstream(monkeypatch) -> None:
@@ -586,15 +571,17 @@ def test_governor_cycle_does_not_send_unapproved_research_downstream(monkeypatch
     assert runtime.last_snapshot.version_id == "bootstrap"
     assert runtime.published_snapshots == []
     assert runtime.runtime_store.get_pending_approval_summary() == {
-        "pending_count": 1,
+        "pending_count": 0,
         "latest_strategy_package_id": history_store.written_rows["strategy_packages"][0]["strategy_package_id"],
         "latest_backtest_report_id": history_store.written_rows["backtest_reports"][0]["backtest_report_id"],
-        "approval_status": "pending",
+        "approval_status": "rejected",
     }
-    assert history_store.written_rows["governor_runs"][-1]["status"] == "approval_pending"
+    assert len(history_store.written_rows["approval_records"]) == 1
+    assert history_store.written_rows["approval_records"][0]["decision"] == "rejected"
+    assert history_store.written_rows["governor_runs"][-1]["status"] == "approval_rejected"
 
 
-def test_governor_cycle_records_pending_approval_after_validation_and_skips_publication(monkeypatch) -> None:
+def test_governor_cycle_auto_approves_research_after_validation_and_publishes(monkeypatch) -> None:
     _set_required_settings_env(monkeypatch)
     _clear_unrelated_settings_env(monkeypatch)
     history_store = PostgresRuntimeStore(dsn="postgresql://xuanshu:xuanshu@localhost:5432/xuanshu")
@@ -604,7 +591,7 @@ def test_governor_cycle_records_pending_approval_after_validation_and_skips_publ
         async def run(self, state_summary):
             now = datetime.now(UTC)
             return {
-                "version_id": "snap-pending-approval",
+                "version_id": "snap-auto-approved",
                 "generated_at": now.isoformat().replace("+00:00", "Z"),
                 "effective_from": now.isoformat().replace("+00:00", "Z"),
                 "expires_at": (now + timedelta(minutes=5)).isoformat().replace("+00:00", "Z"),
@@ -665,39 +652,41 @@ def test_governor_cycle_records_pending_approval_after_validation_and_skips_publ
 
     asyncio.run(governor_app._run_governor_cycle(runtime))
 
-    assert runtime.published_snapshots == []
-    assert runtime.last_snapshot.version_id == "bootstrap"
+    assert len(runtime.published_snapshots) == 1
+    assert runtime.last_snapshot.version_id.startswith("governor-")
     assert len(history_store.written_rows["strategy_packages"]) == 1
     assert len(history_store.written_rows["backtest_reports"]) == 1
-    assert history_store.written_rows["strategy_snapshots"] == []
+    assert len(history_store.written_rows["approval_records"]) == 1
+    assert history_store.written_rows["approval_records"][0]["decision"] == "approved"
+    assert len(history_store.written_rows["strategy_snapshots"]) == 1
     assert runtime.runtime_store.get_pending_approval_summary() == {
-        "pending_count": 1,
+        "pending_count": 0,
         "latest_strategy_package_id": history_store.written_rows["strategy_packages"][0]["strategy_package_id"],
         "latest_backtest_report_id": history_store.written_rows["backtest_reports"][0]["backtest_report_id"],
-        "approval_status": "pending",
+        "approval_status": "approved",
     }
     assert history_store.written_rows["governor_runs"] == [
         {
-            "version_id": "bootstrap",
-            "status": "approval_pending",
+            "version_id": runtime.last_snapshot.version_id,
+            "status": "published",
             "error": None,
             "research_provider": "api",
             "research_status": "candidate_built",
             "research_provider_success": True,
             "research_error": None,
             "research_candidate_count": 1,
-            "approved_research_candidate_ids": [],
+            "approved_research_candidate_ids": [history_store.written_rows["strategy_packages"][0]["strategy_package_id"]],
             "validation_status": "succeeded",
             "validation_error": None,
-            "approval_status": "pending",
+            "approval_status": "approved",
             "approval_error": None,
             "backtest_report_id": history_store.written_rows["backtest_reports"][0]["backtest_report_id"],
-            "approval_record_id": None,
+            "approval_record_id": history_store.written_rows["approval_records"][0]["approval_record_id"],
         }
     ]
 
 
-def test_governor_cycle_publishes_approved_research_with_durable_approval_record(monkeypatch) -> None:
+def test_governor_cycle_publishes_auto_approved_research_with_guardrails(monkeypatch) -> None:
     _set_required_settings_env(monkeypatch)
     _clear_unrelated_settings_env(monkeypatch)
     history_store = PostgresRuntimeStore(dsn="postgresql://xuanshu:xuanshu@localhost:5432/xuanshu")
@@ -751,6 +740,21 @@ def test_governor_cycle_publishes_approved_research_with_durable_approval_record
         lambda settings: StrategyResearchEngine(provider=_Provider()),
     )
 
+    original_build_committee_summary = governor_app.GovernorService.build_committee_summary
+
+    def _guardrailed_committee_summary(self, expert_opinions, *, research_candidates=None):
+        summary = original_build_committee_summary(
+            self,
+            expert_opinions,
+            research_candidates=research_candidates,
+        )
+        if research_candidates:
+            summary["approved_research_candidates"] = [research_candidates[0].strategy_package_id]
+            summary["recommended_mode_floor"] = "degraded"
+        return summary
+
+    monkeypatch.setattr(governor_app.GovernorService, "build_committee_summary", _guardrailed_committee_summary)
+
     runtime = governor_app.build_governor_runtime()
     runtime.runtime_store.set_symbol_runtime_summary(
         "BTC-USDT-SWAP",
@@ -770,30 +774,11 @@ def test_governor_cycle_publishes_approved_research_with_durable_approval_record
 
     package_id = history_store.written_rows["strategy_packages"][0]["strategy_package_id"]
     backtest_report_id = history_store.written_rows["backtest_reports"][0]["backtest_report_id"]
-    runtime.history_store.append_approval_record(
-        {
-            "approval_record_id": "apr-1",
-            "strategy_package_id": package_id,
-            "backtest_report_id": backtest_report_id,
-            "decision": ApprovalDecision.APPROVED_WITH_GUARDRAILS.value,
-            "decision_reason": "restrict to btc in degraded mode",
-            "guardrails": {
-                "market_mode": "degraded",
-                "risk_multiplier": 0.2,
-                "symbol_whitelist": ["BTC-USDT-SWAP"],
-            },
-            "reviewed_by": "committee",
-            "review_source": "manual",
-            "created_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
-        }
-    )
-
-    asyncio.run(governor_app._run_governor_cycle(runtime))
-
+    approval_record_id = history_store.written_rows["approval_records"][0]["approval_record_id"]
     assert runtime.last_snapshot.source_reason == "approved research package"
     assert runtime.last_snapshot.market_mode == RunMode.DEGRADED
-    assert runtime.last_snapshot.risk_multiplier == 0.2
-    assert runtime.last_snapshot.symbol_whitelist == ["BTC-USDT-SWAP"]
+    assert len(runtime.history_store.written_rows["approval_records"]) == 1
+    assert history_store.written_rows["approval_records"][0]["decision"] == "approved_with_guardrails"
     assert len(history_store.written_rows["strategy_packages"]) == 1
     assert len(history_store.written_rows["backtest_reports"]) == 1
     assert len(runtime.published_snapshots) == 1
@@ -804,19 +789,15 @@ def test_governor_cycle_publishes_approved_research_with_durable_approval_record
             "approval_state": "approved",
             "strategy_package_id": package_id,
             "backtest_report_id": backtest_report_id,
-            "approval_record_id": "apr-1",
+            "approval_record_id": approval_record_id,
             "approval_decision": "approved_with_guardrails",
-            "guardrails": {
-                "market_mode": "degraded",
-                "risk_multiplier": 0.2,
-                "symbol_whitelist": ["BTC-USDT-SWAP"],
-            },
+            "guardrails": {"market_mode": "degraded"},
         }
     ]
     assert runtime.runtime_store.get_latest_approved_package_summary() == {
         "latest_strategy_package_id": package_id,
         "backtest_report_id": backtest_report_id,
-        "approval_record_id": "apr-1",
+        "approval_record_id": approval_record_id,
         "approved_at": history_store.written_rows["approval_records"][0]["created_at"],
         "approval_decision": "approved_with_guardrails",
     }
@@ -835,11 +816,11 @@ def test_governor_cycle_publishes_approved_research_with_durable_approval_record
         "approval_status": "approved_with_guardrails",
         "approval_error": None,
         "backtest_report_id": backtest_report_id,
-        "approval_record_id": "apr-1",
+        "approval_record_id": approval_record_id,
     }
 
 
-def test_governor_cycle_reports_invalid_approval_record_instead_of_pending(monkeypatch) -> None:
+def test_governor_cycle_validation_failure_blocks_publication_explicitly(monkeypatch) -> None:
     _set_required_settings_env(monkeypatch)
     _clear_unrelated_settings_env(monkeypatch)
     history_store = PostgresRuntimeStore(dsn="postgresql://xuanshu:xuanshu@localhost:5432/xuanshu")
@@ -849,7 +830,7 @@ def test_governor_cycle_reports_invalid_approval_record_instead_of_pending(monke
         async def run(self, state_summary):
             now = datetime.now(UTC)
             return {
-                "version_id": "snap-invalid-approval",
+                "version_id": "snap-validation-failed",
                 "generated_at": now.isoformat().replace("+00:00", "Z"),
                 "effective_from": now.isoformat().replace("+00:00", "Z"),
                 "expires_at": (now + timedelta(minutes=5)).isoformat().replace("+00:00", "Z"),
@@ -864,6 +845,13 @@ def test_governor_cycle_reports_invalid_approval_record_instead_of_pending(monke
                 "ttl_sec": 300,
             }
 
+    monkeypatch.setattr(governor_app, "build_governor_client", lambda settings: GovernorClient(_Runner()))
+    monkeypatch.setattr(governor_app, "build_history_store", lambda settings: history_store)
+    monkeypatch.setattr(
+        governor_app,
+        "build_runtime_state_store",
+        lambda settings: governor_app.RedisRuntimeStateStore(redis_client=fake_redis),
+    )
     class _Provider:
         provider_name = ResearchProviderName.API
 
@@ -880,13 +868,6 @@ def test_governor_cycle_reports_invalid_approval_record_instead_of_pending(monke
                 invalidating_conditions=[],
             )
 
-    monkeypatch.setattr(governor_app, "build_governor_client", lambda settings: GovernorClient(_Runner()))
-    monkeypatch.setattr(governor_app, "build_history_store", lambda settings: history_store)
-    monkeypatch.setattr(
-        governor_app,
-        "build_runtime_state_store",
-        lambda settings: governor_app.RedisRuntimeStateStore(redis_client=fake_redis),
-    )
     monkeypatch.setattr(
         governor_app,
         "build_research_engine",
@@ -912,37 +893,25 @@ def test_governor_cycle_reports_invalid_approval_record_instead_of_pending(monke
 
     package_id = history_store.written_rows["strategy_packages"][0]["strategy_package_id"]
     backtest_report_id = history_store.written_rows["backtest_reports"][0]["backtest_report_id"]
-    runtime.history_store.append_approval_record(
-        {
-            "approval_record_id": "apr-invalid",
-            "strategy_package_id": package_id,
-            "backtest_report_id": backtest_report_id,
-            "decision": ApprovalDecision.APPROVED.value,
-        }
+    initial_published_snapshots = list(runtime.published_snapshots)
+    initial_strategy_snapshots = list(history_store.written_rows["strategy_snapshots"])
+    monkeypatch.setattr(
+        runtime.backtest_validator,
+        "validate",
+        lambda **_kwargs: (_ for _ in ()).throw(RuntimeError("backtest exploded")),
     )
 
     asyncio.run(governor_app._run_governor_cycle(runtime))
 
-    assert runtime.published_snapshots == []
-    assert len(history_store.written_rows["strategy_packages"]) == 1
-    assert len(history_store.written_rows["backtest_reports"]) == 1
-    assert history_store.written_rows["governor_runs"][-1]["status"] == "approval_invalid"
-    assert history_store.written_rows["governor_runs"][-1]["approval_status"] == "invalid"
-    assert "invalid approval record" in history_store.written_rows["governor_runs"][-1]["error"]
+    assert runtime.published_snapshots == initial_published_snapshots
+    assert history_store.written_rows["governor_runs"][-1]["status"] == "validation_failed"
+    assert history_store.written_rows["governor_runs"][-1]["approval_status"] == "validation_failed"
+    assert history_store.written_rows["governor_runs"][-1]["approval_error"] is None
+    assert history_store.written_rows["governor_runs"][-1]["validation_error"] == "backtest exploded"
+    assert history_store.written_rows["strategy_snapshots"] == initial_strategy_snapshots
 
 
-@pytest.mark.parametrize(
-    ("decision", "expected_status"),
-    [
-        (ApprovalDecision.REJECTED, "approval_rejected"),
-        (ApprovalDecision.NEEDS_REVISION, "approval_needs_revision"),
-    ],
-)
-def test_governor_cycle_blocks_non_publishable_approval_decisions(
-    monkeypatch,
-    decision: ApprovalDecision,
-    expected_status: str,
-) -> None:
+def test_governor_cycle_auto_rejects_non_publishable_research(monkeypatch) -> None:
     _set_required_settings_env(monkeypatch)
     _clear_unrelated_settings_env(monkeypatch)
     history_store = PostgresRuntimeStore(dsn="postgresql://xuanshu:xuanshu@localhost:5432/xuanshu")
@@ -1015,25 +984,27 @@ def test_governor_cycle_blocks_non_publishable_approval_decisions(
 
     package_id = history_store.written_rows["strategy_packages"][0]["strategy_package_id"]
     backtest_report_id = history_store.written_rows["backtest_reports"][0]["backtest_report_id"]
-    runtime.history_store.append_approval_record(
-        {
-            "approval_record_id": f"apr-{decision.value}",
-            "strategy_package_id": package_id,
-            "backtest_report_id": backtest_report_id,
-            "decision": decision.value,
-            "decision_reason": f"{decision.value} by committee",
-            "guardrails": {},
-            "reviewed_by": "committee",
-            "review_source": "manual",
-            "created_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
-        }
-    )
+    initial_published_snapshots = list(runtime.published_snapshots)
+    original_build_committee_summary = governor_app.GovernorService.build_committee_summary
+
+    def _blocked_committee_summary(self, expert_opinions, *, research_candidates=None):
+        summary = original_build_committee_summary(
+            self,
+            expert_opinions,
+            research_candidates=research_candidates,
+        )
+        if research_candidates:
+            summary["approved_research_candidates"] = []
+        return summary
+
+    monkeypatch.setattr(governor_app.GovernorService, "build_committee_summary", _blocked_committee_summary)
 
     asyncio.run(governor_app._run_governor_cycle(runtime))
 
-    assert runtime.published_snapshots == []
-    assert history_store.written_rows["governor_runs"][-1]["status"] == expected_status
-    assert history_store.written_rows["governor_runs"][-1]["approval_status"] == decision.value
+    assert runtime.published_snapshots == initial_published_snapshots
+    assert history_store.written_rows["governor_runs"][-1]["status"] == "approval_rejected"
+    assert history_store.written_rows["governor_runs"][-1]["approval_status"] == "rejected"
+    assert history_store.written_rows["approval_records"][-1]["decision"] == "rejected"
 
 
 def test_governor_cycle_records_validation_failed_status(monkeypatch) -> None:

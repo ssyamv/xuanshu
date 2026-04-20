@@ -253,18 +253,6 @@ def build_governor_runtime() -> GovernorRuntime:
     )
 
 
-def _load_latest_approval_record(
-    history_store: PostgresRuntimeStore,
-    *,
-    strategy_package_id: str,
-    backtest_report_id: str,
-) -> dict[str, object] | None:
-    return history_store.find_approval_record(
-        strategy_package_id=strategy_package_id,
-        backtest_report_id=backtest_report_id,
-    )
-
-
 async def _wait_forever() -> None:
     await asyncio.Event().wait()
 
@@ -342,7 +330,6 @@ async def _run_governor_cycle(runtime: GovernorRuntime) -> None:
             **state_summary,
             "committee_summary": committee_summary,
         }
-        state_summary["approval_required"] = True
 
         candidate = research_candidates[0]
         if not runtime.history_store.has_strategy_package(
@@ -374,63 +361,46 @@ async def _run_governor_cycle(runtime: GovernorRuntime) -> None:
                 backtest_report_id=backtest_report.backtest_report_id,
             ):
                 runtime.history_store.append_backtest_report(backtest_report.model_dump(mode="json"))
-            approval_payload = _load_latest_approval_record(
-                runtime.history_store,
+            approval_record = runtime.service.build_auto_approval_record(
+                state_summary=state_summary,
+                strategy_package_id=candidate.strategy_package_id,
+                backtest_report_id=backtest_report.backtest_report_id,
+                created_at=datetime.now(UTC),
+            )
+            approval_status = approval_record.decision.value
+            approval_record_id = approval_record.approval_record_id
+            existing_approval_record = runtime.history_store.find_approval_record(
                 strategy_package_id=candidate.strategy_package_id,
                 backtest_report_id=backtest_report.backtest_report_id,
             )
-            if approval_payload is None:
-                approval_status = "pending"
-                runtime.runtime_store.set_pending_approval_summary(
+            if existing_approval_record is None or existing_approval_record.get("approval_record_id") != approval_record.approval_record_id:
+                runtime.history_store.append_approval_record(approval_record.model_dump(mode="json"))
+            state_summary["approval_required"] = True
+            state_summary["approval_record"] = approval_record.model_dump(mode="json")
+            runtime.runtime_store.set_pending_approval_summary(
+                {
+                    "pending_count": 0,
+                    "latest_strategy_package_id": candidate.strategy_package_id,
+                    "latest_backtest_report_id": backtest_report.backtest_report_id,
+                    "approval_status": approval_status,
+                }
+            )
+            if approval_record.decision in {
+                ApprovalDecision.APPROVED,
+                ApprovalDecision.APPROVED_WITH_GUARDRAILS,
+            }:
+                approved_research_candidates = [candidate]
+                state_summary["research_candidates"] = [candidate.model_dump(mode="json")]
+                state_summary["approved_source_reason"] = _APPROVED_RESEARCH_SOURCE_REASON
+                runtime.runtime_store.set_latest_approved_package_summary(
                     {
-                        "pending_count": 1,
                         "latest_strategy_package_id": candidate.strategy_package_id,
-                        "latest_backtest_report_id": backtest_report.backtest_report_id,
-                        "approval_status": approval_status,
+                        "backtest_report_id": backtest_report.backtest_report_id,
+                        "approval_record_id": approval_record.approval_record_id,
+                        "approved_at": approval_record.created_at.isoformat().replace("+00:00", "Z"),
+                        "approval_decision": approval_record.decision.value,
                     }
                 )
-            else:
-                state_summary["approval_record"] = approval_payload
-                try:
-                    approval_record = ApprovalRecord.model_validate(approval_payload)
-                except Exception as exc:
-                    approval_status = "invalid"
-                    approval_error = f"invalid approval record: {exc}"
-                    runtime.runtime_store.set_pending_approval_summary(
-                        {
-                            "backtest_report_id": backtest_report.backtest_report_id,
-                            "latest_strategy_package_id": candidate.strategy_package_id,
-                            "latest_backtest_report_id": backtest_report.backtest_report_id,
-                            "approval_status": approval_status,
-                        }
-                    )
-                else:
-                    approval_status = approval_record.decision.value
-                    approval_record_id = approval_record.approval_record_id
-                    runtime.runtime_store.set_pending_approval_summary(
-                        {
-                            "pending_count": 0,
-                            "latest_strategy_package_id": candidate.strategy_package_id,
-                            "latest_backtest_report_id": backtest_report.backtest_report_id,
-                            "approval_status": approval_status,
-                        }
-                    )
-                    if approval_record.decision in {
-                        ApprovalDecision.APPROVED,
-                        ApprovalDecision.APPROVED_WITH_GUARDRAILS,
-                    }:
-                        approved_research_candidates = [candidate]
-                        state_summary["research_candidates"] = [candidate.model_dump(mode="json")]
-                        state_summary["approved_source_reason"] = _APPROVED_RESEARCH_SOURCE_REASON
-                        runtime.runtime_store.set_latest_approved_package_summary(
-                            {
-                                "latest_strategy_package_id": candidate.strategy_package_id,
-                                "backtest_report_id": backtest_report.backtest_report_id,
-                                "approval_record_id": approval_record.approval_record_id,
-                                "approved_at": approval_record.created_at.isoformat().replace("+00:00", "Z"),
-                                "approval_decision": approval_record.decision.value,
-                            }
-                        )
 
         state_summary["validation_status"] = validation_status
         state_summary["validation_error"] = validation_error
