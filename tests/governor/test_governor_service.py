@@ -52,12 +52,43 @@ class _BrokenGovernorRunner:
         return {"version_id": state_summary["version_id"]}
 
 
+class _OutOfRangeGovernorRunner:
+    async def run(self, state_summary: dict[str, object]) -> dict[str, object]:
+        return {
+            "version_id": "snap-bounded",
+            "generated_at": "2026-04-20T00:00:00Z",
+            "effective_from": "2026-04-20T00:00:00Z",
+            "expires_at": "2026-04-20T00:05:00Z",
+            "symbol_whitelist": ["BTC-USDT-SWAP"],
+            "strategy_enable_flags": {"default": True},
+            "risk_multiplier": 9,
+            "per_symbol_max_position": 5,
+            "max_leverage": 9,
+            "market_mode": "normal",
+            "approval_state": "approved",
+            "source_reason": "governor_ai",
+            "ttl_sec": 0,
+        }
+
+
 @pytest.mark.asyncio
 async def test_governor_client_validates_agent_output() -> None:
     client = GovernorClient(agent_runner=_BrokenGovernorRunner())
 
     with pytest.raises(ValidationError):
         await client.generate_snapshot({"version_id": "snap-invalid"})
+
+
+@pytest.mark.asyncio
+async def test_governor_client_clamps_out_of_range_numeric_fields() -> None:
+    client = GovernorClient(agent_runner=_OutOfRangeGovernorRunner())
+
+    snapshot = await client.generate_snapshot({"version_id": "snap-invalid"})
+
+    assert snapshot.risk_multiplier == 1.0
+    assert snapshot.per_symbol_max_position == 1.0
+    assert snapshot.max_leverage == 3
+    assert snapshot.ttl_sec == 1
 
 
 @pytest.mark.asyncio
@@ -499,6 +530,49 @@ def test_governor_applies_manual_release_override_to_halted_candidate() -> None:
     assert governed.risk_multiplier == 0.25
     assert governed.per_symbol_max_position == 0.12
     assert governed.symbol_whitelist == ["SYSTEM", "BTC-USDT-SWAP"]
+    assert governed.strategy_enable_flags == {
+        "breakout": True,
+        "mean_reversion": False,
+        "risk_pause": True,
+        "default": False,
+    }
+
+
+def test_governor_restores_baseline_strategy_flags_when_candidate_flags_are_incomplete() -> None:
+    service = GovernorService()
+    candidate = StrategyConfigSnapshot(
+        version_id="snap-candidate",
+        generated_at=datetime.now(UTC),
+        effective_from=datetime.now(UTC),
+        expires_at=datetime.now(UTC) + timedelta(minutes=5),
+        symbol_whitelist=["BTC-USDT-SWAP"],
+        strategy_enable_flags={"default": False},
+        risk_multiplier=0.5,
+        per_symbol_max_position=0.12,
+        max_leverage=2,
+        market_mode=RunMode.NORMAL,
+        approval_state=ApprovalState.APPROVED,
+        source_reason="governor_ai",
+        ttl_sec=300,
+    )
+
+    governed = service.apply_guardrails(
+        candidate,
+        {
+            "current_run_mode": "normal",
+            "active_fault_flags": [],
+            "recent_risk_events": [],
+            "symbol_summaries": [{"symbol": "BTC-USDT-SWAP"}],
+        },
+    )
+
+    assert governed.market_mode == RunMode.NORMAL
+    assert governed.strategy_enable_flags == {
+        "breakout": True,
+        "mean_reversion": False,
+        "risk_pause": True,
+        "default": False,
+    }
 
 
 def test_governor_committee_summary_includes_research_candidates() -> None:
@@ -752,6 +826,93 @@ def test_governor_requests_event_trigger_for_risk_events_and_expiring_snapshot()
     )
 
     assert trigger == "risk_event"
+
+
+def test_governor_ignores_non_blocking_risk_events_when_selecting_trigger_reason() -> None:
+    service = GovernorService()
+    snapshot = StrategyConfigSnapshot(
+        version_id="snap-steady",
+        generated_at=datetime.now(UTC),
+        effective_from=datetime.now(UTC),
+        expires_at=datetime.now(UTC) + timedelta(minutes=5),
+        symbol_whitelist=["BTC-USDT-SWAP"],
+        strategy_enable_flags={"breakout": True, "mean_reversion": False, "risk_pause": True},
+        risk_multiplier=0.5,
+        per_symbol_max_position=0.12,
+        max_leverage=3,
+        market_mode=RunMode.NORMAL,
+        approval_state=ApprovalState.APPROVED,
+        source_reason="cached",
+        ttl_sec=300,
+    )
+
+    trigger = service.determine_trigger_reason(
+        {
+            "current_run_mode": "normal",
+            "recent_risk_events": [
+                {"event_type": "signal_blocked"},
+                {"event_type": "account_snapshot_updated"},
+                {"event_type": "manual_release_requested"},
+            ],
+        },
+        latest_snapshot=snapshot,
+        now=datetime.now(UTC),
+    )
+
+    assert trigger == "schedule"
+
+
+def test_governor_guardrails_allow_recovery_from_degraded_without_faults_or_blocking_events() -> None:
+    service = GovernorService()
+    candidate = StrategyConfigSnapshot(
+        version_id="snap-normalized",
+        generated_at=datetime.now(UTC),
+        effective_from=datetime.now(UTC),
+        expires_at=datetime.now(UTC) + timedelta(minutes=5),
+        symbol_whitelist=["BTC-USDT-SWAP"],
+        strategy_enable_flags={"breakout": True, "mean_reversion": True, "risk_pause": True},
+        risk_multiplier=0.5,
+        per_symbol_max_position=0.12,
+        max_leverage=3,
+        market_mode=RunMode.NORMAL,
+        approval_state=ApprovalState.APPROVED,
+        source_reason="candidate",
+        ttl_sec=300,
+    )
+
+    governed = service.apply_guardrails(
+        candidate,
+        {
+            "current_run_mode": "degraded",
+            "active_fault_flags": [],
+            "recent_risk_events": [{"event_type": "signal_blocked", "detail": "strategy_disabled"}],
+            "symbol_summaries": [{"symbol": "BTC-USDT-SWAP"}],
+        },
+    )
+
+    assert governed.market_mode == RunMode.NORMAL
+    assert governed.risk_multiplier == 0.5
+    assert governed.approval_state == ApprovalState.APPROVED
+
+
+def test_governor_expert_opinions_do_not_keep_tightening_risk_for_stale_degraded_mode() -> None:
+    service = GovernorService()
+
+    opinions = service.build_expert_opinions(
+        {
+            "current_run_mode": "degraded",
+            "latest_snapshot_version": "snap-normalized",
+            "active_fault_flags": [],
+            "recent_risk_events": [{"event_type": "signal_blocked", "detail": "strategy_disabled"}],
+            "symbol_summaries": [{"symbol": "BTC-USDT-SWAP"}],
+        },
+        now=datetime.now(UTC),
+    )
+
+    risk_opinion = next(opinion for opinion in opinions if opinion.expert_type == "risk")
+
+    assert risk_opinion.decision == "maintain_risk"
+    assert "current_run_mode=normal" in risk_opinion.supporting_facts
 
 
 def test_governor_builds_health_summary_from_trigger_and_snapshot() -> None:

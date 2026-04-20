@@ -274,6 +274,67 @@ def test_notifier_runtime_ignores_fetch_update_read_timeout(monkeypatch) -> None
     assert runtime.next_update_offset is None
 
 
+def test_notifier_runtime_ignores_fetch_update_http_status_errors(monkeypatch) -> None:
+    _set_required_settings_env(monkeypatch)
+    _clear_unrelated_settings_env(monkeypatch)
+    fake_redis = _FakeRedis()
+    logged: list[tuple[str, dict[str, object]]] = []
+
+    class _Logger:
+        def warning(self, event: str, *, extra: dict[str, object]) -> None:
+            logged.append((event, extra))
+
+    class _Adapter:
+        def __init__(self) -> None:
+            self.sent: list[str] = []
+
+        async def send_text(self, payload: TextMessagePayload):
+            self.sent.append(payload.text)
+
+        async def fetch_updates(self, offset: int | None = None, limit: int = 20, timeout_sec: int = 30):
+            request = httpx.Request("GET", "https://api.telegram.org/botdummy/getUpdates")
+            response = httpx.Response(404, request=request)
+            raise httpx.HTTPStatusError("telegram auth failed", request=request, response=response)
+
+    adapter = _Adapter()
+    monkeypatch.setattr(notifier_app, "_LOGGER", _Logger())
+    monkeypatch.setattr(notifier_app, "build_notifier_adapter", lambda settings: adapter)
+    monkeypatch.setattr(
+        notifier_app,
+        "build_snapshot_store",
+        lambda settings: RedisSnapshotStore(redis_client=fake_redis),
+    )
+    monkeypatch.setattr(
+        notifier_app,
+        "build_runtime_state_store",
+        lambda settings: RedisRuntimeStateStore(redis_client=fake_redis),
+    )
+    monkeypatch.setattr(
+        notifier_app,
+        "build_history_store",
+        lambda settings: PostgresRuntimeStore(
+            dsn="postgresql://xuanshu:xuanshu@localhost:5432/xuanshu"
+        ),
+    )
+
+    runtime = notifier_app.build_notifier_runtime()
+
+    asyncio.run(notifier_app._poll_notifier_once(runtime))
+
+    assert adapter.sent == []
+    assert runtime.next_update_offset is None
+    assert logged == [
+        (
+            "poll_updates_failed",
+            {
+                "service": "notifier",
+                "error": "telegram auth failed",
+                "status_code": 404,
+            },
+        )
+    ]
+
+
 def test_notifier_command_loop_flushes_retry_queue(monkeypatch) -> None:
     _set_required_settings_env(monkeypatch)
     _clear_unrelated_settings_env(monkeypatch)

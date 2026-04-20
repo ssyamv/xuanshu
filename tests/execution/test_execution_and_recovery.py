@@ -45,7 +45,7 @@ def test_execution_ids_and_recovery_guard_are_deterministic() -> None:
         needs_reconcile=False,
     )
 
-    assert build_client_order_id("BTC-USDT-SWAP", "breakout", 7) == "BTC-USDT-SWAP-breakout-000007"
+    assert build_client_order_id("BTC-USDT-SWAP", "breakout", 7) == "BTCUSDTSWAPbreakout000007"
     assert CheckpointService().can_open_new_risk(checkpoint) is False
     assert CheckpointService().can_open_new_risk(healthy_checkpoint) is True
 

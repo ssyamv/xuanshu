@@ -281,11 +281,20 @@ def _publish_runtime_state(runtime: TraderRuntime, *, symbol: str | None = None)
 
 def _tighten_runtime_mode(runtime: TraderRuntime, target_mode: RunMode) -> None:
     tightened = _more_restrictive_mode(runtime.current_mode, target_mode)
+    previous_mode = runtime.current_mode
     runtime.current_mode = tightened
     runtime.components.state_engine.set_run_mode(tightened)
-    runtime.startup_snapshot = runtime.startup_snapshot.model_copy(update={"market_mode": tightened})
     runtime.startup_checkpoint.current_mode = tightened
     runtime.opening_allowed = tightened not in {RunMode.REDUCE_ONLY, RunMode.HALTED}
+    if tightened != previous_mode:
+        _LOGGER.info(
+            "runtime_mode_changed",
+            extra={
+                "service": "trader",
+                "previous_mode": previous_mode.value,
+                "current_mode": tightened.value,
+            },
+        )
 
 
 def _fault_mode(event: FaultEvent) -> RunMode:
@@ -307,7 +316,7 @@ def _next_client_order_id(runtime: TraderRuntime, signal: CandidateSignal) -> st
 
 def _can_relax_to_snapshot_mode(runtime: TraderRuntime, snapshot: StrategyConfigSnapshot) -> bool:
     return (
-        runtime.current_mode == RunMode.HALTED
+        _RUN_MODE_PRIORITY[runtime.current_mode] > _RUN_MODE_PRIORITY[snapshot.market_mode]
         and snapshot.approval_state == ApprovalState.APPROVED
         and snapshot.market_mode != RunMode.HALTED
         and runtime.components.checkpoint_service.can_open_new_risk(runtime.startup_checkpoint)
@@ -324,6 +333,8 @@ async def _evaluate_symbol(runtime: TraderRuntime, symbol: str) -> None:
             runtime.components.state_engine.set_run_mode(runtime.current_mode)
             runtime.opening_allowed = True
             _publish_runtime_state(runtime)
+    if runtime.startup_snapshot.version_id == "bootstrap":
+        return
     snapshot = runtime.components.state_engine.snapshot(symbol)
     signals = build_candidate_signals(snapshot)
     open_orders = runtime.components.state_engine.open_orders_by_symbol.get(symbol, {})
@@ -335,14 +346,24 @@ async def _evaluate_symbol(runtime: TraderRuntime, symbol: str) -> None:
             continue
         if has_exposure:
             continue
-        response = await runtime.execution_coordinator.submit_market_open(
-            symbol=signal.symbol,
-            side=signal.side.value,
-            size=max(1.0, decision.max_order_size),
-            client_order_id=_next_client_order_id(runtime, signal),
-            decision=decision,
-            timestamp=_now_timestamp(),
-        )
+        try:
+            response = await runtime.execution_coordinator.submit_market_open(
+                symbol=signal.symbol,
+                side=signal.side.value,
+                size=max(1.0, decision.max_order_size),
+                client_order_id=_next_client_order_id(runtime, signal),
+                decision=decision,
+                timestamp=_now_timestamp(),
+            )
+        except Exception as exc:
+            runtime.history_store.append_risk_event(
+                {
+                    "event_type": "execution_submission_failed",
+                    "symbol": signal.symbol,
+                    "detail": str(exc),
+                }
+            )
+            continue
         if response is None:
             runtime.history_store.append_risk_event(
                 {
@@ -362,6 +383,23 @@ async def _evaluate_symbol(runtime: TraderRuntime, symbol: str) -> None:
                     "order_id": str(row.get("ordId") or ""),
                 }
             )
+        runtime.components.state_engine.stage_order_submission(
+            signal.symbol,
+            client_order_id=str(response[0].get("clOrdId") or ""),
+            side=signal.side.value,
+            size=max(1.0, decision.max_order_size),
+        )
+        _LOGGER.info(
+            "order_submitted",
+            extra={
+                "service": "trader",
+                "symbol": signal.symbol,
+                "strategy_id": signal.strategy_id.value,
+                "side": signal.side.value,
+                "client_order_id": response[0].get("clOrdId") or "",
+                "run_mode": runtime.current_mode.value,
+            },
+        )
         has_exposure = True
 
 
@@ -476,10 +514,16 @@ async def _run_trader(runtime: TraderRuntime) -> None:
                         "detail": str(result.get("reason") or "exchange_state_mismatch"),
                     }
                 )
+            else:
+                runtime.startup_checkpoint.needs_reconcile = False
     runtime.opening_allowed = runtime.opening_allowed and runtime.components.checkpoint_service.can_open_new_risk(
         runtime.startup_checkpoint
     )
-    runtime.current_mode = _more_restrictive_mode(runtime.current_mode, runtime.startup_snapshot.market_mode)
+    if _can_relax_to_snapshot_mode(runtime, runtime.startup_snapshot):
+        runtime.current_mode = runtime.startup_snapshot.market_mode
+        runtime.opening_allowed = True
+    else:
+        runtime.current_mode = _more_restrictive_mode(runtime.current_mode, runtime.startup_snapshot.market_mode)
     if not runtime.opening_allowed:
         runtime.current_mode = _more_restrictive_mode(runtime.current_mode, RunMode.REDUCE_ONLY)
     if _can_relax_to_snapshot_mode(runtime, runtime.startup_snapshot):

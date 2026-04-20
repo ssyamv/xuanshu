@@ -76,6 +76,14 @@ def test_build_market_order_payload_rejects_non_string_side() -> None:
         build_market_order_payload("BTC-USDT-SWAP", ["buy"], 1.0, "btc-breakout-000001")
 
 
+def test_build_market_order_payload_sets_pos_side_for_long_short_mode() -> None:
+    buy_payload = build_market_order_payload("BTC-USDT-SWAP", "buy", 1.0, "btc-breakout-000001")
+    sell_payload = build_market_order_payload("BTC-USDT-SWAP", "sell", 1.0, "btc-breakout-000002")
+
+    assert buy_payload["posSide"] == "long"
+    assert sell_payload["posSide"] == "short"
+
+
 class _BlockingRestClient:
     def __init__(self) -> None:
         self.calls: list[tuple[dict[str, str], str]] = []

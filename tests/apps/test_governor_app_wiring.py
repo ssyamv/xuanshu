@@ -665,6 +665,60 @@ def test_governor_runtime_publishes_health_summary_and_trigger_reason(monkeypatc
     }
 
 
+def test_governor_runtime_logs_cycle_completion(monkeypatch) -> None:
+    _set_required_settings_env(monkeypatch)
+    _clear_unrelated_settings_env(monkeypatch)
+    logged: list[tuple[str, dict[str, object]]] = []
+
+    class _Logger:
+        def info(self, event: str, *, extra: dict[str, object]) -> None:
+            logged.append((event, extra))
+
+    class _Runner:
+        async def run(self, state_summary):
+            now = datetime.now(UTC)
+            return {
+                "version_id": "snap-log",
+                "generated_at": now.isoformat().replace("+00:00", "Z"),
+                "effective_from": now.isoformat().replace("+00:00", "Z"),
+                "expires_at": (now + timedelta(minutes=5)).isoformat().replace("+00:00", "Z"),
+                "symbol_whitelist": ["BTC-USDT-SWAP"],
+                "strategy_enable_flags": {"breakout": True, "mean_reversion": False, "risk_pause": True},
+                "risk_multiplier": 0.5,
+                "per_symbol_max_position": 0.12,
+                "max_leverage": 3,
+                "market_mode": RunMode.NORMAL,
+                "approval_state": ApprovalState.APPROVED,
+                "source_reason": "cycle",
+                "ttl_sec": 300,
+            }
+
+    monkeypatch.setattr(governor_app, "_LOGGER", _Logger())
+    monkeypatch.setattr(governor_app, "build_governor_client", lambda settings: GovernorClient(_Runner()))
+
+    runtime = governor_app.build_governor_runtime()
+
+    asyncio.run(governor_app._run_governor_cycle(runtime))
+
+    assert logged == [
+        (
+            "cycle_completed",
+            {
+                "service": "governor",
+                "trigger_reason": "schedule",
+                "status": "published",
+                "error": None,
+                "snapshot_version": "snap-log",
+                "market_mode": "normal",
+                "research_status": "skipped",
+                "research_candidate_count": 0,
+                "approved_research_candidate_count": 0,
+                "consecutive_failures": 0,
+            },
+        )
+    ]
+
+
 def test_governor_loop_runs_multiple_cycles_on_schedule(monkeypatch) -> None:
     _set_required_settings_env(monkeypatch)
     monkeypatch.setenv("XUANSHU_GOVERNOR_INTERVAL_SEC", "5")

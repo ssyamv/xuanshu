@@ -6,6 +6,7 @@ import re
 
 _SYMBOL_PATTERN = re.compile(r"^[A-Z0-9][A-Z0-9._-]*$")
 _STRATEGY_PATTERN = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
+_CLIENT_ORDER_COMPONENT_SANITIZER = re.compile(r"[^A-Za-z0-9]+")
 
 
 def _validate_component(label: str, value: str, pattern: re.Pattern[str]) -> str:
@@ -23,7 +24,9 @@ def build_client_order_id(symbol: str, strategy_id: str, sequence: int) -> str:
     _validate_component("strategy_id", strategy_id, _STRATEGY_PATTERN)
     if type(sequence) is not int or sequence < 0 or sequence > 999_999:
         raise ValueError(f"invalid sequence: {sequence!r}")
-    return f"{symbol}-{strategy_id}-{sequence:06d}"
+    normalized_symbol = _CLIENT_ORDER_COMPONENT_SANITIZER.sub("", symbol)
+    normalized_strategy = _CLIENT_ORDER_COMPONENT_SANITIZER.sub("", strategy_id)
+    return f"{normalized_symbol}{normalized_strategy}{sequence:06d}"
 
 
 def build_market_order_payload(symbol: str, side: str, size: float, client_order_id: str) -> dict[str, str]:
@@ -41,6 +44,7 @@ def build_market_order_payload(symbol: str, side: str, size: float, client_order
         "instId": symbol,
         "tdMode": "cross",
         "side": side,
+        "posSide": "long" if side == "buy" else "short",
         "ordType": "market",
         "sz": f"{size:g}",
         "clOrdId": client_order_id,

@@ -198,16 +198,25 @@ class OkxPrivateStream:
         )
 
     def _decode_position(self, item: dict[str, Any], sequence: str) -> PositionUpdateEvent:
+        net_quantity = self._required_float(item["pos"], field="pos")
+        if net_quantity == 0.0:
+            average_price = self._optional_float(item.get("avgPx"), default=0.0)
+            mark_price = self._optional_float(item.get("markPx"), default=0.0)
+            unrealized_pnl = self._optional_float(item.get("upl"), default=0.0)
+        else:
+            average_price = self._required_float(item["avgPx"], field="avgPx")
+            mark_price = self._required_float(item["markPx"], field="markPx")
+            unrealized_pnl = self._required_float(item["upl"], field="upl")
         return PositionUpdateEvent(
             event_type=TraderEventType.POSITION_UPDATE,
             symbol=self._required_str(item["instId"], field="instId"),
             exchange="okx",
             generated_at=self._parse_timestamp(item["uTime"]),
             private_sequence=sequence,
-            net_quantity=self._required_float(item["pos"], field="pos"),
-            average_price=self._required_float(item["avgPx"], field="avgPx"),
-            mark_price=self._required_float(item["markPx"], field="markPx"),
-            unrealized_pnl=self._required_float(item["upl"], field="upl"),
+            net_quantity=net_quantity,
+            average_price=average_price,
+            mark_price=mark_price,
+            unrealized_pnl=unrealized_pnl,
         )
 
     def _decode_account(self, item: dict[str, Any], sequence: str) -> AccountSnapshotEvent:

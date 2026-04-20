@@ -122,6 +122,7 @@ class GovernorClient:
                 backfilled_symbols = _extract_symbol_scope(state_summary)
                 if backfilled_symbols:
                     result = {**result, "symbol_whitelist": backfilled_symbols}
+            result = _normalize_snapshot_bounds(result)
         return StrategyConfigSnapshot.model_validate(result)
 
 
@@ -184,3 +185,18 @@ def _extract_symbol_scope(state_summary: Mapping[str, object]) -> list[str]:
         if isinstance(symbol, str) and symbol and symbol not in symbols:
             symbols.append(symbol)
     return symbols
+
+
+def _normalize_snapshot_bounds(payload: dict[str, object]) -> dict[str, object]:
+    normalized = dict(payload)
+    for field_name in ("risk_multiplier", "per_symbol_max_position"):
+        value = normalized.get(field_name)
+        if isinstance(value, int | float) and not isinstance(value, bool):
+            normalized[field_name] = min(max(float(value), 0.0), 1.0)
+    value = normalized.get("max_leverage")
+    if isinstance(value, int | float) and not isinstance(value, bool):
+        normalized["max_leverage"] = max(1, min(int(value), 3))
+    value = normalized.get("ttl_sec")
+    if isinstance(value, int | float) and not isinstance(value, bool):
+        normalized["ttl_sec"] = max(1, int(value))
+    return normalized

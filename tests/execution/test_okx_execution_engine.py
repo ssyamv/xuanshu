@@ -376,8 +376,11 @@ def test_okx_private_stream_handles_optional_blank_fields_without_crashing() -> 
     assert order_events[0].price == 0.0
     assert order_events[0].filled_size == 0.0
     assert len(position_events) == 1
-    assert isinstance(position_events[0], FaultEvent)
-    assert position_events[0].code == "positions_decode_error"
+    assert isinstance(position_events[0], PositionUpdateEvent)
+    assert position_events[0].net_quantity == 0.0
+    assert position_events[0].average_price == 0.0
+    assert position_events[0].mark_price == 0.0
+    assert position_events[0].unrealized_pnl == 0.0
 
 
 def test_okx_private_stream_normalizes_blank_account_and_position_numerics_into_faults() -> None:
@@ -836,6 +839,7 @@ def test_okx_rest_client_place_order_posts_signed_body() -> None:
         "instId": "BTC-USDT-SWAP",
         "tdMode": "cross",
         "side": "buy",
+        "posSide": "long",
         "ordType": "market",
         "sz": "1",
         "clOrdId": "btc-breakout-000001",
@@ -926,6 +930,7 @@ def test_okx_rest_client_place_order_treats_non_zero_scode_as_failure() -> None:
         "instId": "BTC-USDT-SWAP",
         "tdMode": "cross",
         "side": "buy",
+        "posSide": "long",
         "ordType": "market",
         "sz": "1",
         "clOrdId": "btc-breakout-000001",
@@ -984,6 +989,7 @@ def test_okx_rest_client_place_order_rejects_malformed_payload_before_post() -> 
                     "instId": "BTC-USDT-SWAP",
                     "tdMode": "cross",
                     "side": "buy",
+                    "posSide": "long",
                     "ordType": "stop",
                     "sz": "1",
                     "clOrdId": "btc-breakout-000005",
@@ -1022,6 +1028,7 @@ def test_okx_rest_client_place_order_rejects_blank_required_payload_values() -> 
             "instId": "",
             "tdMode": "cross",
             "side": "buy",
+            "posSide": "long",
             "ordType": "market",
             "sz": "1",
             "clOrdId": "btc-breakout-000006",
@@ -1030,6 +1037,7 @@ def test_okx_rest_client_place_order_rejects_blank_required_payload_values() -> 
             "instId": "BTC-USDT-SWAP",
             "tdMode": "cross",
             "side": "buy",
+            "posSide": "long",
             "ordType": "market",
             "sz": "",
             "clOrdId": "btc-breakout-000007",
@@ -1038,6 +1046,7 @@ def test_okx_rest_client_place_order_rejects_blank_required_payload_values() -> 
             "instId": "BTC-USDT-SWAP",
             "tdMode": "cross",
             "side": "buy",
+            "posSide": "long",
             "ordType": "market",
             "sz": "1",
             "clOrdId": "",
@@ -1080,6 +1089,7 @@ def test_okx_rest_client_rejects_blank_limit_price() -> None:
                     "instId": "BTC-USDT-SWAP",
                     "tdMode": "cross",
                     "side": "buy",
+                    "posSide": "long",
                     "ordType": "limit",
                     "sz": "1",
                     "clOrdId": "btc-breakout-000008",
@@ -1122,6 +1132,7 @@ def test_okx_rest_client_place_order_rejects_unexpected_extra_payload_keys() -> 
                     "instId": "BTC-USDT-SWAP",
                     "tdMode": "cross",
                     "side": "buy",
+                    "posSide": "long",
                     "ordType": "market",
                     "sz": "1",
                     "clOrdId": "btc-breakout-000009",

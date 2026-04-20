@@ -10,7 +10,7 @@ import httpx
 
 _SUPPORTED_ORDER_TYPES = frozenset({"market", "limit"})
 _SUPPORTED_ORDER_SIDES = frozenset({"buy", "sell"})
-_PLACE_ORDER_REQUIRED_FIELDS = frozenset({"instId", "tdMode", "side", "ordType", "sz", "clOrdId"})
+_PLACE_ORDER_REQUIRED_FIELDS = frozenset({"instId", "tdMode", "side", "posSide", "ordType", "sz", "clOrdId"})
 _PLACE_ORDER_OPTIONAL_FIELDS = frozenset({"px"})
 _PLACE_ORDER_ALLOWED_FIELDS = _PLACE_ORDER_REQUIRED_FIELDS | _PLACE_ORDER_OPTIONAL_FIELDS
 
@@ -96,6 +96,7 @@ class OkxRestClient:
             "instId": symbol,
             "tdMode": "cross",
             "side": side,
+            "posSide": "long" if side == "buy" else "short",
             "ordType": order_type,
             "sz": size,
             "clOrdId": client_order_id,

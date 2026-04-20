@@ -24,8 +24,10 @@ from xuanshu.infra.storage.redis_store import (
     RuntimeStateStore,
     SnapshotStore,
 )
+from xuanshu.ops.runtime_logging import configure_runtime_logger
 
 _APPROVED_RESEARCH_SOURCE_REASON = "approved research package"
+_LOGGER = configure_runtime_logger("xuanshu.governor")
 
 
 @dataclass(slots=True)
@@ -341,6 +343,7 @@ async def _run_governor_cycle(runtime: GovernorRuntime) -> None:
         {
             "version_id": runtime.last_snapshot.version_id,
             "status": result.status,
+            "error": result.error,
             "research_provider": research_provider,
             "research_status": research_status,
             "research_provider_success": research_provider_success,
@@ -357,6 +360,21 @@ async def _run_governor_cycle(runtime: GovernorRuntime) -> None:
             status=result.status,
             consecutive_failures=runtime.consecutive_failures,
         )
+    )
+    _LOGGER.info(
+        "cycle_completed",
+        extra={
+            "service": "governor",
+            "trigger_reason": trigger_reason,
+            "status": result.status,
+            "error": result.error,
+            "snapshot_version": runtime.last_snapshot.version_id,
+            "market_mode": runtime.last_snapshot.market_mode.value,
+            "research_status": research_status,
+            "research_candidate_count": len(research_candidates),
+            "approved_research_candidate_count": len(approved_research_candidate_ids),
+            "consecutive_failures": runtime.consecutive_failures,
+        },
     )
 
 

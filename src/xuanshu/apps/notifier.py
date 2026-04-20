@@ -117,6 +117,16 @@ async def _poll_notifier_once(runtime: NotifierRuntime) -> None:
             httpx = None
         if httpx is not None and isinstance(exc, httpx.ReadTimeout):
             return
+        if httpx is not None and isinstance(exc, httpx.HTTPStatusError):
+            _LOGGER.warning(
+                "poll_updates_failed",
+                extra={
+                    "service": "notifier",
+                    "error": str(exc),
+                    "status_code": exc.response.status_code,
+                },
+            )
+            return
         raise
     if not updates:
         return

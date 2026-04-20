@@ -90,10 +90,36 @@ class StateEngine:
         while len(state.recent_trade_sides) > self.recent_trade_window:
             state.recent_trade_sides.popleft()
 
+    def stage_order_submission(
+        self,
+        symbol: str,
+        *,
+        client_order_id: str,
+        side: str,
+        size: float,
+    ) -> None:
+        symbol_orders = self.open_orders_by_symbol.setdefault(symbol, {})
+        symbol_orders[client_order_id] = OrderState(
+            order_id=client_order_id,
+            client_order_id=client_order_id,
+            side=side,
+            price=0.0,
+            size=size,
+            filled_size=0.0,
+            status="submitted",
+        )
+
     def on_order_update(self, event: OrderUpdateEvent) -> None:
         self.last_private_stream_marker = event.private_sequence
         symbol_orders = self.open_orders_by_symbol.setdefault(event.symbol, {})
         normalized_status = event.status.strip().lower()
+        staged_order_ids = [
+            order_id
+            for order_id, order in symbol_orders.items()
+            if order.client_order_id == event.client_order_id and order_id != event.order_id
+        ]
+        for staged_order_id in staged_order_ids:
+            symbol_orders.pop(staged_order_id, None)
         symbol_orders[event.order_id] = OrderState(
             order_id=event.order_id,
             client_order_id=event.client_order_id,

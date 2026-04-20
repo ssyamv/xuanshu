@@ -40,15 +40,43 @@ _RUN_MODE_PRIORITY = {
     RunMode.HALTED: 3,
 }
 _FAILURE_DEGRADED_THRESHOLD = 3
+_BASELINE_STRATEGY_FLAGS = {
+    "breakout": True,
+    "mean_reversion": False,
+    "risk_pause": True,
+}
 
 
 @dataclass(frozen=True, slots=True)
 class GovernorCycleResult:
     snapshot: StrategyConfigSnapshot
     status: str
+    error: str | None = None
 
 
 class GovernorService:
+    @staticmethod
+    def _normalize_strategy_flags(flags: Mapping[str, object]) -> dict[str, bool]:
+        normalized = {
+            key: value
+            for key, value in flags.items()
+            if isinstance(key, str) and isinstance(value, bool)
+        }
+        if all(key in normalized for key in _BASELINE_STRATEGY_FLAGS):
+            return normalized
+        return {**_BASELINE_STRATEGY_FLAGS, **normalized}
+
+    @staticmethod
+    def _filter_blocking_risk_events(recent_risk_events: object) -> list[Mapping[str, object]]:
+        if not isinstance(recent_risk_events, list):
+            return []
+        return [
+            item
+            for item in recent_risk_events
+            if isinstance(item, Mapping)
+            and item.get("event_type") not in {"signal_blocked", "account_snapshot_updated", "manual_release_requested"}
+        ]
+
     def freeze_on_failure(self, last_snapshot: StrategyConfigSnapshot) -> StrategyConfigSnapshot:
         return last_snapshot.model_copy(deep=True)
 
@@ -102,12 +130,7 @@ class GovernorService:
         active_fault_flags = self._coerce_string_list(state_summary.get("active_fault_flags"))
         recent_risk_events = self._coerce_mapping_list(state_summary.get("recent_risk_events"))
         manual_release_target = str(state_summary.get("manual_release_target") or "").strip().lower()
-        blocking_risk_events = [
-            event
-            for event in recent_risk_events
-            if isinstance(event.get("event_type"), str)
-            and event.get("event_type") not in {"signal_blocked", "account_snapshot_updated", "manual_release_requested"}
-        ]
+        blocking_risk_events = self._filter_blocking_risk_events(recent_risk_events)
         current_mode = str(state_summary.get("current_run_mode", "unknown"))
         recognized_current_mode = (
             current_mode if current_mode in RunMode._value2member_map_ else RunMode.NORMAL.value
@@ -141,13 +164,16 @@ class GovernorService:
                 for event in blocking_risk_events
                 if isinstance((event_type := event.get("event_type")), str)
             )
-        if recognized_current_mode != RunMode.NORMAL.value:
+        if (
+            recognized_current_mode != RunMode.NORMAL.value
+            and (blocking_risk_events or active_fault_flags or manual_release_target == RunMode.DEGRADED.value)
+        ):
             risk_supporting_facts.append(f"current_run_mode={recognized_current_mode}")
             risk_flags.append(f"mode:{recognized_current_mode}")
         if manual_release_target == RunMode.DEGRADED.value:
             risk_supporting_facts.append("manual_release_target=degraded")
             risk_flags.append("release:degraded")
-        if blocking_risk_events or recognized_current_mode != RunMode.NORMAL.value:
+        if blocking_risk_events or active_fault_flags or manual_release_target == RunMode.DEGRADED.value:
             risk_decision = "tighten_risk"
             risk_confidence = 0.9 if blocking_risk_events else 0.7
         else:
@@ -327,14 +353,7 @@ class GovernorService:
         active_fault_flags = state_summary.get("active_fault_flags", [])
         if not isinstance(active_fault_flags, list):
             active_fault_flags = []
-        recent_risk_events = state_summary.get("recent_risk_events", [])
-        if not isinstance(recent_risk_events, list):
-            recent_risk_events = []
-        recent_risk_events = [
-            item
-            for item in recent_risk_events
-            if isinstance(item, Mapping) and item.get("event_type") not in {"signal_blocked", "account_snapshot_updated", "manual_release_requested"}
-        ]
+        recent_risk_events = self._filter_blocking_risk_events(state_summary.get("recent_risk_events", []))
 
         symbol_summaries = state_summary.get("symbol_summaries", [])
         observed_symbols: list[str] = []
@@ -348,7 +367,11 @@ class GovernorService:
         market_mode = candidate.market_mode
         if active_fault_flags and _RUN_MODE_PRIORITY[market_mode] < _RUN_MODE_PRIORITY[RunMode.DEGRADED]:
             market_mode = RunMode.DEGRADED
-        if current_run_mode is not None and _RUN_MODE_PRIORITY[market_mode] < _RUN_MODE_PRIORITY[current_run_mode]:
+        if (
+            current_run_mode is not None
+            and (active_fault_flags or recent_risk_events)
+            and _RUN_MODE_PRIORITY[market_mode] < _RUN_MODE_PRIORITY[current_run_mode]
+        ):
             market_mode = current_run_mode
 
         risk_multiplier = candidate.risk_multiplier
@@ -384,6 +407,8 @@ class GovernorService:
         else:
             updated_reason = f"{source_reason}|guardrailed"
 
+        strategy_enable_flags = self._normalize_strategy_flags(candidate.strategy_enable_flags)
+
         return candidate.model_copy(
             update={
                 "market_mode": market_mode,
@@ -391,6 +416,7 @@ class GovernorService:
                 "per_symbol_max_position": per_symbol_max_position,
                 "approval_state": approval_state,
                 "symbol_whitelist": symbol_whitelist,
+                "strategy_enable_flags": strategy_enable_flags,
                 "source_reason": updated_reason,
             }
         )
@@ -428,8 +454,8 @@ class GovernorService:
         now: datetime,
     ) -> str:
         now = now.astimezone(UTC)
-        recent_risk_events = state_summary.get("recent_risk_events", [])
-        if isinstance(recent_risk_events, list) and recent_risk_events:
+        recent_risk_events = self._filter_blocking_risk_events(state_summary.get("recent_risk_events", []))
+        if recent_risk_events:
             return "risk_event"
 
         current_run_mode_value = state_summary.get("current_run_mode")
@@ -458,12 +484,14 @@ class GovernorService:
                 state_summary,
             )
             status = "published"
-        except Exception:
+            error = None
+        except Exception as exc:
             snapshot = self.freeze_on_failure(last_snapshot)
             status = "frozen"
+            error = str(exc)
 
         publish_snapshot(snapshot)
-        return GovernorCycleResult(snapshot=snapshot, status=status)
+        return GovernorCycleResult(snapshot=snapshot, status=status, error=error)
 
     def _extract_symbol_scope(self, state_summary: Mapping[str, object]) -> list[str]:
         symbol_scope: list[str] = []

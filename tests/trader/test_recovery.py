@@ -185,6 +185,36 @@ async def test_recovery_supervisor_allows_matching_checkpoint_and_exchange_state
 
 
 @pytest.mark.asyncio
+async def test_recovery_supervisor_ignores_flat_exchange_positions_when_checkpoint_is_flat() -> None:
+    checkpoint = _build_checkpoint(
+        positions_snapshot=[],
+        open_orders_snapshot=[],
+    )
+    rest_client = _FakeRestClient(
+        open_orders=[_okx_open_order()],
+        positions=[
+            _okx_position(
+                net_quantity="0",
+                mark_price="",
+                unrealized_pnl="",
+            )
+        ],
+    )
+    rest_client._open_orders = []
+    supervisor = RecoverySupervisor(rest_client=rest_client)
+
+    result = await supervisor.run_startup_recovery(
+        "BTC-USDT-SWAP",
+        checkpoint,
+        timestamp="2026-04-19T00:00:00.000Z",
+    )
+
+    assert result["run_mode"] == "normal"
+    assert result["needs_reconcile"] is False
+    assert result["reason"] == "checkpoint_matches_exchange"
+
+
+@pytest.mark.asyncio
 async def test_recovery_supervisor_fetches_exchange_state_concurrently() -> None:
     checkpoint = _build_checkpoint(
         positions_snapshot=[

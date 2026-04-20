@@ -86,12 +86,13 @@ def _normalize_exchange_items(
     normalized_items: list[tuple[object, ...]] = []
     for item in items:
         payload = item if isinstance(item, dict) else {}
-        normalized_items.append(
-            tuple(
-                _normalize_exchange_value(field, payload.get(exchange_field))
-                for field, exchange_field in field_aliases.items()
-            )
+        normalized_item = tuple(
+            _normalize_exchange_value(field, payload.get(exchange_field))
+            for field, exchange_field in field_aliases.items()
         )
+        if field_aliases is _POSITION_FIELD_ALIASES and _is_flat_exchange_position(normalized_item):
+            continue
+        normalized_items.append(normalized_item)
     return sorted(normalized_items, key=_item_sort_key)
 
 
@@ -137,3 +138,12 @@ def _coerce_float(value: object) -> object:
         except ValueError:
             return float("nan")
     return float("nan")
+
+
+def _is_flat_exchange_position(item: tuple[object, ...]) -> bool:
+    if len(item) != len(_POSITION_FIELDS):
+        return False
+    _, net_quantity, mark_price, unrealized_pnl = item
+    if not isinstance(net_quantity, float) or net_quantity != 0.0:
+        return False
+    return mark_price is None and unrealized_pnl is None
