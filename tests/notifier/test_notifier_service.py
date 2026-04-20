@@ -339,6 +339,13 @@ async def test_notifier_service_emits_proactive_notifications_from_history_rows(
         {
             "version_id": "snap-002",
             "status": "published",
+            "research_provider": "api",
+            "research_status": "candidate_built",
+            "research_candidate_count": 1,
+            "approved_research_candidate_ids": ["pkg-001"],
+            "validation_status": "succeeded",
+            "approval_status": "approved",
+            "approval_decision": "approved",
         }
     )
     history.save_checkpoint(
@@ -377,9 +384,11 @@ async def test_notifier_service_emits_proactive_notifications_from_history_rows(
 
     flushed = await service.flush_proactive_notifications(adapter=_Adapter())
 
-    assert flushed == 4
+    assert flushed == 6
     assert delivered == [
         "运行模式已切换为只减仓",
+        "治理研究已产出候选：1 个（provider=api，status=candidate_built，packages=pkg-001）",
+        "治理自动审批完成：approved（validation=succeeded）",
         "治理快照已发布：snap-002（模式=degraded，审批=approved）",
         "恢复流程失败：exchange_state_mismatch",
         "风控事件：runtime_mode_changed startup gating tightened runtime to reduce_only",
@@ -400,11 +409,40 @@ async def test_notifier_service_skips_already_sent_governor_publication_even_whe
         {
             "version_id": "snap-002",
             "status": "published",
+            "research_provider": "api",
+            "research_status": "candidate_built",
+            "research_candidate_count": 1,
+            "approved_research_candidate_ids": ["pkg-001"],
+            "validation_status": "succeeded",
+            "approval_status": "approved",
+            "approval_decision": "approved",
         }
     )
     history.append_notification_event(
         {
-            "category": "snapshot_published",
+            "category": "governor_research_ready",
+            "dedupe_key": "governor_run:snap-002:research_ready",
+            "severity": "INFO",
+            "status": "sent",
+            "attempt_count": 1,
+            "needs_retry": False,
+            "text": "治理研究已产出候选：1 个（provider=api，status=candidate_built，packages=pkg-001）",
+        }
+    )
+    history.append_notification_event(
+        {
+            "category": "governor_approval_completed",
+            "dedupe_key": "governor_run:snap-002:approval_completed",
+            "severity": "INFO",
+            "status": "sent",
+            "attempt_count": 1,
+            "needs_retry": False,
+            "text": "治理自动审批完成：approved（validation=succeeded）",
+        }
+    )
+    history.append_notification_event(
+        {
+            "category": "governor_snapshot_published",
             "dedupe_key": "governor_run:snap-002:published",
             "severity": "INFO",
             "status": "sent",

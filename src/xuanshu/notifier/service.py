@@ -30,9 +30,11 @@ _PROACTIVE_CATEGORY_PRIORITY: dict[str, int] = {
     "trade_position_opened": 2,
     "trade_position_closed": 3,
     "mode_change": 4,
-    "snapshot_published": 5,
-    "recovery_failed": 6,
-    "risk_event": 7,
+    "governor_research_ready": 5,
+    "governor_approval_completed": 6,
+    "governor_snapshot_published": 7,
+    "recovery_failed": 8,
+    "risk_event": 9,
 }
 
 
@@ -598,19 +600,58 @@ class NotifierService:
         candidates: list[dict[str, str]] = []
         for row in governor_rows:
             version_id = row.get("version_id")
-            if not isinstance(version_id, str) or row.get("status") != "published":
+            if not isinstance(version_id, str):
                 continue
-            snapshot = snapshots_by_version.get(version_id, {})
-            market_mode = snapshot.get("market_mode", "unknown")
-            approval = snapshot.get("approval_state", "unknown")
-            candidates.append(
-                {
-                    "category": "snapshot_published",
-                    "dedupe_key": f"governor_run:{version_id}:published",
-                    "severity": "INFO",
-                    "text": f"治理快照已发布：{version_id}（模式={market_mode}，审批={approval}）",
-                }
-            )
+            research_status = str(row.get("research_status", "")).strip()
+            research_provider = str(row.get("research_provider", "")).strip() or "unknown"
+            validation_status = str(row.get("validation_status", "")).strip() or "unknown"
+            approval_status = str(row.get("approval_status", "")).strip() or "unknown"
+            approval_decision = str(row.get("approval_decision", "")).strip() or approval_status
+            research_candidate_count = row.get("research_candidate_count", 0)
+            approved_package_ids = row.get("approved_research_candidate_ids") or []
+
+            if (
+                isinstance(research_candidate_count, int)
+                and research_candidate_count > 0
+                and research_status
+                and research_status != "not_requested"
+            ):
+                package_summary = ",".join(str(item) for item in approved_package_ids) or "none"
+                candidates.append(
+                    {
+                        "category": "governor_research_ready",
+                        "dedupe_key": f"governor_run:{version_id}:research_ready",
+                        "severity": "INFO",
+                        "text": (
+                            "治理研究已产出候选："
+                            f"{research_candidate_count} 个"
+                            f"（provider={research_provider}，status={research_status}，packages={package_summary}）"
+                        ),
+                    }
+                )
+
+            if approval_status in {"approved", "approved_with_guardrails", "rejected", "needs_revision"}:
+                candidates.append(
+                    {
+                        "category": "governor_approval_completed",
+                        "dedupe_key": f"governor_run:{version_id}:approval_completed",
+                        "severity": "INFO",
+                        "text": f"治理自动审批完成：{approval_decision}（validation={validation_status}）",
+                    }
+                )
+
+            if row.get("status") == "published":
+                snapshot = snapshots_by_version.get(version_id, {})
+                market_mode = snapshot.get("market_mode", "unknown")
+                approval = snapshot.get("approval_state", "unknown")
+                candidates.append(
+                    {
+                        "category": "governor_snapshot_published",
+                        "dedupe_key": f"governor_run:{version_id}:published",
+                        "severity": "INFO",
+                        "text": f"治理快照已发布：{version_id}（模式={market_mode}，审批={approval}）",
+                    }
+                )
         return candidates
 
     def _collect_recovery_failure_candidates(self, *, limit: int) -> list[dict[str, str]]:
