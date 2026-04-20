@@ -21,6 +21,9 @@ POSTGRES_TABLES = (
     "expert_opinions",
     "governor_runs",
     "notification_events",
+    "strategy_packages",
+    "backtest_reports",
+    "approval_records",
 )
 
 
@@ -75,6 +78,15 @@ class PostgresRuntimeStore:
 
     def append_notification_event(self, payload: dict[str, Any]) -> None:
         self._append_row("notification_events", payload)
+
+    def append_strategy_package(self, payload: dict[str, Any]) -> None:
+        self._append_row("strategy_packages", payload)
+
+    def append_backtest_report(self, payload: dict[str, Any]) -> None:
+        self._append_row("backtest_reports", payload)
+
+    def append_approval_record(self, payload: dict[str, Any]) -> None:
+        self._append_row("approval_records", payload)
 
     def list_recent_rows(self, table: str, limit: int = 10) -> list[dict[str, Any]]:
         if table not in self.written_rows:

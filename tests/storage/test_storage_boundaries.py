@@ -46,6 +46,9 @@ def test_redis_key_naming_matches_hot_state_contract() -> None:
     assert RedisKeys.symbol_runtime("BTC-USDT-SWAP") == "xuanshu:runtime:symbol:BTC-USDT-SWAP"
     assert RedisKeys.budget_pool_summary() == "xuanshu:runtime:budget_pool"
     assert RedisKeys.governor_health_summary() == "xuanshu:runtime:governor_health"
+    assert RedisKeys.pending_approval_summary() == "xuanshu:runtime:pending_approval_summary"
+    assert RedisKeys.latest_approved_package_summary() == "xuanshu:runtime:latest_approved_package_summary"
+    assert RedisKeys.backtest_health_summary() == "xuanshu:runtime:backtest_health_summary"
 
 
 def test_redis_symbol_runtime_rejects_unsafe_input() -> None:
@@ -101,6 +104,10 @@ def test_redis_runtime_summary_and_fault_store_round_trips_json() -> None:
         {"remaining_notional": 100.0, "remaining_order_count": 10, "current_mode": "normal"}
     )
     store.set_governor_health_summary({"status": "published", "trigger": "risk_event"})
+    store.set_latest_approved_package_summary(
+        {"latest_strategy_package_id": "pkg-2", "approved_at": "2026-04-18T00:00:00Z"}
+    )
+    store.set_backtest_health_summary({"healthy": True, "latest_backtest_report_id": "bt-1"})
 
     assert store.get_symbol_runtime_summary("BTC-USDT-SWAP") == {
         "symbol": "BTC-USDT-SWAP",
@@ -114,6 +121,28 @@ def test_redis_runtime_summary_and_fault_store_round_trips_json() -> None:
         "current_mode": "normal",
     }
     assert store.get_governor_health_summary() == {"status": "published", "trigger": "risk_event"}
+    assert store.get_latest_approved_package_summary() == {
+        "latest_strategy_package_id": "pkg-2",
+        "approved_at": "2026-04-18T00:00:00Z",
+    }
+    assert store.get_backtest_health_summary() == {"healthy": True, "latest_backtest_report_id": "bt-1"}
+
+
+def test_redis_runtime_state_store_round_trips_pending_approval_summary() -> None:
+    store = RedisRuntimeStateStore(redis_client=_FakeRedis())
+
+    summary = {"pending_count": 2, "latest_strategy_package_id": "pkg-2"}
+    store.set_pending_approval_summary(summary)
+
+    assert store.get_pending_approval_summary() == summary
+
+
+def test_redis_runtime_state_store_ignores_malformed_pending_approval_summary_json() -> None:
+    client = _FakeRedis()
+    client.set(RedisKeys.pending_approval_summary(), "{not-json")
+    store = RedisRuntimeStateStore(redis_client=client)
+
+    assert store.get_pending_approval_summary() is None
 
 
 def test_redis_runtime_state_store_ignores_malformed_symbol_summary_json() -> None:
@@ -149,6 +178,9 @@ def test_postgres_store_exposes_append_fact_methods() -> None:
     assert hasattr(store, "append_risk_event")
     assert hasattr(store, "save_checkpoint")
     assert hasattr(store, "append_notification_event")
+    assert hasattr(store, "append_strategy_package")
+    assert hasattr(store, "append_backtest_report")
+    assert hasattr(store, "append_approval_record")
     assert hasattr(store, "list_recent_rows")
 
 
@@ -160,6 +192,9 @@ def test_postgres_store_exposes_append_fact_methods() -> None:
         ("append_position_fact", "positions"),
         ("append_risk_event", "risk_events"),
         ("save_checkpoint", "execution_checkpoints"),
+        ("append_strategy_package", "strategy_packages"),
+        ("append_backtest_report", "backtest_reports"),
+        ("append_approval_record", "approval_records"),
     ],
 )
 def test_postgres_store_copies_payloads_before_append(method_name: str, table_name: str) -> None:
@@ -187,7 +222,22 @@ def test_postgres_tables_are_deterministic_and_immutable() -> None:
         "expert_opinions",
         "governor_runs",
         "notification_events",
+        "strategy_packages",
+        "backtest_reports",
+        "approval_records",
     )
+
+
+def test_postgres_runtime_store_appends_strategy_package_backtest_and_approval_rows() -> None:
+    store = PostgresRuntimeStore(dsn="postgresql://xuanshu:xuanshu@localhost:5432/xuanshu")
+
+    store.append_strategy_package({"strategy_package_id": "pkg-1", "symbol_scope": ["BTC-USDT-SWAP"]})
+    store.append_backtest_report({"backtest_report_id": "bt-1", "strategy_package_id": "pkg-1"})
+    store.append_approval_record({"approval_record_id": "apr-1", "strategy_package_id": "pkg-1"})
+
+    assert store.list_recent_rows("strategy_packages", limit=1)[0]["strategy_package_id"] == "pkg-1"
+    assert store.list_recent_rows("backtest_reports", limit=1)[0]["backtest_report_id"] == "bt-1"
+    assert store.list_recent_rows("approval_records", limit=1)[0]["approval_record_id"] == "apr-1"
 
 
 def test_postgres_store_can_append_and_list_notification_events() -> None:

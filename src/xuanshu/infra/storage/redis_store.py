@@ -45,6 +45,18 @@ class RedisKeys:
     def manual_release_target() -> str:
         return "xuanshu:runtime:manual_release_target"
 
+    @staticmethod
+    def pending_approval_summary() -> str:
+        return "xuanshu:runtime:pending_approval_summary"
+
+    @staticmethod
+    def latest_approved_package_summary() -> str:
+        return "xuanshu:runtime:latest_approved_package_summary"
+
+    @staticmethod
+    def backtest_health_summary() -> str:
+        return "xuanshu:runtime:backtest_health_summary"
+
 
 class SnapshotStore(Protocol):
     def set_latest_snapshot(self, version_id: str, snapshot: StrategyConfigSnapshot) -> None:
@@ -83,6 +95,24 @@ class RuntimeStateStore(Protocol):
         ...
 
     def get_governor_health_summary(self) -> dict[str, object] | None:
+        ...
+
+    def set_pending_approval_summary(self, summary: dict[str, object]) -> None:
+        ...
+
+    def get_pending_approval_summary(self) -> dict[str, object] | None:
+        ...
+
+    def set_latest_approved_package_summary(self, summary: dict[str, object]) -> None:
+        ...
+
+    def get_latest_approved_package_summary(self) -> dict[str, object] | None:
+        ...
+
+    def set_backtest_health_summary(self, summary: dict[str, object]) -> None:
+        ...
+
+    def get_backtest_health_summary(self) -> dict[str, object] | None:
         ...
 
     def set_manual_release_target(self, mode: str) -> None:
@@ -264,6 +294,93 @@ class RedisRuntimeStateStore:
     def get_governor_health_summary(self) -> dict[str, object] | None:
         try:
             payload = self._redis.get(RedisKeys.governor_health_summary())
+        except RedisError:
+            return None
+        if payload is None:
+            return None
+        if isinstance(payload, bytes):
+            try:
+                payload = payload.decode("utf-8")
+            except UnicodeDecodeError:
+                return None
+        if not isinstance(payload, str):
+            return None
+        try:
+            summary = json.loads(payload)
+        except (TypeError, ValueError):
+            return None
+        return summary if isinstance(summary, dict) else None
+
+    def set_pending_approval_summary(self, summary: dict[str, object]) -> None:
+        try:
+            self._redis.set(
+                RedisKeys.pending_approval_summary(),
+                json.dumps(summary, separators=(",", ":")),
+            )
+        except RedisError:
+            return
+
+    def get_pending_approval_summary(self) -> dict[str, object] | None:
+        try:
+            payload = self._redis.get(RedisKeys.pending_approval_summary())
+        except RedisError:
+            return None
+        if payload is None:
+            return None
+        if isinstance(payload, bytes):
+            try:
+                payload = payload.decode("utf-8")
+            except UnicodeDecodeError:
+                return None
+        if not isinstance(payload, str):
+            return None
+        try:
+            summary = json.loads(payload)
+        except (TypeError, ValueError):
+            return None
+        return summary if isinstance(summary, dict) else None
+
+    def set_latest_approved_package_summary(self, summary: dict[str, object]) -> None:
+        try:
+            self._redis.set(
+                RedisKeys.latest_approved_package_summary(),
+                json.dumps(summary, separators=(",", ":")),
+            )
+        except RedisError:
+            return
+
+    def get_latest_approved_package_summary(self) -> dict[str, object] | None:
+        try:
+            payload = self._redis.get(RedisKeys.latest_approved_package_summary())
+        except RedisError:
+            return None
+        if payload is None:
+            return None
+        if isinstance(payload, bytes):
+            try:
+                payload = payload.decode("utf-8")
+            except UnicodeDecodeError:
+                return None
+        if not isinstance(payload, str):
+            return None
+        try:
+            summary = json.loads(payload)
+        except (TypeError, ValueError):
+            return None
+        return summary if isinstance(summary, dict) else None
+
+    def set_backtest_health_summary(self, summary: dict[str, object]) -> None:
+        try:
+            self._redis.set(
+                RedisKeys.backtest_health_summary(),
+                json.dumps(summary, separators=(",", ":")),
+            )
+        except RedisError:
+            return
+
+    def get_backtest_health_summary(self) -> dict[str, object] | None:
+        try:
+            payload = self._redis.get(RedisKeys.backtest_health_summary())
         except RedisError:
             return None
         if payload is None:
