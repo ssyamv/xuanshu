@@ -5,6 +5,9 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Protocol
 
+from pydantic import ValidationError
+
+from xuanshu.contracts.approval import ApprovalDecision, ApprovalRecord
 from xuanshu.contracts.governance import ExpertOpinion
 from xuanshu.contracts.research import StrategyPackage
 from xuanshu.contracts.strategy import StrategyConfigSnapshot
@@ -45,6 +48,7 @@ _BASELINE_STRATEGY_FLAGS = {
     "mean_reversion": False,
     "risk_pause": True,
 }
+_APPROVED_RESEARCH_SOURCE_REASON = "approved research package"
 
 
 @dataclass(frozen=True, slots=True)
@@ -55,6 +59,60 @@ class GovernorCycleResult:
 
 
 class GovernorService:
+    @staticmethod
+    def _load_approval_record(state_summary: Mapping[str, object]) -> ApprovalRecord | None:
+        payload = state_summary.get("approval_record")
+        if isinstance(payload, ApprovalRecord):
+            return payload
+        if not isinstance(payload, Mapping):
+            return None
+        try:
+            return ApprovalRecord.model_validate(dict(payload))
+        except ValidationError as exc:
+            raise ValueError(f"invalid approval record: {exc}") from exc
+
+    @staticmethod
+    def _resolve_prepublication_block(
+        state_summary: Mapping[str, object],
+        *,
+        last_snapshot: StrategyConfigSnapshot,
+    ) -> GovernorCycleResult | None:
+        validation_status = str(state_summary.get("validation_status") or "").strip().lower()
+        validation_error = str(state_summary.get("validation_error") or "").strip() or None
+        if validation_status == "failed":
+            return GovernorCycleResult(
+                snapshot=last_snapshot,
+                status="validation_failed",
+                error=validation_error,
+            )
+
+        if not bool(state_summary.get("approval_required")):
+            return None
+
+        try:
+            approval_record = GovernorService._load_approval_record(state_summary)
+        except ValueError as exc:
+            return GovernorCycleResult(
+                snapshot=last_snapshot,
+                status="approval_invalid",
+                error=str(exc),
+            )
+        if approval_record is None:
+            return GovernorCycleResult(snapshot=last_snapshot, status="approval_pending", error=None)
+        if approval_record.decision == ApprovalDecision.REJECTED:
+            return GovernorCycleResult(
+                snapshot=last_snapshot,
+                status="approval_rejected",
+                error=approval_record.decision_reason,
+            )
+        if approval_record.decision == ApprovalDecision.NEEDS_REVISION:
+            return GovernorCycleResult(
+                snapshot=last_snapshot,
+                status="approval_needs_revision",
+                error=approval_record.decision_reason,
+            )
+        return None
+
     @staticmethod
     def _normalize_strategy_flags(flags: Mapping[str, object]) -> dict[str, bool]:
         normalized = {
@@ -526,6 +584,39 @@ class GovernorService:
             "health_state": health_state,
         }
 
+    def apply_approval_guardrails(
+        self,
+        candidate: StrategyConfigSnapshot,
+        approval_record: ApprovalRecord,
+    ) -> StrategyConfigSnapshot:
+        guardrails = approval_record.guardrails
+        updates: dict[str, object] = {}
+
+        guardrail_symbols = guardrails.get("symbol_whitelist")
+        if isinstance(guardrail_symbols, list):
+            normalized_symbols = [
+                symbol
+                for symbol in guardrail_symbols
+                if isinstance(symbol, str) and symbol.strip()
+            ]
+            if normalized_symbols:
+                updates["symbol_whitelist"] = normalized_symbols
+
+        risk_limit = guardrails.get("risk_multiplier")
+        if isinstance(risk_limit, int | float) and not isinstance(risk_limit, bool):
+            bounded_risk_limit = min(max(float(risk_limit), 0.0), 1.0)
+            updates["risk_multiplier"] = min(candidate.risk_multiplier, bounded_risk_limit)
+
+        forced_market_mode = guardrails.get("market_mode")
+        if isinstance(forced_market_mode, str) and forced_market_mode in RunMode._value2member_map_:
+            mode = RunMode(forced_market_mode)
+            if _RUN_MODE_PRIORITY[mode] > _RUN_MODE_PRIORITY[candidate.market_mode]:
+                updates["market_mode"] = mode
+
+        if not updates:
+            return candidate
+        return candidate.model_copy(update=updates)
+
     def determine_trigger_reason(
         self,
         state_summary: Mapping[str, object],
@@ -559,19 +650,31 @@ class GovernorService:
         publish_snapshot: Callable[[StrategyConfigSnapshot], None],
         trigger_reason: str,
     ) -> GovernorCycleResult:
+        blocked_result = self._resolve_prepublication_block(
+            state_summary,
+            last_snapshot=last_snapshot,
+        )
+        if blocked_result is not None:
+            return blocked_result
+
+        approval_record = self._load_approval_record(state_summary)
         try:
             snapshot = self.apply_guardrails(
                 await governor_client.generate_snapshot(state_summary),
                 state_summary,
             )
+            if approval_record is not None and approval_record.decision == ApprovalDecision.APPROVED_WITH_GUARDRAILS:
+                snapshot = self.apply_approval_guardrails(snapshot, approval_record)
+            approved_source_reason = str(state_summary.get("approved_source_reason") or "").strip()
+            if approval_record is not None and approved_source_reason:
+                snapshot = snapshot.model_copy(update={"source_reason": approved_source_reason})
             if trigger_reason == "schedule" and self._snapshots_are_semantically_equal(snapshot, last_snapshot):
                 return GovernorCycleResult(snapshot=last_snapshot, status="unchanged", error=None)
             status = "published"
             error = None
         except Exception as exc:
             snapshot = self.freeze_on_failure(last_snapshot)
-            status = "frozen"
-            error = str(exc)
+            return GovernorCycleResult(snapshot=snapshot, status="frozen", error=str(exc))
 
         publish_snapshot(snapshot)
         return GovernorCycleResult(snapshot=snapshot, status=status, error=error)

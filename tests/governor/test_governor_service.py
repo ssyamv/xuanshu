@@ -6,6 +6,7 @@ from pydantic import ValidationError
 from pydantic import SecretStr
 
 import xuanshu.infra.ai.governor_client as governor_client_module
+from xuanshu.contracts.approval import ApprovalDecision, ApprovalRecord
 from xuanshu.contracts.research import ResearchTrigger, StrategyPackage
 from xuanshu.contracts.strategy import StrategyConfigSnapshot
 from xuanshu.core.enums import ApprovalState, RunMode
@@ -16,6 +17,14 @@ from xuanshu.infra.ai.governor_client import (
 )
 from xuanshu.infra.storage.postgres_store import PostgresRuntimeStore
 from xuanshu.governor.service import GovernorService
+
+
+class _GovernorClientReturning:
+    def __init__(self, snapshot: StrategyConfigSnapshot) -> None:
+        self.snapshot = snapshot
+
+    async def generate_snapshot(self, state_summary: dict[str, object]) -> StrategyConfigSnapshot:
+        return self.snapshot.model_copy(deep=True)
 
 
 def test_governor_keeps_last_valid_snapshot_when_ai_fails() -> None:
@@ -1112,3 +1121,285 @@ def test_governor_health_summary_enters_degraded_state_after_failure_threshold()
         "consecutive_failures": 3,
         "health_state": "degraded",
     }
+
+
+@pytest.mark.asyncio
+async def test_governor_service_does_not_publish_research_snapshot_without_approval_record() -> None:
+    service = GovernorService()
+    published: list[str] = []
+    last_snapshot = StrategyConfigSnapshot(
+        version_id="snap-last",
+        generated_at=datetime.now(UTC),
+        effective_from=datetime.now(UTC),
+        expires_at=datetime.now(UTC) + timedelta(minutes=5),
+        symbol_whitelist=["BTC-USDT-SWAP"],
+        strategy_enable_flags={"breakout": True, "mean_reversion": False, "risk_pause": True},
+        risk_multiplier=0.5,
+        per_symbol_max_position=0.12,
+        max_leverage=3,
+        market_mode=RunMode.NORMAL,
+        approval_state=ApprovalState.APPROVED,
+        source_reason="cached",
+        ttl_sec=300,
+    )
+    candidate_snapshot = last_snapshot.model_copy(
+        update={
+            "version_id": "snap-candidate",
+            "source_reason": "candidate package",
+            "risk_multiplier": 0.35,
+        }
+    )
+
+    result = await service.run_cycle(
+        state_summary={"scope": "governor", "approval_required": True},
+        last_snapshot=last_snapshot,
+        governor_client=_GovernorClientReturning(candidate_snapshot),
+        publish_snapshot=lambda snapshot: published.append(snapshot.version_id),
+        trigger_reason="schedule",
+    )
+
+    assert published == []
+    assert result.status == "approval_pending"
+    assert result.snapshot.version_id == "snap-last"
+
+
+@pytest.mark.asyncio
+async def test_governor_service_publishes_approved_research_snapshot_with_guardrails() -> None:
+    service = GovernorService()
+    published: list[StrategyConfigSnapshot] = []
+    last_snapshot = StrategyConfigSnapshot(
+        version_id="snap-last",
+        generated_at=datetime.now(UTC),
+        effective_from=datetime.now(UTC),
+        expires_at=datetime.now(UTC) + timedelta(minutes=5),
+        symbol_whitelist=["BTC-USDT-SWAP", "ETH-USDT-SWAP"],
+        strategy_enable_flags={"breakout": True, "mean_reversion": False, "risk_pause": True},
+        risk_multiplier=0.5,
+        per_symbol_max_position=0.12,
+        max_leverage=3,
+        market_mode=RunMode.NORMAL,
+        approval_state=ApprovalState.APPROVED,
+        source_reason="cached",
+        ttl_sec=300,
+    )
+    candidate_snapshot = last_snapshot.model_copy(
+        update={
+            "version_id": "snap-approved",
+            "source_reason": "candidate package",
+            "risk_multiplier": 0.45,
+            "symbol_whitelist": ["BTC-USDT-SWAP", "ETH-USDT-SWAP"],
+            "market_mode": RunMode.NORMAL,
+        }
+    )
+    approval_record = ApprovalRecord(
+        approval_record_id="apr-1",
+        strategy_package_id="pkg-1",
+        backtest_report_id="bt-1",
+        decision=ApprovalDecision.APPROVED_WITH_GUARDRAILS,
+        decision_reason="publish only in degraded mode with reduced risk",
+        guardrails={
+            "market_mode": "degraded",
+            "risk_multiplier": 0.2,
+            "symbol_whitelist": ["BTC-USDT-SWAP"],
+        },
+        reviewed_by="committee",
+        review_source="manual",
+        created_at=datetime.now(UTC),
+    )
+
+    result = await service.run_cycle(
+        state_summary={
+            "scope": "governor",
+            "approval_required": True,
+            "approval_record": approval_record.model_dump(mode="json"),
+            "approved_source_reason": "approved research package",
+        },
+        last_snapshot=last_snapshot,
+        governor_client=_GovernorClientReturning(candidate_snapshot),
+        publish_snapshot=published.append,
+        trigger_reason="schedule",
+    )
+
+    assert result.status == "published"
+    assert len(published) == 1
+    assert published[0].version_id == "snap-approved"
+    assert published[0].market_mode == RunMode.DEGRADED
+    assert published[0].risk_multiplier == 0.2
+    assert published[0].symbol_whitelist == ["BTC-USDT-SWAP"]
+    assert published[0].source_reason == "approved research package"
+
+
+@pytest.mark.asyncio
+async def test_governor_service_blocks_rejected_research_snapshot_publication() -> None:
+    service = GovernorService()
+    published: list[str] = []
+    last_snapshot = StrategyConfigSnapshot(
+        version_id="snap-last",
+        generated_at=datetime.now(UTC),
+        effective_from=datetime.now(UTC),
+        expires_at=datetime.now(UTC) + timedelta(minutes=5),
+        symbol_whitelist=["BTC-USDT-SWAP"],
+        strategy_enable_flags={"breakout": True, "mean_reversion": False, "risk_pause": True},
+        risk_multiplier=0.5,
+        per_symbol_max_position=0.12,
+        max_leverage=3,
+        market_mode=RunMode.NORMAL,
+        approval_state=ApprovalState.APPROVED,
+        source_reason="cached",
+        ttl_sec=300,
+    )
+    approval_record = ApprovalRecord(
+        approval_record_id="apr-2",
+        strategy_package_id="pkg-1",
+        backtest_report_id="bt-1",
+        decision=ApprovalDecision.REJECTED,
+        decision_reason="overfit",
+        guardrails={},
+        reviewed_by="committee",
+        review_source="manual",
+        created_at=datetime.now(UTC),
+    )
+
+    result = await service.run_cycle(
+        state_summary={
+            "scope": "governor",
+            "approval_required": True,
+            "approval_record": approval_record.model_dump(mode="json"),
+        },
+        last_snapshot=last_snapshot,
+        governor_client=_GovernorClientReturning(last_snapshot),
+        publish_snapshot=lambda snapshot: published.append(snapshot.version_id),
+        trigger_reason="schedule",
+    )
+
+    assert published == []
+    assert result.status == "approval_rejected"
+    assert result.snapshot.version_id == "snap-last"
+
+
+@pytest.mark.asyncio
+async def test_governor_service_blocks_needs_revision_research_snapshot_publication() -> None:
+    service = GovernorService()
+    last_snapshot = StrategyConfigSnapshot(
+        version_id="snap-last",
+        generated_at=datetime.now(UTC),
+        effective_from=datetime.now(UTC),
+        expires_at=datetime.now(UTC) + timedelta(minutes=5),
+        symbol_whitelist=["BTC-USDT-SWAP"],
+        strategy_enable_flags={"breakout": True, "mean_reversion": False, "risk_pause": True},
+        risk_multiplier=0.5,
+        per_symbol_max_position=0.12,
+        max_leverage=3,
+        market_mode=RunMode.NORMAL,
+        approval_state=ApprovalState.APPROVED,
+        source_reason="cached",
+        ttl_sec=300,
+    )
+    approval_record = ApprovalRecord(
+        approval_record_id="apr-3",
+        strategy_package_id="pkg-1",
+        backtest_report_id="bt-1",
+        decision=ApprovalDecision.NEEDS_REVISION,
+        decision_reason="needs parameter cleanup",
+        guardrails={},
+        reviewed_by="committee",
+        review_source="manual",
+        created_at=datetime.now(UTC),
+    )
+
+    result = await service.run_cycle(
+        state_summary={
+            "scope": "governor",
+            "approval_required": True,
+            "approval_record": approval_record.model_dump(mode="json"),
+        },
+        last_snapshot=last_snapshot,
+        governor_client=_GovernorClientReturning(last_snapshot),
+        publish_snapshot=lambda snapshot: None,
+        trigger_reason="schedule",
+    )
+
+    assert result.status == "approval_needs_revision"
+    assert result.error == "needs parameter cleanup"
+    assert result.snapshot.version_id == "snap-last"
+
+
+@pytest.mark.asyncio
+async def test_governor_service_reports_invalid_approval_record_explicitly() -> None:
+    service = GovernorService()
+    last_snapshot = StrategyConfigSnapshot(
+        version_id="snap-last",
+        generated_at=datetime.now(UTC),
+        effective_from=datetime.now(UTC),
+        expires_at=datetime.now(UTC) + timedelta(minutes=5),
+        symbol_whitelist=["BTC-USDT-SWAP"],
+        strategy_enable_flags={"breakout": True, "mean_reversion": False, "risk_pause": True},
+        risk_multiplier=0.5,
+        per_symbol_max_position=0.12,
+        max_leverage=3,
+        market_mode=RunMode.NORMAL,
+        approval_state=ApprovalState.APPROVED,
+        source_reason="cached",
+        ttl_sec=300,
+    )
+
+    result = await service.run_cycle(
+        state_summary={
+            "scope": "governor",
+            "approval_required": True,
+            "approval_record": {
+                "approval_record_id": "apr-invalid",
+                "strategy_package_id": "pkg-1",
+                "backtest_report_id": "bt-1",
+                "decision": "approved",
+            },
+        },
+        last_snapshot=last_snapshot,
+        governor_client=_GovernorClientReturning(last_snapshot),
+        publish_snapshot=lambda snapshot: None,
+        trigger_reason="schedule",
+    )
+
+    assert result.status == "approval_invalid"
+    assert result.error is not None
+    assert "invalid approval record" in result.error
+    assert result.snapshot.version_id == "snap-last"
+
+
+@pytest.mark.asyncio
+async def test_governor_service_blocks_validation_failed_before_publication() -> None:
+    service = GovernorService()
+    published: list[str] = []
+    last_snapshot = StrategyConfigSnapshot(
+        version_id="snap-last",
+        generated_at=datetime.now(UTC),
+        effective_from=datetime.now(UTC),
+        expires_at=datetime.now(UTC) + timedelta(minutes=5),
+        symbol_whitelist=["BTC-USDT-SWAP"],
+        strategy_enable_flags={"breakout": True, "mean_reversion": False, "risk_pause": True},
+        risk_multiplier=0.5,
+        per_symbol_max_position=0.12,
+        max_leverage=3,
+        market_mode=RunMode.NORMAL,
+        approval_state=ApprovalState.APPROVED,
+        source_reason="cached",
+        ttl_sec=300,
+    )
+
+    result = await service.run_cycle(
+        state_summary={
+            "scope": "governor",
+            "approval_required": True,
+            "validation_status": "failed",
+            "validation_error": "historical_rows timestamps must be unique",
+        },
+        last_snapshot=last_snapshot,
+        governor_client=_GovernorClientReturning(last_snapshot),
+        publish_snapshot=lambda snapshot: published.append(snapshot.version_id),
+        trigger_reason="schedule",
+    )
+
+    assert published == []
+    assert result.status == "validation_failed"
+    assert result.error == "historical_rows timestamps must be unique"
+    assert result.snapshot.version_id == "snap-last"

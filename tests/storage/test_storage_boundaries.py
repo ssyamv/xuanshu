@@ -240,6 +240,42 @@ def test_postgres_runtime_store_appends_strategy_package_backtest_and_approval_r
     assert store.list_recent_rows("approval_records", limit=1)[0]["approval_record_id"] == "apr-1"
 
 
+def test_postgres_runtime_store_supports_keyed_lookup_helpers_without_recent_row_limits() -> None:
+    store = PostgresRuntimeStore(dsn="postgresql://xuanshu:xuanshu@localhost:5432/xuanshu")
+
+    store.append_strategy_package({"strategy_package_id": "pkg-old", "symbol_scope": ["BTC-USDT-SWAP"]})
+    store.append_backtest_report({"backtest_report_id": "bt-old", "strategy_package_id": "pkg-old"})
+    store.append_approval_record(
+        {
+            "approval_record_id": "apr-old",
+            "strategy_package_id": "pkg-old",
+            "backtest_report_id": "bt-old",
+            "decision": "approved",
+        }
+    )
+    for index in range(25):
+        store.append_approval_record(
+            {
+                "approval_record_id": f"apr-new-{index}",
+                "strategy_package_id": f"pkg-{index}",
+                "backtest_report_id": f"bt-{index}",
+                "decision": "rejected",
+            }
+        )
+
+    assert store.has_strategy_package(strategy_package_id="pkg-old") is True
+    assert store.has_backtest_report(backtest_report_id="bt-old") is True
+    assert store.find_approval_record(
+        strategy_package_id="pkg-old",
+        backtest_report_id="bt-old",
+    ) == {
+        "approval_record_id": "apr-old",
+        "strategy_package_id": "pkg-old",
+        "backtest_report_id": "bt-old",
+        "decision": "approved",
+    }
+
+
 def test_postgres_store_can_append_and_list_notification_events() -> None:
     store = PostgresRuntimeStore(dsn="postgresql://xuanshu:xuanshu@localhost:5432/xuanshu")
     store.append_notification_event(

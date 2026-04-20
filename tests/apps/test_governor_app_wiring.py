@@ -5,6 +5,7 @@ import pytest
 from pydantic import ValidationError
 
 import xuanshu.apps.governor as governor_app
+from xuanshu.contracts.approval import ApprovalDecision
 from xuanshu.contracts.research import ResearchTrigger, StrategyPackage
 from xuanshu.core.enums import ApprovalState, RunMode
 from xuanshu.governor.research import StrategyResearchEngine
@@ -423,6 +424,10 @@ def test_governor_cycle_can_publish_snapshot_from_approved_research(monkeypatch)
         invalidating_conditions=["liquidity_collapse"],
         research_reason="manual research run",
     )
+    historical_rows = [
+        {"timestamp": datetime(2026, 4, 19, 0, 0, tzinfo=UTC), "close": 100.0},
+        {"timestamp": datetime(2026, 4, 19, 0, 5, tzinfo=UTC), "close": 103.0},
+    ]
 
     class _Runner:
         async def run(self, state_summary):
@@ -448,19 +453,41 @@ def test_governor_cycle_can_publish_snapshot_from_approved_research(monkeypatch)
     async def _noop_wait_forever() -> None:
         return None
 
-    async def _approved_research_candidates(*_args, **_kwargs):
-        return [research_package]
-
     monkeypatch.setattr(governor_app, "_wait_forever", _noop_wait_forever)
-    monkeypatch.setattr(governor_app, "_build_research_candidates", _approved_research_candidates)
+    async def _approved_research_result(*_args, **_kwargs):
+        return governor_app.ResearchCandidateBuildResult(
+            status="candidate_built",
+            historical_rows=historical_rows,
+            candidates=[research_package],
+        )
+
+    monkeypatch.setattr(governor_app, "_prepare_research_candidates", _approved_research_result)
     monkeypatch.setattr(governor_app, "build_governor_client", lambda settings: GovernorClient(_Runner()))
 
     runtime = governor_app.build_governor_runtime()
+    backtest_report = runtime.backtest_validator.validate(
+        package=research_package,
+        historical_rows=historical_rows,
+    )
+    runtime.history_store.append_approval_record(
+        {
+            "approval_record_id": "apr-legacy-approved",
+            "strategy_package_id": research_package.strategy_package_id,
+            "backtest_report_id": backtest_report.backtest_report_id,
+            "decision": ApprovalDecision.APPROVED.value,
+            "decision_reason": "committee approved package",
+            "guardrails": {},
+            "reviewed_by": "committee",
+            "review_source": "manual",
+            "created_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+        }
+    )
     asyncio.run(governor_app._run_governor_cycle(runtime))
 
     assert captured_state_summary is not None
     assert captured_state_summary["committee_summary"]["research_candidate_count"] == 1
     assert captured_state_summary["committee_summary"]["approved_research_candidates"] == ["pkg-001"]
+    assert captured_state_summary["research_candidates"] == [research_package.model_dump(mode="json")]
     assert runtime.last_snapshot.source_reason == "approved research package"
     assert [snapshot.source_reason for snapshot in runtime.published_snapshots] == [
         "approved research package"
@@ -471,6 +498,8 @@ def test_governor_cycle_does_not_send_unapproved_research_downstream(monkeypatch
     _set_required_settings_env(monkeypatch)
     _clear_unrelated_settings_env(monkeypatch)
     captured_state_summary = None
+    history_store = PostgresRuntimeStore(dsn="postgresql://xuanshu:xuanshu@localhost:5432/xuanshu")
+    fake_redis = _FakeRedis()
 
     research_package = StrategyPackage(
         strategy_package_id="pkg-blocked",
@@ -491,6 +520,10 @@ def test_governor_cycle_does_not_send_unapproved_research_downstream(monkeypatch
         invalidating_conditions=["liquidity_collapse"],
         research_reason="manual research run",
     )
+    historical_rows = [
+        {"timestamp": datetime(2026, 4, 19, 0, 0, tzinfo=UTC), "close": 100.0},
+        {"timestamp": datetime(2026, 4, 19, 0, 5, tzinfo=UTC), "close": 103.0},
+    ]
 
     class _Runner:
         async def run(self, state_summary):
@@ -528,22 +561,548 @@ def test_governor_cycle_does_not_send_unapproved_research_downstream(monkeypatch
     async def _noop_wait_forever() -> None:
         return None
 
-    async def _blocked_research_candidates(*_args, **_kwargs):
-        return [research_package]
-
     monkeypatch.setattr(governor_app, "_wait_forever", _noop_wait_forever)
-    monkeypatch.setattr(governor_app, "_build_research_candidates", _blocked_research_candidates)
+    async def _blocked_research_result(*_args, **_kwargs):
+        return governor_app.ResearchCandidateBuildResult(
+            status="candidate_built",
+            historical_rows=historical_rows,
+            candidates=[research_package],
+        )
+
+    monkeypatch.setattr(governor_app, "_prepare_research_candidates", _blocked_research_result)
     monkeypatch.setattr(governor_app, "build_governor_client", lambda settings: GovernorClient(_Runner()))
+    monkeypatch.setattr(governor_app, "build_history_store", lambda settings: history_store)
+    monkeypatch.setattr(
+        governor_app,
+        "build_runtime_state_store",
+        lambda settings: governor_app.RedisRuntimeStateStore(redis_client=fake_redis),
+    )
     monkeypatch.setattr(governor_app.GovernorService, "build_committee_summary", _blocked_committee_summary)
 
     runtime = governor_app.build_governor_runtime()
     asyncio.run(governor_app._run_governor_cycle(runtime))
 
-    assert captured_state_summary is not None
-    assert captured_state_summary["committee_summary"]["research_candidate_count"] == 1
-    assert captured_state_summary["committee_summary"]["approved_research_candidates"] == []
-    assert "research_candidates" not in captured_state_summary
-    assert runtime.last_snapshot.source_reason == "cycle|guardrailed"
+    assert captured_state_summary is None
+    assert runtime.last_snapshot.version_id == "bootstrap"
+    assert runtime.published_snapshots == []
+    assert runtime.runtime_store.get_pending_approval_summary() == {
+        "pending_count": 1,
+        "latest_strategy_package_id": history_store.written_rows["strategy_packages"][0]["strategy_package_id"],
+        "latest_backtest_report_id": history_store.written_rows["backtest_reports"][0]["backtest_report_id"],
+        "approval_status": "pending",
+    }
+    assert history_store.written_rows["governor_runs"][-1]["status"] == "approval_pending"
+
+
+def test_governor_cycle_records_pending_approval_after_validation_and_skips_publication(monkeypatch) -> None:
+    _set_required_settings_env(monkeypatch)
+    _clear_unrelated_settings_env(monkeypatch)
+    history_store = PostgresRuntimeStore(dsn="postgresql://xuanshu:xuanshu@localhost:5432/xuanshu")
+    fake_redis = _FakeRedis()
+
+    class _Runner:
+        async def run(self, state_summary):
+            now = datetime.now(UTC)
+            return {
+                "version_id": "snap-pending-approval",
+                "generated_at": now.isoformat().replace("+00:00", "Z"),
+                "effective_from": now.isoformat().replace("+00:00", "Z"),
+                "expires_at": (now + timedelta(minutes=5)).isoformat().replace("+00:00", "Z"),
+                "symbol_whitelist": ["BTC-USDT-SWAP"],
+                "strategy_enable_flags": {"breakout": True, "mean_reversion": False, "risk_pause": True},
+                "risk_multiplier": 0.5,
+                "per_symbol_max_position": 0.12,
+                "max_leverage": 3,
+                "market_mode": RunMode.NORMAL,
+                "approval_state": ApprovalState.APPROVED,
+                "source_reason": "cycle",
+                "ttl_sec": 300,
+            }
+
+    class _Provider:
+        provider_name = ResearchProviderName.API
+
+        async def generate_analysis(self, *, symbol_scope, market_environment, historical_rows, research_reason):
+            return research_providers_module.ResearchProviderSuggestion(
+                thesis="trend remains constructive",
+                strategy_family="breakout",
+                entry_signal="breakout_confirmed",
+                exit_stop_loss_bps=50,
+                exit_take_profit_bps=120,
+                risk_fraction=0.0025,
+                max_hold_minutes=60,
+                failure_modes=[],
+                invalidating_conditions=[],
+            )
+
+    monkeypatch.setattr(governor_app, "build_governor_client", lambda settings: GovernorClient(_Runner()))
+    monkeypatch.setattr(governor_app, "build_history_store", lambda settings: history_store)
+    monkeypatch.setattr(
+        governor_app,
+        "build_runtime_state_store",
+        lambda settings: governor_app.RedisRuntimeStateStore(redis_client=fake_redis),
+    )
+    monkeypatch.setattr(
+        governor_app,
+        "build_research_engine",
+        lambda settings: StrategyResearchEngine(provider=_Provider()),
+    )
+
+    runtime = governor_app.build_governor_runtime()
+    runtime.runtime_store.set_symbol_runtime_summary(
+        "BTC-USDT-SWAP",
+        {"symbol": "BTC-USDT-SWAP", "mid_price": 100.0, "net_quantity": 0.0},
+    )
+    runtime.history_store.append_order_fact(
+        {"symbol": "BTC-USDT-SWAP", "generated_at": "2026-04-19T00:00:00Z", "price": 100.0}
+    )
+    runtime.history_store.append_fill_fact(
+        {"symbol": "BTC-USDT-SWAP", "generated_at": "2026-04-19T00:05:00Z", "price": 101.0}
+    )
+    runtime.history_store.append_position_fact(
+        {"symbol": "BTC-USDT-SWAP", "generated_at": "2026-04-19T00:10:00Z", "mark_price": 103.0}
+    )
+
+    asyncio.run(governor_app._run_governor_cycle(runtime))
+
+    assert runtime.published_snapshots == []
+    assert runtime.last_snapshot.version_id == "bootstrap"
+    assert len(history_store.written_rows["strategy_packages"]) == 1
+    assert len(history_store.written_rows["backtest_reports"]) == 1
+    assert history_store.written_rows["strategy_snapshots"] == []
+    assert runtime.runtime_store.get_pending_approval_summary() == {
+        "pending_count": 1,
+        "latest_strategy_package_id": history_store.written_rows["strategy_packages"][0]["strategy_package_id"],
+        "latest_backtest_report_id": history_store.written_rows["backtest_reports"][0]["backtest_report_id"],
+        "approval_status": "pending",
+    }
+    assert history_store.written_rows["governor_runs"] == [
+        {
+            "version_id": "bootstrap",
+            "status": "approval_pending",
+            "error": None,
+            "research_provider": "api",
+            "research_status": "candidate_built",
+            "research_provider_success": True,
+            "research_error": None,
+            "research_candidate_count": 1,
+            "approved_research_candidate_ids": [],
+            "validation_status": "succeeded",
+            "validation_error": None,
+            "approval_status": "pending",
+            "approval_error": None,
+            "backtest_report_id": history_store.written_rows["backtest_reports"][0]["backtest_report_id"],
+            "approval_record_id": None,
+        }
+    ]
+
+
+def test_governor_cycle_publishes_approved_research_with_durable_approval_record(monkeypatch) -> None:
+    _set_required_settings_env(monkeypatch)
+    _clear_unrelated_settings_env(monkeypatch)
+    history_store = PostgresRuntimeStore(dsn="postgresql://xuanshu:xuanshu@localhost:5432/xuanshu")
+    fake_redis = _FakeRedis()
+
+    class _Runner:
+        async def run(self, state_summary):
+            now = datetime.now(UTC)
+            return {
+                "version_id": "snap-approved-research",
+                "generated_at": now.isoformat().replace("+00:00", "Z"),
+                "effective_from": now.isoformat().replace("+00:00", "Z"),
+                "expires_at": (now + timedelta(minutes=5)).isoformat().replace("+00:00", "Z"),
+                "symbol_whitelist": ["BTC-USDT-SWAP", "ETH-USDT-SWAP"],
+                "strategy_enable_flags": {"breakout": True, "mean_reversion": False, "risk_pause": True},
+                "risk_multiplier": 0.45,
+                "per_symbol_max_position": 0.12,
+                "max_leverage": 3,
+                "market_mode": RunMode.NORMAL,
+                "approval_state": ApprovalState.APPROVED,
+                "source_reason": "cycle",
+                "ttl_sec": 300,
+            }
+
+    class _Provider:
+        provider_name = ResearchProviderName.API
+
+        async def generate_analysis(self, *, symbol_scope, market_environment, historical_rows, research_reason):
+            return research_providers_module.ResearchProviderSuggestion(
+                thesis="trend remains constructive",
+                strategy_family="breakout",
+                entry_signal="breakout_confirmed",
+                exit_stop_loss_bps=50,
+                exit_take_profit_bps=120,
+                risk_fraction=0.0025,
+                max_hold_minutes=60,
+                failure_modes=[],
+                invalidating_conditions=[],
+            )
+
+    monkeypatch.setattr(governor_app, "build_governor_client", lambda settings: GovernorClient(_Runner()))
+    monkeypatch.setattr(governor_app, "build_history_store", lambda settings: history_store)
+    monkeypatch.setattr(
+        governor_app,
+        "build_runtime_state_store",
+        lambda settings: governor_app.RedisRuntimeStateStore(redis_client=fake_redis),
+    )
+    monkeypatch.setattr(
+        governor_app,
+        "build_research_engine",
+        lambda settings: StrategyResearchEngine(provider=_Provider()),
+    )
+
+    runtime = governor_app.build_governor_runtime()
+    runtime.runtime_store.set_symbol_runtime_summary(
+        "BTC-USDT-SWAP",
+        {"symbol": "BTC-USDT-SWAP", "mid_price": 100.0, "net_quantity": 0.0},
+    )
+    runtime.history_store.append_order_fact(
+        {"symbol": "BTC-USDT-SWAP", "generated_at": "2026-04-19T00:00:00Z", "price": 100.0}
+    )
+    runtime.history_store.append_fill_fact(
+        {"symbol": "BTC-USDT-SWAP", "generated_at": "2026-04-19T00:05:00Z", "price": 101.0}
+    )
+    runtime.history_store.append_position_fact(
+        {"symbol": "BTC-USDT-SWAP", "generated_at": "2026-04-19T00:10:00Z", "mark_price": 103.0}
+    )
+
+    asyncio.run(governor_app._run_governor_cycle(runtime))
+
+    package_id = history_store.written_rows["strategy_packages"][0]["strategy_package_id"]
+    backtest_report_id = history_store.written_rows["backtest_reports"][0]["backtest_report_id"]
+    runtime.history_store.append_approval_record(
+        {
+            "approval_record_id": "apr-1",
+            "strategy_package_id": package_id,
+            "backtest_report_id": backtest_report_id,
+            "decision": ApprovalDecision.APPROVED_WITH_GUARDRAILS.value,
+            "decision_reason": "restrict to btc in degraded mode",
+            "guardrails": {
+                "market_mode": "degraded",
+                "risk_multiplier": 0.2,
+                "symbol_whitelist": ["BTC-USDT-SWAP"],
+            },
+            "reviewed_by": "committee",
+            "review_source": "manual",
+            "created_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+        }
+    )
+
+    asyncio.run(governor_app._run_governor_cycle(runtime))
+
+    assert runtime.last_snapshot.source_reason == "approved research package"
+    assert runtime.last_snapshot.market_mode == RunMode.DEGRADED
+    assert runtime.last_snapshot.risk_multiplier == 0.2
+    assert runtime.last_snapshot.symbol_whitelist == ["BTC-USDT-SWAP"]
+    assert len(history_store.written_rows["strategy_packages"]) == 1
+    assert len(history_store.written_rows["backtest_reports"]) == 1
+    assert len(runtime.published_snapshots) == 1
+    assert history_store.written_rows["strategy_snapshots"] == [
+        {
+            "version_id": runtime.last_snapshot.version_id,
+            "market_mode": "degraded",
+            "approval_state": "approved",
+            "strategy_package_id": package_id,
+            "backtest_report_id": backtest_report_id,
+            "approval_record_id": "apr-1",
+            "approval_decision": "approved_with_guardrails",
+            "guardrails": {
+                "market_mode": "degraded",
+                "risk_multiplier": 0.2,
+                "symbol_whitelist": ["BTC-USDT-SWAP"],
+            },
+        }
+    ]
+    assert runtime.runtime_store.get_latest_approved_package_summary() == {
+        "latest_strategy_package_id": package_id,
+        "backtest_report_id": backtest_report_id,
+        "approval_record_id": "apr-1",
+        "approved_at": history_store.written_rows["approval_records"][0]["created_at"],
+        "approval_decision": "approved_with_guardrails",
+    }
+    assert history_store.written_rows["governor_runs"][-1] == {
+        "version_id": runtime.last_snapshot.version_id,
+        "status": "published",
+        "error": None,
+        "research_provider": "api",
+        "research_status": "candidate_built",
+        "research_provider_success": True,
+        "research_error": None,
+        "research_candidate_count": 1,
+        "approved_research_candidate_ids": [package_id],
+        "validation_status": "succeeded",
+        "validation_error": None,
+        "approval_status": "approved_with_guardrails",
+        "approval_error": None,
+        "backtest_report_id": backtest_report_id,
+        "approval_record_id": "apr-1",
+    }
+
+
+def test_governor_cycle_reports_invalid_approval_record_instead_of_pending(monkeypatch) -> None:
+    _set_required_settings_env(monkeypatch)
+    _clear_unrelated_settings_env(monkeypatch)
+    history_store = PostgresRuntimeStore(dsn="postgresql://xuanshu:xuanshu@localhost:5432/xuanshu")
+    fake_redis = _FakeRedis()
+
+    class _Runner:
+        async def run(self, state_summary):
+            now = datetime.now(UTC)
+            return {
+                "version_id": "snap-invalid-approval",
+                "generated_at": now.isoformat().replace("+00:00", "Z"),
+                "effective_from": now.isoformat().replace("+00:00", "Z"),
+                "expires_at": (now + timedelta(minutes=5)).isoformat().replace("+00:00", "Z"),
+                "symbol_whitelist": ["BTC-USDT-SWAP"],
+                "strategy_enable_flags": {"breakout": True, "mean_reversion": False, "risk_pause": True},
+                "risk_multiplier": 0.5,
+                "per_symbol_max_position": 0.12,
+                "max_leverage": 3,
+                "market_mode": RunMode.NORMAL,
+                "approval_state": ApprovalState.APPROVED,
+                "source_reason": "cycle",
+                "ttl_sec": 300,
+            }
+
+    class _Provider:
+        provider_name = ResearchProviderName.API
+
+        async def generate_analysis(self, *, symbol_scope, market_environment, historical_rows, research_reason):
+            return research_providers_module.ResearchProviderSuggestion(
+                thesis="trend remains constructive",
+                strategy_family="breakout",
+                entry_signal="breakout_confirmed",
+                exit_stop_loss_bps=50,
+                exit_take_profit_bps=120,
+                risk_fraction=0.0025,
+                max_hold_minutes=60,
+                failure_modes=[],
+                invalidating_conditions=[],
+            )
+
+    monkeypatch.setattr(governor_app, "build_governor_client", lambda settings: GovernorClient(_Runner()))
+    monkeypatch.setattr(governor_app, "build_history_store", lambda settings: history_store)
+    monkeypatch.setattr(
+        governor_app,
+        "build_runtime_state_store",
+        lambda settings: governor_app.RedisRuntimeStateStore(redis_client=fake_redis),
+    )
+    monkeypatch.setattr(
+        governor_app,
+        "build_research_engine",
+        lambda settings: StrategyResearchEngine(provider=_Provider()),
+    )
+
+    runtime = governor_app.build_governor_runtime()
+    runtime.runtime_store.set_symbol_runtime_summary(
+        "BTC-USDT-SWAP",
+        {"symbol": "BTC-USDT-SWAP", "mid_price": 100.0, "net_quantity": 0.0},
+    )
+    runtime.history_store.append_order_fact(
+        {"symbol": "BTC-USDT-SWAP", "generated_at": "2026-04-19T00:00:00Z", "price": 100.0}
+    )
+    runtime.history_store.append_fill_fact(
+        {"symbol": "BTC-USDT-SWAP", "generated_at": "2026-04-19T00:05:00Z", "price": 101.0}
+    )
+    runtime.history_store.append_position_fact(
+        {"symbol": "BTC-USDT-SWAP", "generated_at": "2026-04-19T00:10:00Z", "mark_price": 103.0}
+    )
+
+    asyncio.run(governor_app._run_governor_cycle(runtime))
+
+    package_id = history_store.written_rows["strategy_packages"][0]["strategy_package_id"]
+    backtest_report_id = history_store.written_rows["backtest_reports"][0]["backtest_report_id"]
+    runtime.history_store.append_approval_record(
+        {
+            "approval_record_id": "apr-invalid",
+            "strategy_package_id": package_id,
+            "backtest_report_id": backtest_report_id,
+            "decision": ApprovalDecision.APPROVED.value,
+        }
+    )
+
+    asyncio.run(governor_app._run_governor_cycle(runtime))
+
+    assert runtime.published_snapshots == []
+    assert len(history_store.written_rows["strategy_packages"]) == 1
+    assert len(history_store.written_rows["backtest_reports"]) == 1
+    assert history_store.written_rows["governor_runs"][-1]["status"] == "approval_invalid"
+    assert history_store.written_rows["governor_runs"][-1]["approval_status"] == "invalid"
+    assert "invalid approval record" in history_store.written_rows["governor_runs"][-1]["error"]
+
+
+@pytest.mark.parametrize(
+    ("decision", "expected_status"),
+    [
+        (ApprovalDecision.REJECTED, "approval_rejected"),
+        (ApprovalDecision.NEEDS_REVISION, "approval_needs_revision"),
+    ],
+)
+def test_governor_cycle_blocks_non_publishable_approval_decisions(
+    monkeypatch,
+    decision: ApprovalDecision,
+    expected_status: str,
+) -> None:
+    _set_required_settings_env(monkeypatch)
+    _clear_unrelated_settings_env(monkeypatch)
+    history_store = PostgresRuntimeStore(dsn="postgresql://xuanshu:xuanshu@localhost:5432/xuanshu")
+    fake_redis = _FakeRedis()
+
+    class _Runner:
+        async def run(self, state_summary):
+            now = datetime.now(UTC)
+            return {
+                "version_id": "snap-non-publishable",
+                "generated_at": now.isoformat().replace("+00:00", "Z"),
+                "effective_from": now.isoformat().replace("+00:00", "Z"),
+                "expires_at": (now + timedelta(minutes=5)).isoformat().replace("+00:00", "Z"),
+                "symbol_whitelist": ["BTC-USDT-SWAP"],
+                "strategy_enable_flags": {"breakout": True, "mean_reversion": False, "risk_pause": True},
+                "risk_multiplier": 0.5,
+                "per_symbol_max_position": 0.12,
+                "max_leverage": 3,
+                "market_mode": RunMode.NORMAL,
+                "approval_state": ApprovalState.APPROVED,
+                "source_reason": "cycle",
+                "ttl_sec": 300,
+            }
+
+    class _Provider:
+        provider_name = ResearchProviderName.API
+
+        async def generate_analysis(self, *, symbol_scope, market_environment, historical_rows, research_reason):
+            return research_providers_module.ResearchProviderSuggestion(
+                thesis="trend remains constructive",
+                strategy_family="breakout",
+                entry_signal="breakout_confirmed",
+                exit_stop_loss_bps=50,
+                exit_take_profit_bps=120,
+                risk_fraction=0.0025,
+                max_hold_minutes=60,
+                failure_modes=[],
+                invalidating_conditions=[],
+            )
+
+    monkeypatch.setattr(governor_app, "build_governor_client", lambda settings: GovernorClient(_Runner()))
+    monkeypatch.setattr(governor_app, "build_history_store", lambda settings: history_store)
+    monkeypatch.setattr(
+        governor_app,
+        "build_runtime_state_store",
+        lambda settings: governor_app.RedisRuntimeStateStore(redis_client=fake_redis),
+    )
+    monkeypatch.setattr(
+        governor_app,
+        "build_research_engine",
+        lambda settings: StrategyResearchEngine(provider=_Provider()),
+    )
+
+    runtime = governor_app.build_governor_runtime()
+    runtime.runtime_store.set_symbol_runtime_summary(
+        "BTC-USDT-SWAP",
+        {"symbol": "BTC-USDT-SWAP", "mid_price": 100.0, "net_quantity": 0.0},
+    )
+    runtime.history_store.append_order_fact(
+        {"symbol": "BTC-USDT-SWAP", "generated_at": "2026-04-19T00:00:00Z", "price": 100.0}
+    )
+    runtime.history_store.append_fill_fact(
+        {"symbol": "BTC-USDT-SWAP", "generated_at": "2026-04-19T00:05:00Z", "price": 101.0}
+    )
+    runtime.history_store.append_position_fact(
+        {"symbol": "BTC-USDT-SWAP", "generated_at": "2026-04-19T00:10:00Z", "mark_price": 103.0}
+    )
+
+    asyncio.run(governor_app._run_governor_cycle(runtime))
+
+    package_id = history_store.written_rows["strategy_packages"][0]["strategy_package_id"]
+    backtest_report_id = history_store.written_rows["backtest_reports"][0]["backtest_report_id"]
+    runtime.history_store.append_approval_record(
+        {
+            "approval_record_id": f"apr-{decision.value}",
+            "strategy_package_id": package_id,
+            "backtest_report_id": backtest_report_id,
+            "decision": decision.value,
+            "decision_reason": f"{decision.value} by committee",
+            "guardrails": {},
+            "reviewed_by": "committee",
+            "review_source": "manual",
+            "created_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+        }
+    )
+
+    asyncio.run(governor_app._run_governor_cycle(runtime))
+
+    assert runtime.published_snapshots == []
+    assert history_store.written_rows["governor_runs"][-1]["status"] == expected_status
+    assert history_store.written_rows["governor_runs"][-1]["approval_status"] == decision.value
+
+
+def test_governor_cycle_records_validation_failed_status(monkeypatch) -> None:
+    _set_required_settings_env(monkeypatch)
+    _clear_unrelated_settings_env(monkeypatch)
+    history_store = PostgresRuntimeStore(dsn="postgresql://xuanshu:xuanshu@localhost:5432/xuanshu")
+    fake_redis = _FakeRedis()
+
+    class _Runner:
+        async def run(self, state_summary):
+            raise AssertionError("governor client should not run when validation fails")
+
+    class _Provider:
+        provider_name = ResearchProviderName.API
+
+        async def generate_analysis(self, *, symbol_scope, market_environment, historical_rows, research_reason):
+            return research_providers_module.ResearchProviderSuggestion(
+                thesis="trend remains constructive",
+                strategy_family="breakout",
+                entry_signal="breakout_confirmed",
+                exit_stop_loss_bps=50,
+                exit_take_profit_bps=120,
+                risk_fraction=0.0025,
+                max_hold_minutes=60,
+                failure_modes=[],
+                invalidating_conditions=[],
+            )
+
+    class _BrokenValidator:
+        def validate(self, *, package, historical_rows):
+            raise ValueError("historical_rows timestamps must be unique")
+
+    monkeypatch.setattr(governor_app, "build_governor_client", lambda settings: GovernorClient(_Runner()))
+    monkeypatch.setattr(governor_app, "build_history_store", lambda settings: history_store)
+    monkeypatch.setattr(
+        governor_app,
+        "build_runtime_state_store",
+        lambda settings: governor_app.RedisRuntimeStateStore(redis_client=fake_redis),
+    )
+    monkeypatch.setattr(
+        governor_app,
+        "build_research_engine",
+        lambda settings: StrategyResearchEngine(provider=_Provider()),
+    )
+    monkeypatch.setattr(governor_app, "build_backtest_validator", lambda: _BrokenValidator())
+
+    runtime = governor_app.build_governor_runtime()
+    runtime.runtime_store.set_symbol_runtime_summary(
+        "BTC-USDT-SWAP",
+        {"symbol": "BTC-USDT-SWAP", "mid_price": 100.0, "net_quantity": 0.0},
+    )
+    runtime.history_store.append_order_fact(
+        {"symbol": "BTC-USDT-SWAP", "generated_at": "2026-04-19T00:00:00Z", "price": 100.0}
+    )
+    runtime.history_store.append_fill_fact(
+        {"symbol": "BTC-USDT-SWAP", "generated_at": "2026-04-19T00:05:00Z", "price": 101.0}
+    )
+    runtime.history_store.append_position_fact(
+        {"symbol": "BTC-USDT-SWAP", "generated_at": "2026-04-19T00:10:00Z", "mark_price": 103.0}
+    )
+
+    asyncio.run(governor_app._run_governor_cycle(runtime))
+
+    assert runtime.published_snapshots == []
+    assert len(history_store.written_rows["strategy_packages"]) == 1
+    assert history_store.written_rows["backtest_reports"] == []
+    assert history_store.written_rows["governor_runs"][-1]["status"] == "validation_failed"
+    assert history_store.written_rows["governor_runs"][-1]["validation_status"] == "failed"
+    assert history_store.written_rows["governor_runs"][-1]["approval_status"] == "validation_failed"
 
 
 def test_governor_runtime_records_snapshot_publication_for_notifier(monkeypatch) -> None:
@@ -595,11 +1154,17 @@ def test_governor_runtime_records_snapshot_publication_for_notifier(monkeypatch)
             "status": "published",
             "error": None,
             "research_provider": "api",
-            "research_status": "skipped",
+            "research_status": "missing_symbol_summaries",
             "research_provider_success": None,
             "research_error": None,
             "research_candidate_count": 0,
             "approved_research_candidate_ids": [],
+            "validation_status": "not_requested",
+            "validation_error": None,
+            "approval_status": "not_requested",
+            "approval_error": None,
+            "backtest_report_id": None,
+            "approval_record_id": None,
         }
     ]
     assert [row["expert_type"] for row in history_store.written_rows["expert_opinions"]] == [
@@ -666,11 +1231,17 @@ def test_governor_runtime_skips_duplicate_schedule_publication_when_snapshot_is_
             "status": "unchanged",
             "error": None,
             "research_provider": "api",
-            "research_status": "skipped",
+            "research_status": "missing_symbol_summaries",
             "research_provider_success": None,
             "research_error": None,
             "research_candidate_count": 0,
             "approved_research_candidate_ids": [],
+            "validation_status": "not_requested",
+            "validation_error": None,
+            "approval_status": "not_requested",
+            "approval_error": None,
+            "backtest_report_id": None,
+            "approval_record_id": None,
         }
     ]
 
@@ -833,7 +1404,7 @@ def test_governor_runtime_logs_cycle_completion(monkeypatch) -> None:
                 "error": None,
                 "snapshot_version": runtime.last_snapshot.version_id,
                 "market_mode": "normal",
-                "research_status": "skipped",
+                "research_status": "missing_symbol_summaries",
                 "research_candidate_count": 0,
                 "approved_research_candidate_count": 0,
                 "consecutive_failures": 0,
@@ -1023,22 +1594,34 @@ def test_governor_cycle_freezes_snapshot_and_tracks_consecutive_failures(monkeyp
             "status": "frozen",
             "error": "llm timeout",
             "research_provider": "api",
-            "research_status": "skipped",
+            "research_status": "missing_symbol_summaries",
             "research_provider_success": None,
             "research_error": None,
             "research_candidate_count": 0,
             "approved_research_candidate_ids": [],
+            "validation_status": "not_requested",
+            "validation_error": None,
+            "approval_status": "not_requested",
+            "approval_error": None,
+            "backtest_report_id": None,
+            "approval_record_id": None,
         },
         {
             "version_id": "bootstrap",
             "status": "frozen",
             "error": "llm timeout",
             "research_provider": "api",
-            "research_status": "skipped",
+            "research_status": "missing_symbol_summaries",
             "research_provider_success": None,
             "research_error": None,
             "research_candidate_count": 0,
             "approved_research_candidate_ids": [],
+            "validation_status": "not_requested",
+            "validation_error": None,
+            "approval_status": "not_requested",
+            "approval_error": None,
+            "backtest_report_id": None,
+            "approval_record_id": None,
         },
     ]
 
@@ -1047,6 +1630,7 @@ def test_governor_cycle_contains_research_provider_failure_to_research_branch(mo
     _set_required_settings_env(monkeypatch)
     _clear_unrelated_settings_env(monkeypatch)
     history_store = PostgresRuntimeStore(dsn="postgresql://xuanshu:xuanshu@localhost:5432/xuanshu")
+    fake_redis = _FakeRedis()
 
     class _Runner:
         async def run(self, state_summary):
@@ -1069,11 +1653,16 @@ def test_governor_cycle_contains_research_provider_failure_to_research_branch(mo
 
     monkeypatch.setattr(governor_app, "build_governor_client", lambda settings: GovernorClient(_Runner()))
     monkeypatch.setattr(governor_app, "build_history_store", lambda settings: history_store)
+    monkeypatch.setattr(
+        governor_app,
+        "build_runtime_state_store",
+        lambda settings: governor_app.RedisRuntimeStateStore(redis_client=fake_redis),
+    )
 
     async def _failing_research_candidates(*_args, **_kwargs):
         raise RuntimeError("codex login required")
 
-    monkeypatch.setattr(governor_app, "_build_research_candidates", _failing_research_candidates)
+    monkeypatch.setattr(governor_app, "_prepare_research_candidates", _failing_research_candidates)
     monkeypatch.setattr(
         governor_app,
         "build_research_engine",
@@ -1108,6 +1697,12 @@ def test_governor_cycle_contains_research_provider_failure_to_research_branch(mo
             "research_error": "codex login required",
             "research_candidate_count": 0,
             "approved_research_candidate_ids": [],
+            "validation_status": "not_requested",
+            "validation_error": None,
+            "approval_status": "not_requested",
+            "approval_error": None,
+            "backtest_report_id": None,
+            "approval_record_id": None,
         }
     ]
 

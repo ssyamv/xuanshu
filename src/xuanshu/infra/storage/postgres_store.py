@@ -111,6 +111,32 @@ class PostgresRuntimeStore:
     def append_approval_record(self, payload: dict[str, Any]) -> None:
         self._append_row("approval_records", payload)
 
+    def has_strategy_package(self, *, strategy_package_id: str) -> bool:
+        return self._find_row_by_payload_fields(
+            "strategy_packages",
+            {"strategy_package_id": strategy_package_id},
+        ) is not None
+
+    def has_backtest_report(self, *, backtest_report_id: str) -> bool:
+        return self._find_row_by_payload_fields(
+            "backtest_reports",
+            {"backtest_report_id": backtest_report_id},
+        ) is not None
+
+    def find_approval_record(
+        self,
+        *,
+        strategy_package_id: str,
+        backtest_report_id: str,
+    ) -> dict[str, Any] | None:
+        return self._find_row_by_payload_fields(
+            "approval_records",
+            {
+                "strategy_package_id": strategy_package_id,
+                "backtest_report_id": backtest_report_id,
+            },
+        )
+
     def list_recent_rows(self, table: str, limit: int = 10) -> list[dict[str, Any]]:
         if table not in self.written_rows:
             raise ValueError(f"unknown table: {table}")
@@ -131,14 +157,38 @@ class PostgresRuntimeStore:
             else:
                 hydrated_rows: list[dict[str, Any]] = []
                 for row in rows:
-                    payload = deepcopy(row.payload)
-                    if not isinstance(payload, dict):
-                        continue
-                    if "created_at" not in payload:
-                        payload["created_at"] = self._json_default(row.created_at)
-                    hydrated_rows.append(payload)
+                    payload = self._hydrate_row_payload(row.payload, row.created_at)
+                    if payload is not None:
+                        hydrated_rows.append(payload)
                 return hydrated_rows
         return deepcopy(self.written_rows[table][-limit:][::-1])
+
+    def _find_row_by_payload_fields(
+        self,
+        table: str,
+        criteria: dict[str, str],
+    ) -> dict[str, Any] | None:
+        if table not in self.written_rows:
+            raise ValueError(f"unknown table: {table}")
+        if self._ensure_database():
+            assert self._engine is not None
+            payload_column = self._tables[table].c.payload
+            query = select(self._tables[table].c.payload, self._tables[table].c.created_at)
+            for key, value in criteria.items():
+                query = query.where(payload_column[key].as_string() == value)
+            query = query.order_by(self._tables[table].c.id.desc()).limit(1)
+            try:
+                with self._engine.begin() as connection:
+                    row = connection.execute(query).first()
+            except SQLAlchemyError:
+                self._disable_database()
+            else:
+                if row is not None:
+                    return self._hydrate_row_payload(row.payload, row.created_at)
+        for row in reversed(self.written_rows[table]):
+            if all(row.get(key) == value for key, value in criteria.items()):
+                return deepcopy(row)
+        return None
 
     def _ensure_database(self) -> bool:
         if self._database_disabled:
@@ -180,6 +230,14 @@ class PostgresRuntimeStore:
 
     def _normalize_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
         return json.loads(json.dumps(payload, default=self._json_default))
+
+    def _hydrate_row_payload(self, payload: Any, created_at: Any) -> dict[str, Any] | None:
+        row = deepcopy(payload)
+        if not isinstance(row, dict):
+            return None
+        if "created_at" not in row:
+            row["created_at"] = self._json_default(created_at)
+        return row
 
     @staticmethod
     def _json_default(value: object) -> object:
