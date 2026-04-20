@@ -79,6 +79,29 @@ class PostgresRuntimeStore:
     def append_notification_event(self, payload: dict[str, Any]) -> None:
         self._append_row("notification_events", payload)
 
+    def has_notification_event(self, *, dedupe_key: str, status: str | None = None) -> bool:
+        if self._ensure_database():
+            assert self._engine is not None
+            payload_column = self._tables["notification_events"].c.payload
+            query = select(self._tables["notification_events"].c.id).where(
+                payload_column["dedupe_key"].as_string() == dedupe_key
+            )
+            if status is not None:
+                query = query.where(payload_column["status"].as_string() == status)
+            query = query.limit(1)
+            try:
+                with self._engine.begin() as connection:
+                    return connection.execute(query).first() is not None
+            except SQLAlchemyError:
+                self._disable_database()
+        for row in reversed(self.written_rows["notification_events"]):
+            if row.get("dedupe_key") != dedupe_key:
+                continue
+            if status is not None and row.get("status") != status:
+                continue
+            return True
+        return False
+
     def append_strategy_package(self, payload: dict[str, Any]) -> None:
         self._append_row("strategy_packages", payload)
 

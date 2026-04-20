@@ -387,6 +387,64 @@ async def test_notifier_service_emits_proactive_notifications_from_history_rows(
 
 
 @pytest.mark.asyncio
+async def test_notifier_service_skips_already_sent_governor_publication_even_when_old_delivery_falls_out_of_recent_window() -> None:
+    history = PostgresRuntimeStore(dsn="postgresql://xuanshu:xuanshu@localhost:5432/xuanshu")
+    history.append_strategy_snapshot(
+        {
+            "version_id": "snap-002",
+            "market_mode": "degraded",
+            "approval_state": "approved",
+        }
+    )
+    history.append_governor_run(
+        {
+            "version_id": "snap-002",
+            "status": "published",
+        }
+    )
+    history.append_notification_event(
+        {
+            "category": "snapshot_published",
+            "dedupe_key": "governor_run:snap-002:published",
+            "severity": "INFO",
+            "status": "sent",
+            "attempt_count": 1,
+            "needs_retry": False,
+            "text": "治理快照已发布：snap-002（模式=degraded，审批=approved）",
+        }
+    )
+    for index in range(130):
+        history.append_notification_event(
+            {
+                "category": "noise",
+                "dedupe_key": f"noise:{index}",
+                "severity": "INFO",
+                "status": "sent",
+                "attempt_count": 1,
+                "needs_retry": False,
+                "text": f"noise-{index}",
+            }
+        )
+    service = NotifierService(
+        okx_symbols=("BTC-USDT-SWAP",),
+        runtime_store=_RuntimeStore(),
+        snapshot_store=_SnapshotStore(),
+        history_store=history,
+    )
+
+    delivered: list[str] = []
+
+    class _Adapter:
+        async def send_text(self, payload: TextMessagePayload) -> None:
+            delivered.append(payload.text)
+
+    flushed = await service.flush_proactive_notifications(adapter=_Adapter())
+
+    assert flushed == 0
+    assert delivered == []
+
+
+@pytest.mark.asyncio
 async def test_notifier_service_emits_chinese_trade_notifications_for_submit_cancel_open_and_close() -> None:
     history = PostgresRuntimeStore(dsn="postgresql://xuanshu:xuanshu@localhost:5432/xuanshu")
     history.append_order_fact(

@@ -300,8 +300,8 @@ def test_governor_runtime_runs_one_cycle_and_publishes_snapshot(monkeypatch) -> 
         "risk",
         "event_filter",
     ]
-    assert runtime.last_snapshot.version_id == "snap-new"
-    assert [snapshot.version_id for snapshot in runtime.published_snapshots] == ["snap-new"]
+    assert runtime.last_snapshot.version_id.startswith("cycle-")
+    assert [snapshot.version_id for snapshot in runtime.published_snapshots] == [runtime.last_snapshot.version_id]
 
 
 def test_governor_runtime_observes_configured_symbol_scope_instead_of_stale_snapshot_whitelist(monkeypatch) -> None:
@@ -396,7 +396,7 @@ def test_governor_runtime_publishes_snapshot_to_shared_redis_store(monkeypatch) 
 
     stored = runtime.snapshot_store.get_latest_snapshot()
     assert stored is not None
-    assert stored.version_id == "snap-shared"
+    assert stored.version_id.startswith("cycle-")
 
 
 def test_governor_cycle_can_publish_snapshot_from_approved_research(monkeypatch) -> None:
@@ -580,16 +580,18 @@ def test_governor_runtime_records_snapshot_publication_for_notifier(monkeypatch)
     runtime = governor_app.build_governor_runtime()
     asyncio.run(governor_app._run_governor_cycle(runtime))
 
+    snapshot_version = history_store.written_rows["strategy_snapshots"][0]["version_id"]
+    assert snapshot_version.startswith("cycle-")
     assert history_store.written_rows["strategy_snapshots"] == [
         {
-            "version_id": "snap-audit",
+            "version_id": snapshot_version,
             "market_mode": "degraded",
             "approval_state": "approved",
         }
     ]
     assert history_store.written_rows["governor_runs"] == [
         {
-            "version_id": "snap-audit",
+            "version_id": snapshot_version,
             "status": "published",
             "error": None,
             "research_provider": "api",
@@ -604,6 +606,72 @@ def test_governor_runtime_records_snapshot_publication_for_notifier(monkeypatch)
         "market_structure",
         "risk",
         "event_filter",
+    ]
+
+
+def test_governor_runtime_skips_duplicate_schedule_publication_when_snapshot_is_semantically_unchanged(monkeypatch) -> None:
+    _set_required_settings_env(monkeypatch)
+    _clear_unrelated_settings_env(monkeypatch)
+    history_store = PostgresRuntimeStore(dsn="postgresql://xuanshu:xuanshu@localhost:5432/xuanshu")
+    now = datetime.now(UTC)
+
+    class _Runner:
+        async def run(self, state_summary):
+            generated_at = datetime.now(UTC)
+            return {
+                "version_id": "model-generated-id",
+                "generated_at": generated_at.isoformat().replace("+00:00", "Z"),
+                "effective_from": generated_at.isoformat().replace("+00:00", "Z"),
+                "expires_at": (generated_at + timedelta(minutes=5)).isoformat().replace("+00:00", "Z"),
+                "symbol_whitelist": ["BTC-USDT-SWAP"],
+                "strategy_enable_flags": {"breakout": True, "mean_reversion": False, "risk_pause": True},
+                "risk_multiplier": 0.5,
+                "per_symbol_max_position": 0.12,
+                "max_leverage": 3,
+                "market_mode": RunMode.NORMAL,
+                "approval_state": ApprovalState.APPROVED,
+                "source_reason": "cycle",
+                "ttl_sec": 300,
+            }
+
+    monkeypatch.setattr(governor_app, "build_governor_client", lambda settings: GovernorClient(_Runner()))
+    monkeypatch.setattr(governor_app, "build_history_store", lambda settings: history_store)
+
+    runtime = governor_app.build_governor_runtime()
+    runtime.last_snapshot = runtime.last_snapshot.model_copy(
+        update={
+            "version_id": "existing-snapshot",
+            "generated_at": now - timedelta(seconds=15),
+            "effective_from": now - timedelta(seconds=15),
+            "expires_at": now + timedelta(minutes=3),
+            "symbol_whitelist": ["BTC-USDT-SWAP"],
+            "strategy_enable_flags": {"breakout": True, "mean_reversion": False, "risk_pause": True},
+            "risk_multiplier": 0.5,
+            "per_symbol_max_position": 0.12,
+            "max_leverage": 3,
+            "market_mode": RunMode.NORMAL,
+            "approval_state": ApprovalState.APPROVED,
+            "source_reason": "cycle|guardrailed",
+            "ttl_sec": 300,
+        }
+    )
+
+    asyncio.run(governor_app._run_governor_cycle(runtime))
+
+    assert runtime.last_snapshot.version_id == "existing-snapshot"
+    assert history_store.written_rows["strategy_snapshots"] == []
+    assert history_store.written_rows["governor_runs"] == [
+        {
+            "version_id": "existing-snapshot",
+            "status": "unchanged",
+            "error": None,
+            "research_provider": "api",
+            "research_status": "skipped",
+            "research_provider_success": None,
+            "research_error": None,
+            "research_candidate_count": 0,
+            "approved_research_candidate_ids": [],
+        }
     ]
 
 
@@ -711,7 +779,7 @@ def test_governor_runtime_publishes_health_summary_and_trigger_reason(monkeypatc
     assert runtime.runtime_store.get_governor_health_summary() == {
         "status": "published",
         "trigger": "risk_event",
-        "snapshot_version": "snap-health",
+        "snapshot_version": runtime.last_snapshot.version_id,
         "market_mode": "degraded",
         "approval_state": "approved",
         "risk_multiplier": 0.25,
@@ -763,7 +831,7 @@ def test_governor_runtime_logs_cycle_completion(monkeypatch) -> None:
                 "trigger_reason": "schedule",
                 "status": "published",
                 "error": None,
-                "snapshot_version": "snap-log",
+                "snapshot_version": runtime.last_snapshot.version_id,
                 "market_mode": "normal",
                 "research_status": "skipped",
                 "research_candidate_count": 0,
@@ -783,16 +851,16 @@ def test_governor_loop_runs_multiple_cycles_on_schedule(monkeypatch) -> None:
     class _Runner:
         async def run(self, state_summary):
             seen_state_summaries.append(dict(state_summary))
-            version = f"snap-{len(seen_state_summaries)}"
+            cycle_number = len(seen_state_summaries)
             now = datetime.now(UTC)
             return {
-                "version_id": version,
+                "version_id": f"snap-{cycle_number}",
                 "generated_at": now.isoformat().replace("+00:00", "Z"),
                 "effective_from": now.isoformat().replace("+00:00", "Z"),
                 "expires_at": (now + timedelta(minutes=5)).isoformat().replace("+00:00", "Z"),
                 "symbol_whitelist": ["BTC-USDT-SWAP"],
                 "strategy_enable_flags": {"breakout": True, "mean_reversion": False, "risk_pause": True},
-                "risk_multiplier": 0.5,
+                "risk_multiplier": 0.5 if cycle_number == 1 else 0.4,
                 "per_symbol_max_position": 0.12,
                 "max_leverage": 3,
                 "market_mode": RunMode.NORMAL,
@@ -816,7 +884,9 @@ def test_governor_loop_runs_multiple_cycles_on_schedule(monkeypatch) -> None:
     with pytest.raises(RuntimeError, match="stop loop"):
         asyncio.run(governor_app._run_governor_loop(runtime))
 
-    assert [snapshot.version_id for snapshot in runtime.published_snapshots] == ["snap-1", "snap-2"]
+    assert len(runtime.published_snapshots) == 2
+    assert runtime.published_snapshots[0].version_id.startswith("cycle-")
+    assert runtime.published_snapshots[1].version_id.startswith("cycle-")
     assert waits == [5, 5]
 
 
@@ -868,7 +938,9 @@ def test_governor_loop_short_circuits_wait_on_event_trigger(monkeypatch) -> None
     with pytest.raises(RuntimeError, match="stop loop"):
         asyncio.run(governor_app._run_governor_loop(runtime))
 
-    assert [snapshot.version_id for snapshot in runtime.published_snapshots] == ["snap-schedule", "snap-risk_event"]
+    assert len(runtime.published_snapshots) == 2
+    assert runtime.published_snapshots[0].version_id.startswith("cycle-")
+    assert runtime.published_snapshots[1].version_id.startswith("cycle-")
     assert waits == [30, 0]
 
 
@@ -1024,10 +1096,10 @@ def test_governor_cycle_contains_research_provider_failure_to_research_branch(mo
 
     asyncio.run(governor_app._run_governor_cycle(runtime))
 
-    assert runtime.last_snapshot.version_id == "snap-research-failure-contained"
+    assert runtime.last_snapshot.version_id.startswith("cycle-")
     assert history_store.written_rows["governor_runs"] == [
         {
-            "version_id": "snap-research-failure-contained",
+            "version_id": runtime.last_snapshot.version_id,
             "status": "published",
             "error": None,
             "research_provider": "codex_cli",

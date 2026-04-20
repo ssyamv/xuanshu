@@ -137,6 +137,9 @@ class NotificationHistoryStore(Protocol):
     def list_recent_rows(self, table: str, limit: int = 10) -> list[dict[str, object]]:
         ...
 
+    def has_notification_event(self, *, dedupe_key: str, status: str | None = None) -> bool:
+        ...
+
 
 class NotifierService:
     def __init__(
@@ -195,7 +198,10 @@ class NotifierService:
         sent_notification_keys = self._collect_sent_notification_keys(limit=limit * 5)
         flushed = 0
         for candidate in self._collect_proactive_candidates(limit=limit):
-            if candidate["dedupe_key"] in sent_notification_keys:
+            if self._was_notification_sent(
+                dedupe_key=candidate["dedupe_key"],
+                recent_sent_keys=sent_notification_keys,
+            ):
                 continue
             await self.deliver_text(
                 adapter=adapter,
@@ -429,6 +435,14 @@ class NotifierService:
             if isinstance(dedupe_key, str):
                 sent.add(dedupe_key)
         return sent
+
+    def _was_notification_sent(self, *, dedupe_key: str, recent_sent_keys: set[str]) -> bool:
+        if dedupe_key in recent_sent_keys:
+            return True
+        has_notification_event = getattr(self._history_store, "has_notification_event", None)
+        if callable(has_notification_event):
+            return bool(has_notification_event(dedupe_key=dedupe_key, status="sent"))
+        return False
 
     def _collect_proactive_candidates(self, *, limit: int) -> list[dict[str, str]]:
         candidates: list[dict[str, str]] = []

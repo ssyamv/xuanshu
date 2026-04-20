@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 from collections.abc import Mapping
+from datetime import UTC, datetime
 import json
 import subprocess
 from typing import Protocol
@@ -123,6 +124,7 @@ class GovernorClient:
                 if backfilled_symbols:
                     result = {**result, "symbol_whitelist": backfilled_symbols}
             result = _normalize_snapshot_bounds(result)
+            result["version_id"] = _build_snapshot_version_id(result)
         return StrategyConfigSnapshot.model_validate(result)
 
 
@@ -200,3 +202,30 @@ def _normalize_snapshot_bounds(payload: dict[str, object]) -> dict[str, object]:
     if isinstance(value, int | float) and not isinstance(value, bool):
         normalized["ttl_sec"] = max(1, int(value))
     return normalized
+
+
+def _build_snapshot_version_id(payload: Mapping[str, object]) -> str:
+    source_reason = str(payload.get("source_reason") or "governor").strip().lower()
+    normalized_reason = "".join(
+        character if character.isalnum() else "_"
+        for character in source_reason
+    ).strip("_") or "governor"
+    generated_at = _coerce_datetime(payload.get("generated_at")) or datetime.now(UTC)
+    return f"{normalized_reason}-{generated_at.strftime('%Y%m%dT%H%M%SZ')}"
+
+
+def _coerce_datetime(value: object) -> datetime | None:
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip()
+    if not normalized:
+        return None
+    if normalized.endswith("Z"):
+        normalized = normalized[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(normalized)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        return None
+    return parsed.astimezone(UTC)

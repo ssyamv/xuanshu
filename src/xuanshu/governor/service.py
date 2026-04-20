@@ -557,12 +557,15 @@ class GovernorService:
         last_snapshot: StrategyConfigSnapshot,
         governor_client: GovernorClient,
         publish_snapshot: Callable[[StrategyConfigSnapshot], None],
+        trigger_reason: str,
     ) -> GovernorCycleResult:
         try:
             snapshot = self.apply_guardrails(
                 await governor_client.generate_snapshot(state_summary),
                 state_summary,
             )
+            if trigger_reason == "schedule" and self._snapshots_are_semantically_equal(snapshot, last_snapshot):
+                return GovernorCycleResult(snapshot=last_snapshot, status="unchanged", error=None)
             status = "published"
             error = None
         except Exception as exc:
@@ -572,6 +575,33 @@ class GovernorService:
 
         publish_snapshot(snapshot)
         return GovernorCycleResult(snapshot=snapshot, status=status, error=error)
+
+    def _snapshots_are_semantically_equal(
+        self,
+        candidate: StrategyConfigSnapshot,
+        previous: StrategyConfigSnapshot,
+    ) -> bool:
+        return {
+            "symbol_whitelist": candidate.symbol_whitelist,
+            "strategy_enable_flags": candidate.strategy_enable_flags,
+            "risk_multiplier": candidate.risk_multiplier,
+            "per_symbol_max_position": candidate.per_symbol_max_position,
+            "max_leverage": candidate.max_leverage,
+            "market_mode": candidate.market_mode,
+            "approval_state": candidate.approval_state,
+            "source_reason": candidate.source_reason,
+            "ttl_sec": candidate.ttl_sec,
+        } == {
+            "symbol_whitelist": previous.symbol_whitelist,
+            "strategy_enable_flags": previous.strategy_enable_flags,
+            "risk_multiplier": previous.risk_multiplier,
+            "per_symbol_max_position": previous.per_symbol_max_position,
+            "max_leverage": previous.max_leverage,
+            "market_mode": previous.market_mode,
+            "approval_state": previous.approval_state,
+            "source_reason": previous.source_reason,
+            "ttl_sec": previous.ttl_sec,
+        }
 
     def _extract_symbol_scope(self, state_summary: Mapping[str, object]) -> list[str]:
         symbol_scope: list[str] = []

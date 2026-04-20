@@ -80,6 +80,16 @@ async def test_governor_client_validates_agent_output() -> None:
 
 
 @pytest.mark.asyncio
+async def test_governor_client_overrides_model_supplied_version_id() -> None:
+    client = GovernorClient(agent_runner=_OutOfRangeGovernorRunner())
+
+    snapshot = await client.generate_snapshot({"version_id": "snap-invalid"})
+
+    assert snapshot.version_id != "snap-bounded"
+    assert snapshot.version_id.startswith("governor_ai-20260420T000000Z")
+
+
+@pytest.mark.asyncio
 async def test_governor_client_clamps_out_of_range_numeric_fields() -> None:
     client = GovernorClient(agent_runner=_OutOfRangeGovernorRunner())
 

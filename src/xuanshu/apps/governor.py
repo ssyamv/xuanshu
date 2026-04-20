@@ -337,6 +337,7 @@ async def _run_governor_cycle(runtime: GovernorRuntime) -> None:
         last_snapshot=runtime.last_snapshot,
         governor_client=runtime.governor_client,
         publish_snapshot=_publish_snapshot,
+        trigger_reason=trigger_reason,
     )
     runtime.last_snapshot = published_snapshot or result.snapshot
     runtime.history_store.append_governor_run(
@@ -352,7 +353,7 @@ async def _run_governor_cycle(runtime: GovernorRuntime) -> None:
             "approved_research_candidate_ids": approved_research_candidate_ids,
         }
     )
-    runtime.consecutive_failures = 0 if result.status == "published" else runtime.consecutive_failures + 1
+    runtime.consecutive_failures = 0 if result.status in {"published", "unchanged"} else runtime.consecutive_failures + 1
     runtime.runtime_store.set_governor_health_summary(
         runtime.service.build_health_summary(
             snapshot=runtime.last_snapshot,
