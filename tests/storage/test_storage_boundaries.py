@@ -237,24 +237,48 @@ def test_postgres_store_persists_rows_across_instances_with_real_sqlite_backend(
 
     second = PostgresRuntimeStore(dsn=dsn)
 
-    assert second.list_recent_rows("orders", limit=1) == [
+    order_rows = second.list_recent_rows("orders", limit=1)
+    notification_rows = second.list_recent_rows("notification_events", limit=1)
+
+    assert len(order_rows) == 1
+    assert order_rows[0] == {
+        "symbol": "BTC-USDT-SWAP",
+        "side": "buy",
+        "status": "filled",
+        "client_order_id": "btc-breakout-000001",
+        "created_at": order_rows[0]["created_at"],
+    }
+    assert len(notification_rows) == 1
+    assert notification_rows[0] == {
+        "category": "mode_change",
+        "severity": "CRITICAL",
+        "status": "sent",
+        "attempt_count": 1,
+        "needs_retry": False,
+        "text": "entered reduce_only mode",
+        "created_at": notification_rows[0]["created_at"],
+    }
+
+
+def test_postgres_store_backfills_created_at_when_loading_persisted_rows(tmp_path) -> None:
+    dsn = f"sqlite+pysqlite:///{tmp_path / 'runtime.db'}"
+    first = PostgresRuntimeStore(dsn=dsn)
+    first.append_order_fact(
         {
             "symbol": "BTC-USDT-SWAP",
             "side": "buy",
             "status": "filled",
             "client_order_id": "btc-breakout-000001",
         }
-    ]
-    assert second.list_recent_rows("notification_events", limit=1) == [
-        {
-            "category": "mode_change",
-            "severity": "CRITICAL",
-            "status": "sent",
-            "attempt_count": 1,
-            "needs_retry": False,
-            "text": "entered reduce_only mode",
-        }
-    ]
+    )
+
+    second = PostgresRuntimeStore(dsn=dsn)
+
+    rows = second.list_recent_rows("orders", limit=1)
+
+    assert len(rows) == 1
+    assert rows[0]["symbol"] == "BTC-USDT-SWAP"
+    assert rows[0]["created_at"].endswith("+00:00") or rows[0]["created_at"].endswith("Z")
 
 
 def test_postgres_store_falls_back_to_memory_when_runtime_write_fails(tmp_path) -> None:

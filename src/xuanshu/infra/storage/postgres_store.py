@@ -84,7 +84,7 @@ class PostgresRuntimeStore:
         if self._ensure_database():
             assert self._engine is not None
             query = (
-                select(self._tables[table].c.payload)
+                select(self._tables[table].c.payload, self._tables[table].c.created_at)
                 .order_by(self._tables[table].c.id.desc())
                 .limit(limit)
             )
@@ -94,7 +94,15 @@ class PostgresRuntimeStore:
             except SQLAlchemyError:
                 self._disable_database()
             else:
-                return [deepcopy(row.payload) for row in rows]
+                hydrated_rows: list[dict[str, Any]] = []
+                for row in rows:
+                    payload = deepcopy(row.payload)
+                    if not isinstance(payload, dict):
+                        continue
+                    if "created_at" not in payload:
+                        payload["created_at"] = self._json_default(row.created_at)
+                    hydrated_rows.append(payload)
+                return hydrated_rows
         return deepcopy(self.written_rows[table][-limit:][::-1])
 
     def _ensure_database(self) -> bool:
@@ -141,6 +149,8 @@ class PostgresRuntimeStore:
     @staticmethod
     def _json_default(value: object) -> object:
         if isinstance(value, datetime | date):
+            if isinstance(value, datetime) and (value.tzinfo is None or value.utcoffset() is None):
+                value = value.replace(tzinfo=UTC)
             return value.isoformat()
         if isinstance(value, Enum):
             return value.value
