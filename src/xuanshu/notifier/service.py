@@ -66,6 +66,27 @@ def _format_logic_line(strategy_logic: object) -> str:
     return f"逻辑：{strategy_logic or '未提供'}"
 
 
+def _infer_strategy_id_from_client_order_id(client_order_id: object) -> str | None:
+    normalized = str(client_order_id or "").strip().lower()
+    if "breakout" in normalized:
+        return "breakout"
+    if "meanreversion" in normalized or "mean_reversion" in normalized:
+        return "mean_reversion"
+    if "riskpause" in normalized or "risk_pause" in normalized:
+        return "risk_pause"
+    return None
+
+
+def _default_strategy_logic(strategy_id: object) -> str | None:
+    if strategy_id == "breakout":
+        return "趋势突破，最近成交偏买方，准备顺势开多。"
+    if strategy_id == "mean_reversion":
+        return "均值回归，价格偏离后尝试反向回补。"
+    if strategy_id == "risk_pause":
+        return "风险暂停信号，当前不执行新开仓。"
+    return None
+
+
 NotificationSeverity = Literal["INFO", "WARN", "CRITICAL"]
 
 
@@ -432,15 +453,20 @@ class NotifierService:
             status = str(row.get("status", "")).strip().lower()
             if status not in {"submitted", "canceled", "cancelled"}:
                 continue
+            strategy_id = row.get("strategy_id") or _infer_strategy_id_from_client_order_id(row.get("client_order_id"))
+            strategy_logic = row.get("strategy_logic") or _default_strategy_logic(strategy_id)
+            intent = row.get("intent")
+            if not intent and strategy_id is not None:
+                intent = "open"
             symbol = str(row.get("symbol", "unknown"))
             side = _format_side(row.get("side", "n/a"))
-            intent = _format_intent(row.get("intent", "unknown"))
+            intent_label = _format_intent(intent or "unknown")
             client_order_id = str(row.get("client_order_id", "n/a"))
             order_id = str(row.get("order_id", "n/a"))
             text = (
-                f"{'订单已提交' if status == 'submitted' else '订单已撤销'}：{symbol} {side}{intent}\n"
-                f"{_format_strategy_line(row.get('strategy_id'))}\n"
-                f"{_format_logic_line(row.get('strategy_logic'))}\n"
+                f"{'订单已提交' if status == 'submitted' else '订单已撤销'}：{symbol} {side}{intent_label}\n"
+                f"{_format_strategy_line(strategy_id)}\n"
+                f"{_format_logic_line(strategy_logic)}\n"
                 f"客户端单号：{client_order_id}\n"
                 f"订单号：{order_id}"
             )
@@ -456,6 +482,7 @@ class NotifierService:
 
     def _collect_position_notification_candidates(self, *, limit: int) -> list[dict[str, str]]:
         rows = self._history_store.list_recent_rows("positions", limit=limit)
+        order_context_by_symbol = self._build_recent_order_context_by_symbol(limit=limit * 5)
         candidates: list[dict[str, str]] = []
         previous_by_symbol: dict[str, float] = {}
         for row in reversed(rows):
@@ -471,11 +498,17 @@ class NotifierService:
             elif previous_quantity != 0.0 and net_quantity == 0.0:
                 inferred_intent = "close"
             previous_by_symbol[symbol] = net_quantity
+            strategy_id = row.get("strategy_id")
+            strategy_logic = row.get("strategy_logic")
+            if not strategy_id or not strategy_logic:
+                recent_context = order_context_by_symbol.get(symbol, {})
+                strategy_id = strategy_id or recent_context.get("strategy_id")
+                strategy_logic = strategy_logic or recent_context.get("strategy_logic")
             if inferred_intent == "open":
                 text = (
                     f"已开仓：{symbol} 当前仓位={net_quantity} 均价={row.get('average_price', 'n/a')}\n"
-                    f"{_format_strategy_line(row.get('strategy_id'))}\n"
-                    f"{_format_logic_line(row.get('strategy_logic'))}"
+                    f"{_format_strategy_line(strategy_id)}\n"
+                    f"{_format_logic_line(strategy_logic)}"
                 )
                 candidates.append(
                     {
@@ -488,8 +521,8 @@ class NotifierService:
             elif inferred_intent == "close":
                 text = (
                     f"已平仓：{symbol} 当前仓位={net_quantity} 浮盈亏={row.get('unrealized_pnl', 'n/a')}\n"
-                    f"{_format_strategy_line(row.get('strategy_id'))}\n"
-                    f"{_format_logic_line(row.get('strategy_logic'))}"
+                    f"{_format_strategy_line(strategy_id)}\n"
+                    f"{_format_logic_line(strategy_logic)}"
                 )
                 candidates.append(
                     {
@@ -500,6 +533,23 @@ class NotifierService:
                     }
                 )
         return candidates
+
+    def _build_recent_order_context_by_symbol(self, *, limit: int) -> dict[str, dict[str, str]]:
+        rows = self._history_store.list_recent_rows("orders", limit=limit)
+        contexts: dict[str, dict[str, str]] = {}
+        for row in rows:
+            symbol = row.get("symbol")
+            if not isinstance(symbol, str) or symbol in contexts:
+                continue
+            strategy_id = row.get("strategy_id") or _infer_strategy_id_from_client_order_id(row.get("client_order_id"))
+            strategy_logic = row.get("strategy_logic") or _default_strategy_logic(strategy_id)
+            if strategy_id is None and strategy_logic is None:
+                continue
+            contexts[symbol] = {
+                "strategy_id": str(strategy_id or ""),
+                "strategy_logic": str(strategy_logic or ""),
+            }
+        return contexts
 
     def _collect_checkpoint_candidates(self, *, limit: int) -> list[dict[str, str]]:
         rows = self._history_store.list_recent_rows("execution_checkpoints", limit=limit)

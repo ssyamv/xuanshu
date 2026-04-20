@@ -468,6 +468,87 @@ async def test_notifier_service_emits_chinese_trade_notifications_for_submit_can
 
 
 @pytest.mark.asyncio
+async def test_notifier_service_backfills_order_strategy_logic_and_intent_from_client_order_id() -> None:
+    history = PostgresRuntimeStore(dsn="postgresql://xuanshu:xuanshu@localhost:5432/xuanshu")
+    history.append_order_fact(
+        {
+            "symbol": "ETH-USDT-SWAP",
+            "side": "sell",
+            "status": "submitted",
+            "client_order_id": "ETHUSDTSWAPmeanreversion000002",
+            "order_id": "ord-eth-1",
+        }
+    )
+    service = NotifierService(
+        okx_symbols=("ETH-USDT-SWAP",),
+        runtime_store=_RuntimeStore(),
+        snapshot_store=_SnapshotStore(),
+        history_store=history,
+    )
+
+    delivered: list[str] = []
+
+    class _Adapter:
+        async def send_text(self, payload: TextMessagePayload) -> None:
+            delivered.append(payload.text)
+
+    flushed = await service.flush_proactive_notifications(adapter=_Adapter(), limit=10)
+
+    assert flushed == 1
+    assert delivered == [
+        "订单已提交：ETH-USDT-SWAP 卖出开仓\n策略：mean_reversion\n逻辑：均值回归，价格偏离后尝试反向回补。\n客户端单号：ETHUSDTSWAPmeanreversion000002\n订单号：ord-eth-1",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_notifier_service_backfills_position_strategy_logic_from_recent_order_context() -> None:
+    history = PostgresRuntimeStore(dsn="postgresql://xuanshu:xuanshu@localhost:5432/xuanshu")
+    history.append_order_fact(
+        {
+            "symbol": "BTC-USDT-SWAP",
+            "side": "buy",
+            "status": "submitted",
+            "client_order_id": "BTCUSDTSWAPbreakout004534",
+            "order_id": "ord-btc-1",
+        }
+    )
+    history.append_position_fact(
+        {
+            "symbol": "BTC-USDT-SWAP",
+            "net_quantity": 0.0,
+            "average_price": 0.0,
+            "unrealized_pnl": 0.0,
+        }
+    )
+    history.append_position_fact(
+        {
+            "symbol": "BTC-USDT-SWAP",
+            "net_quantity": 3.5,
+            "average_price": 75215.1,
+            "unrealized_pnl": 0.0,
+        }
+    )
+    service = NotifierService(
+        okx_symbols=("BTC-USDT-SWAP",),
+        runtime_store=_RuntimeStore(),
+        snapshot_store=_SnapshotStore(),
+        history_store=history,
+    )
+
+    delivered: list[str] = []
+
+    class _Adapter:
+        async def send_text(self, payload: TextMessagePayload) -> None:
+            delivered.append(payload.text)
+
+    flushed = await service.flush_proactive_notifications(adapter=_Adapter(), limit=10)
+
+    assert flushed == 2
+    assert delivered[0] == "订单已提交：BTC-USDT-SWAP 买入开仓\n策略：breakout\n逻辑：趋势突破，最近成交偏买方，准备顺势开多。\n客户端单号：BTCUSDTSWAPbreakout004534\n订单号：ord-btc-1"
+    assert delivered[1] == "已开仓：BTC-USDT-SWAP 当前仓位=3.5 均价=75215.1\n策略：breakout\n逻辑：趋势突破，最近成交偏买方，准备顺势开多。"
+
+
+@pytest.mark.asyncio
 async def test_notifier_service_ignores_account_snapshot_updated_risk_events_for_proactive_notifications() -> None:
     history = PostgresRuntimeStore(dsn="postgresql://xuanshu:xuanshu@localhost:5432/xuanshu")
     history.append_risk_event(
