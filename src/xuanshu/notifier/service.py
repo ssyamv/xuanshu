@@ -8,10 +8,10 @@ from xuanshu.infra.notifier.telegram import TextMessagePayload, render_text_mess
 
 
 _MODE_LABELS: dict[RunMode, str] = {
-    RunMode.NORMAL: "normal trading",
-    RunMode.DEGRADED: "degraded trading",
-    RunMode.REDUCE_ONLY: "reduce-only",
-    RunMode.HALTED: "halted",
+    RunMode.NORMAL: "正常运行",
+    RunMode.DEGRADED: "降级运行",
+    RunMode.REDUCE_ONLY: "只减仓",
+    RunMode.HALTED: "停止运行",
 }
 _RUN_MODE_PRIORITY: dict[RunMode, int] = {
     RunMode.NORMAL: 0,
@@ -25,15 +25,45 @@ _RETRY_PRIORITY: dict[NotificationSeverity, int] = {
     "INFO": 2,
 }
 _PROACTIVE_CATEGORY_PRIORITY: dict[str, int] = {
-    "mode_change": 0,
-    "snapshot_published": 1,
-    "recovery_failed": 2,
-    "risk_event": 3,
+    "trade_order_submitted": 0,
+    "trade_order_canceled": 1,
+    "trade_position_opened": 2,
+    "trade_position_closed": 3,
+    "mode_change": 4,
+    "snapshot_published": 5,
+    "recovery_failed": 6,
+    "risk_event": 7,
 }
 
 
 def format_mode_change(mode: RunMode) -> str:
-    return f"Mode changed to {_MODE_LABELS[mode]}"
+    return f"运行模式已切换为{_MODE_LABELS[mode]}"
+
+
+_SIDE_LABELS = {
+    "buy": "买入",
+    "sell": "卖出",
+}
+_INTENT_LABELS = {
+    "open": "开仓",
+    "close": "平仓",
+}
+
+
+def _format_side(side: object) -> str:
+    return _SIDE_LABELS.get(str(side).lower(), str(side))
+
+
+def _format_intent(intent: object) -> str:
+    return _INTENT_LABELS.get(str(intent).lower(), str(intent))
+
+
+def _format_strategy_line(strategy_id: object) -> str:
+    return f"策略：{strategy_id or '未提供'}"
+
+
+def _format_logic_line(strategy_logic: object) -> str:
+    return f"逻辑：{strategy_logic or '未提供'}"
 
 
 NotificationSeverity = Literal["INFO", "WARN", "CRITICAL"]
@@ -120,7 +150,7 @@ class NotifierService:
         if command == "/release":
             return render_text_message(self._handle_release_command(text))
         return render_text_message(
-            "Supported commands: /status /positions /orders /risk /mode /market /takeover /release"
+            "支持的命令：/status /positions /orders /risk /mode /market /takeover /release"
         )
 
     async def flush_pending_notifications(self, *, adapter: object, limit: int = 20) -> int:
@@ -207,10 +237,10 @@ class NotifierService:
     def _handle_takeover_command(self, text: str) -> str:
         parts = text.strip().split(maxsplit=2)
         if len(parts) < 2:
-            return "Usage: /takeover <degraded|reduce_only|halted> [reason]"
+            return "用法：/takeover <degraded|reduce_only|halted> [reason]"
         requested_mode = parts[1].lower()
         if requested_mode not in {"degraded", "reduce_only", "halted"}:
-            return "Usage: /takeover <degraded|reduce_only|halted> [reason]"
+            return "用法：/takeover <degraded|reduce_only|halted> [reason]"
         reason = parts[2].strip() if len(parts) >= 3 and parts[2].strip() else "operator requested"
         target_mode = RunMode(requested_mode)
         current_mode = self._runtime_store.get_run_mode() or RunMode.NORMAL
@@ -231,15 +261,15 @@ class NotifierService:
                 "detail": f"requested {effective_mode.value}: {reason}",
             }
         )
-        return f"Manual takeover requested: {effective_mode.value} (reason={reason})"
+        return f"已请求人工接管：{effective_mode.value}（原因：{reason}）"
 
     def _handle_release_command(self, text: str) -> str:
         parts = text.strip().split(maxsplit=2)
         if len(parts) < 2:
-            return "Usage: /release <degraded> [reason]"
+            return "用法：/release <degraded> [reason]"
         requested_mode = parts[1].lower()
         if requested_mode != "degraded":
-            return "Usage: /release <degraded> [reason]"
+            return "用法：/release <degraded> [reason]"
         reason = parts[2].strip() if len(parts) >= 3 and parts[2].strip() else "operator approved release"
         self._runtime_store.set_manual_release_target(requested_mode)
         self._history_store.append_risk_event(
@@ -249,7 +279,7 @@ class NotifierService:
                 "detail": f"requested {requested_mode}: {reason}",
             }
         )
-        return f"Manual release requested: {requested_mode} (reason={reason})"
+        return f"已请求人工解除：{requested_mode}（原因：{reason}）"
 
     def _render_status(self) -> str:
         mode = self._render_mode()
@@ -257,18 +287,18 @@ class NotifierService:
         snapshot_version = getattr(snapshot, "version_id", "none")
         faults = self._runtime_store.get_fault_flags() or {}
         fault_labels = ", ".join(sorted(faults)) if faults else "none"
-        lines = [mode, f"Snapshot: {snapshot_version}", f"Faults: {fault_labels}"]
+        lines = [mode, f"快照版本：{snapshot_version}", f"故障标记：{fault_labels}"]
         budget = self._runtime_store.get_budget_pool_summary()
         if isinstance(budget, dict):
             lines.append(
-                "Budget: "
+                "预算："
                 f"remaining_notional={budget.get('remaining_notional', 'n/a')} "
                 f"remaining_order_count={budget.get('remaining_order_count', 'n/a')}"
             )
         governor_health = self._runtime_store.get_governor_health_summary()
         if isinstance(governor_health, dict):
             lines.append(
-                "Governor: "
+                "治理状态："
                 f"status={governor_health.get('status', 'unknown')} "
                 f"trigger={governor_health.get('trigger', 'unknown')} "
                 f"health={governor_health.get('health_state', 'unknown')}"
@@ -277,18 +307,18 @@ class NotifierService:
 
     def _render_mode(self) -> str:
         mode = self._runtime_store.get_run_mode()
-        return f"Mode: {mode.value if mode is not None else 'unknown'}"
+        return f"模式：{_MODE_LABELS[mode] if mode is not None else '未知'}"
 
     def _render_market(self) -> str:
         lines = list(self._render_symbol_summaries())
         if not lines:
-            return "Market: no runtime summaries"
+            return "行情：暂无运行摘要"
         return "\n".join(lines)
 
     def _render_positions(self) -> str:
         rows = self._history_store.list_recent_rows("positions", limit=5)
         if not rows:
-            return "Positions: no recent position facts"
+            return "仓位：暂无最近仓位记录"
         return "\n".join(
             f"{row.get('symbol', 'unknown')}: "
             f"net={row.get('net_quantity', row.get('quantity', 'n/a'))} "
@@ -300,7 +330,7 @@ class NotifierService:
     def _render_orders(self) -> str:
         rows = self._history_store.list_recent_rows("orders", limit=5)
         if not rows:
-            return "Orders: no recent orders"
+            return "订单：暂无最近订单记录"
         return "\n".join(
             f"{row.get('symbol', 'unknown')} "
             f"{row.get('side', 'n/a')} "
@@ -319,11 +349,11 @@ class NotifierService:
                 for row in rows
             )
         else:
-            lines.append("Risk: no recent risk events")
+            lines.append("风控：暂无最近风控事件")
         budget = self._runtime_store.get_budget_pool_summary()
         if isinstance(budget, dict):
             lines.append(
-                "Budget: "
+                "预算："
                 f"remaining_notional={budget.get('remaining_notional', 'n/a')} "
                 f"remaining_order_count={budget.get('remaining_order_count', 'n/a')} "
                 f"current_mode={budget.get('current_mode', 'n/a')}"
@@ -331,7 +361,7 @@ class NotifierService:
         governor_health = self._runtime_store.get_governor_health_summary()
         if isinstance(governor_health, dict):
             lines.append(
-                "Governor: "
+                "治理状态："
                 f"status={governor_health.get('status', 'unknown')} "
                 f"trigger={governor_health.get('trigger', 'unknown')} "
                 f"health={governor_health.get('health_state', 'unknown')}"
@@ -381,6 +411,8 @@ class NotifierService:
 
     def _collect_proactive_candidates(self, *, limit: int) -> list[dict[str, str]]:
         candidates: list[dict[str, str]] = []
+        candidates.extend(self._collect_order_notification_candidates(limit=limit))
+        candidates.extend(self._collect_position_notification_candidates(limit=limit))
         candidates.extend(self._collect_checkpoint_candidates(limit=limit))
         candidates.extend(self._collect_governor_candidates(limit=limit))
         candidates.extend(self._collect_recovery_failure_candidates(limit=limit))
@@ -391,6 +423,82 @@ class NotifierService:
                 _RETRY_PRIORITY[item["severity"]],
             )
         )
+        return candidates
+
+    def _collect_order_notification_candidates(self, *, limit: int) -> list[dict[str, str]]:
+        rows = self._history_store.list_recent_rows("orders", limit=limit)
+        candidates: list[dict[str, str]] = []
+        for row in reversed(rows):
+            status = str(row.get("status", "")).strip().lower()
+            if status not in {"submitted", "canceled", "cancelled"}:
+                continue
+            symbol = str(row.get("symbol", "unknown"))
+            side = _format_side(row.get("side", "n/a"))
+            intent = _format_intent(row.get("intent", "unknown"))
+            client_order_id = str(row.get("client_order_id", "n/a"))
+            order_id = str(row.get("order_id", "n/a"))
+            text = (
+                f"{'订单已提交' if status == 'submitted' else '订单已撤销'}：{symbol} {side}{intent}\n"
+                f"{_format_strategy_line(row.get('strategy_id'))}\n"
+                f"{_format_logic_line(row.get('strategy_logic'))}\n"
+                f"客户端单号：{client_order_id}\n"
+                f"订单号：{order_id}"
+            )
+            candidates.append(
+                {
+                    "category": "trade_order_submitted" if status == "submitted" else "trade_order_canceled",
+                    "dedupe_key": f"order:{status}:{client_order_id}:{order_id}",
+                    "severity": "INFO",
+                    "text": text,
+                }
+            )
+        return candidates
+
+    def _collect_position_notification_candidates(self, *, limit: int) -> list[dict[str, str]]:
+        rows = self._history_store.list_recent_rows("positions", limit=limit)
+        candidates: list[dict[str, str]] = []
+        previous_by_symbol: dict[str, float] = {}
+        for row in reversed(rows):
+            symbol = str(row.get("symbol", "unknown"))
+            net_quantity = float(row.get("net_quantity", 0.0))
+            previous_quantity = previous_by_symbol.get(symbol, 0.0)
+            explicit_intent = str(row.get("intent", "")).strip().lower()
+            inferred_intent = ""
+            if explicit_intent in {"open", "close"}:
+                inferred_intent = explicit_intent
+            elif previous_quantity == 0.0 and net_quantity != 0.0:
+                inferred_intent = "open"
+            elif previous_quantity != 0.0 and net_quantity == 0.0:
+                inferred_intent = "close"
+            previous_by_symbol[symbol] = net_quantity
+            if inferred_intent == "open":
+                text = (
+                    f"已开仓：{symbol} 当前仓位={net_quantity} 均价={row.get('average_price', 'n/a')}\n"
+                    f"{_format_strategy_line(row.get('strategy_id'))}\n"
+                    f"{_format_logic_line(row.get('strategy_logic'))}"
+                )
+                candidates.append(
+                    {
+                        "category": "trade_position_opened",
+                        "dedupe_key": f"position:open:{symbol}:{row.get('average_price', 'n/a')}:{net_quantity}",
+                        "severity": "INFO",
+                        "text": text,
+                    }
+                )
+            elif inferred_intent == "close":
+                text = (
+                    f"已平仓：{symbol} 当前仓位={net_quantity} 浮盈亏={row.get('unrealized_pnl', 'n/a')}\n"
+                    f"{_format_strategy_line(row.get('strategy_id'))}\n"
+                    f"{_format_logic_line(row.get('strategy_logic'))}"
+                )
+                candidates.append(
+                    {
+                        "category": "trade_position_closed",
+                        "dedupe_key": f"position:close:{symbol}:{row.get('unrealized_pnl', 'n/a')}:{net_quantity}",
+                        "severity": "INFO",
+                        "text": text,
+                    }
+                )
         return candidates
 
     def _collect_checkpoint_candidates(self, *, limit: int) -> list[dict[str, str]]:
@@ -436,7 +544,7 @@ class NotifierService:
                     "category": "snapshot_published",
                     "dedupe_key": f"governor_run:{version_id}:published",
                     "severity": "INFO",
-                    "text": f"Snapshot published: {version_id} (mode={market_mode}, approval={approval})",
+                    "text": f"治理快照已发布：{version_id}（模式={market_mode}，审批={approval}）",
                 }
             )
         return candidates
@@ -456,7 +564,7 @@ class NotifierService:
                     "category": "recovery_failed",
                     "dedupe_key": f"recovery_failed:{event_type}:{detail}",
                     "severity": "CRITICAL",
-                    "text": f"Recovery failed: {detail or event_type}",
+                    "text": f"恢复流程失败：{detail or event_type}",
                 }
             )
         return candidates
@@ -480,7 +588,7 @@ class NotifierService:
                     "category": "risk_event",
                     "dedupe_key": f"risk_event:{event_type}:{detail}",
                     "severity": "CRITICAL" if "mode_changed" in event_type else "WARN",
-                    "text": f"Risk event: {event_type} {detail}".rstrip(),
+                    "text": f"风控事件：{event_type} {detail}".rstrip(),
                 }
             )
         return candidates

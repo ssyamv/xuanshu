@@ -102,7 +102,7 @@ def test_notifier_runtime_sends_payload_via_adapter(monkeypatch) -> None:
     runtime = notifier_app.build_notifier_runtime()
     asyncio.run(notifier_app._run_notifier(runtime))
 
-    assert delivered == ["Notifier runtime started"]
+    assert delivered == ["通知服务已启动"]
 
 
 class _FakeRedis:
@@ -176,7 +176,7 @@ def test_notifier_runtime_processes_one_command_poll(monkeypatch) -> None:
 
     asyncio.run(notifier_app._poll_notifier_once(runtime))
 
-    assert adapter.sent == ["Mode: reduce_only"]
+    assert adapter.sent == ["模式：只减仓"]
     assert runtime.next_update_offset == 2
 
 
@@ -220,7 +220,7 @@ def test_notifier_runtime_processes_manual_takeover_command(monkeypatch) -> None
 
     asyncio.run(notifier_app._poll_notifier_once(runtime))
 
-    assert adapter.sent == ["Manual takeover requested: halted (reason=operator requested stop)"]
+    assert adapter.sent == ["已请求人工接管：halted（原因：operator requested stop）"]
     assert runtime.runtime_store.get_run_mode() == RunMode.HALTED
     assert store.list_recent_rows("risk_events", limit=1) == [
         {
@@ -360,7 +360,7 @@ def test_notifier_command_loop_flushes_retry_queue(monkeypatch) -> None:
             "status": "failed",
             "attempt_count": 3,
             "needs_retry": True,
-            "text": "entered halted mode",
+            "text": "进入 halted 模式",
         }
     )
 
@@ -391,7 +391,7 @@ def test_notifier_command_loop_flushes_retry_queue(monkeypatch) -> None:
     with pytest.raises(RuntimeError, match="stop loop"):
         asyncio.run(notifier_app._run_command_loop(runtime))
 
-    assert adapter.sent == ["entered halted mode"]
+    assert adapter.sent == ["进入 halted 模式"]
 
 
 def test_notifier_command_loop_flushes_proactive_notifications(monkeypatch) -> None:
@@ -450,6 +450,6 @@ def test_notifier_command_loop_flushes_proactive_notifications(monkeypatch) -> N
         asyncio.run(notifier_app._run_command_loop(runtime))
 
     assert adapter.sent == [
-        "Mode changed to reduce-only",
-        "Recovery failed: exchange_state_mismatch",
+        "运行模式已切换为只减仓",
+        "恢复流程失败：exchange_state_mismatch",
     ]

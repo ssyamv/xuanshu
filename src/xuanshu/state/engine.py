@@ -36,6 +36,9 @@ class OrderState:
     size: float
     filled_size: float
     status: str
+    intent: str | None = None
+    strategy_id: str | None = None
+    strategy_logic: str | None = None
 
 
 @dataclass
@@ -64,6 +67,7 @@ class StateEngine:
     last_private_stream_marker: str | None = None
     recent_trade_window: int = 20
     account_state: AccountState = field(default_factory=AccountState)
+    trade_context_by_symbol: dict[str, dict[str, str]] = field(default_factory=dict)
 
     def set_run_mode(self, mode: RunMode) -> None:
         self.current_run_mode = mode
@@ -97,6 +101,9 @@ class StateEngine:
         client_order_id: str,
         side: str,
         size: float,
+        intent: str | None = None,
+        strategy_id: str | None = None,
+        strategy_logic: str | None = None,
     ) -> None:
         symbol_orders = self.open_orders_by_symbol.setdefault(symbol, {})
         symbol_orders[client_order_id] = OrderState(
@@ -107,7 +114,19 @@ class StateEngine:
             size=size,
             filled_size=0.0,
             status="submitted",
+            intent=intent,
+            strategy_id=strategy_id,
+            strategy_logic=strategy_logic,
         )
+        context = {}
+        if intent is not None:
+            context["intent"] = intent
+        if strategy_id is not None:
+            context["strategy_id"] = strategy_id
+        if strategy_logic is not None:
+            context["strategy_logic"] = strategy_logic
+        if context:
+            self.trade_context_by_symbol[symbol] = context
 
     def on_order_update(self, event: OrderUpdateEvent) -> None:
         self.last_private_stream_marker = event.private_sequence
@@ -118,6 +137,12 @@ class StateEngine:
             for order_id, order in symbol_orders.items()
             if order.client_order_id == event.client_order_id and order_id != event.order_id
         ]
+        existing_order = symbol_orders.get(event.order_id)
+        if existing_order is None:
+            for order in symbol_orders.values():
+                if order.client_order_id == event.client_order_id:
+                    existing_order = order
+                    break
         for staged_order_id in staged_order_ids:
             symbol_orders.pop(staged_order_id, None)
         symbol_orders[event.order_id] = OrderState(
@@ -128,6 +153,9 @@ class StateEngine:
             size=event.size,
             filled_size=event.filled_size,
             status=normalized_status,
+            intent=existing_order.intent if existing_order is not None else None,
+            strategy_id=existing_order.strategy_id if existing_order is not None else None,
+            strategy_logic=existing_order.strategy_logic if existing_order is not None else None,
         )
         if normalized_status in _TERMINAL_ORDER_STATUSES:
             symbol_orders.pop(event.order_id, None)

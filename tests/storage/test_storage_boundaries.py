@@ -231,7 +231,7 @@ def test_postgres_store_persists_rows_across_instances_with_real_sqlite_backend(
             "status": "sent",
             "attempt_count": 1,
             "needs_retry": False,
-            "text": "entered reduce_only mode",
+            "text": "进入 reduce_only 模式",
         }
     )
 
@@ -255,7 +255,7 @@ def test_postgres_store_persists_rows_across_instances_with_real_sqlite_backend(
         "status": "sent",
         "attempt_count": 1,
         "needs_retry": False,
-        "text": "entered reduce_only mode",
+        "text": "进入 reduce_only 模式",
         "created_at": notification_rows[0]["created_at"],
     }
 

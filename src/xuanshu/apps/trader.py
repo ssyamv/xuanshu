@@ -7,7 +7,7 @@ from datetime import UTC, datetime, timedelta
 
 from xuanshu.checkpoints.service import CheckpointService
 from xuanshu.config.settings import TraderRuntimeSettings
-from xuanshu.core.enums import ApprovalState, EntryType, OrderSide, RunMode, TraderEventType
+from xuanshu.core.enums import ApprovalState, EntryType, OrderSide, RunMode, StrategyId, TraderEventType
 from xuanshu.contracts.checkpoint import (
     CheckpointBudgetState,
     CheckpointOrder,
@@ -314,6 +314,14 @@ def _next_client_order_id(runtime: TraderRuntime, signal: CandidateSignal) -> st
     )
 
 
+def _build_strategy_logic(signal: CandidateSignal) -> str:
+    if signal.strategy_id == StrategyId.BREAKOUT:
+        return "趋势突破，最近成交偏买方，准备顺势开多。"
+    if signal.strategy_id == StrategyId.MEAN_REVERSION:
+        return "均值回归，价格偏离后尝试反向回补。"
+    return "风险暂停信号，当前不执行新开仓。"
+
+
 def _can_relax_to_snapshot_mode(runtime: TraderRuntime, snapshot: StrategyConfigSnapshot) -> bool:
     return (
         _RUN_MODE_PRIORITY[runtime.current_mode] > _RUN_MODE_PRIORITY[snapshot.market_mode]
@@ -381,6 +389,9 @@ async def _evaluate_symbol(runtime: TraderRuntime, symbol: str) -> None:
                     "status": "submitted",
                     "client_order_id": str(row.get("clOrdId") or ""),
                     "order_id": str(row.get("ordId") or ""),
+                    "intent": "open",
+                    "strategy_id": signal.strategy_id.value,
+                    "strategy_logic": _build_strategy_logic(signal),
                 }
             )
         runtime.components.state_engine.stage_order_submission(
@@ -388,6 +399,9 @@ async def _evaluate_symbol(runtime: TraderRuntime, symbol: str) -> None:
             client_order_id=str(response[0].get("clOrdId") or ""),
             side=signal.side.value,
             size=max(1.0, decision.max_order_size),
+            intent="open",
+            strategy_id=signal.strategy_id.value,
+            strategy_logic=_build_strategy_logic(signal),
         )
         _LOGGER.info(
             "order_submitted",
@@ -436,6 +450,12 @@ async def _dispatch_runtime_event(runtime: TraderRuntime, event: object) -> None
         await _evaluate_symbol(runtime, symbol)
         return
     if isinstance(event, OrderUpdateEvent):
+        order_state = runtime.components.state_engine.open_orders_by_symbol.get(event.symbol, {}).get(event.order_id)
+        if order_state is None:
+            for candidate in runtime.components.state_engine.open_orders_by_symbol.get(event.symbol, {}).values():
+                if candidate.client_order_id == event.client_order_id:
+                    order_state = candidate
+                    break
         runtime.history_store.append_order_fact(
             {
                 "symbol": event.symbol,
@@ -444,6 +464,9 @@ async def _dispatch_runtime_event(runtime: TraderRuntime, event: object) -> None
                 "client_order_id": event.client_order_id,
                 "order_id": event.order_id,
                 "filled_size": event.filled_size,
+                "intent": getattr(order_state, "intent", None),
+                "strategy_id": getattr(order_state, "strategy_id", None),
+                "strategy_logic": getattr(order_state, "strategy_logic", None),
             }
         )
         if event.filled_size > 0:
@@ -457,6 +480,7 @@ async def _dispatch_runtime_event(runtime: TraderRuntime, event: object) -> None
                 }
             )
     elif isinstance(event, PositionUpdateEvent):
+        trade_context = runtime.components.state_engine.trade_context_by_symbol.get(event.symbol, {})
         runtime.history_store.append_position_fact(
             {
                 "symbol": event.symbol,
@@ -464,6 +488,7 @@ async def _dispatch_runtime_event(runtime: TraderRuntime, event: object) -> None
                 "average_price": event.average_price,
                 "mark_price": event.mark_price,
                 "unrealized_pnl": event.unrealized_pnl,
+                **trade_context,
             }
         )
     elif isinstance(event, FaultEvent):

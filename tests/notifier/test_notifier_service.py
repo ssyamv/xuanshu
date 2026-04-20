@@ -8,7 +8,7 @@ from xuanshu.notifier.service import NotifierService, format_mode_change
 
 
 def test_mode_change_notification_is_human_readable() -> None:
-    assert format_mode_change(RunMode.REDUCE_ONLY) == "Mode changed to reduce-only"
+    assert format_mode_change(RunMode.REDUCE_ONLY) == "运行模式已切换为只减仓"
 
 
 def test_telegram_text_payload_is_typed() -> None:
@@ -101,17 +101,17 @@ async def test_notifier_service_renders_status_and_market_queries_from_runtime_s
     orders = await service.handle_command("/orders")
     risk = await service.handle_command("/risk")
 
-    assert "Mode: degraded" in status.text
-    assert "Snapshot: snap-live" in status.text
-    assert "Faults: public_ws_disconnected" in status.text
-    assert "Budget: remaining_notional=120.0 remaining_order_count=8" in status.text
-    assert "Governor: status=published trigger=risk_event health=healthy" in status.text
+    assert "模式：降级运行" in status.text
+    assert "快照版本：snap-live" in status.text
+    assert "故障标记：public_ws_disconnected" in status.text
+    assert "预算：remaining_notional=120.0 remaining_order_count=8" in status.text
+    assert "治理状态：status=published trigger=risk_event health=healthy" in status.text
     assert "BTC-USDT-SWAP" in market.text
     assert "ETH-USDT-SWAP" in market.text
     assert "BTC-USDT-SWAP: net=1.25 avg=99.8 upnl=1.2" in positions.text
     assert "BTC-USDT-SWAP buy live cid=btc-breakout-000001" in orders.text
-    assert "Budget: remaining_notional=120.0 remaining_order_count=8 current_mode=degraded" in risk.text
-    assert "Governor: status=published trigger=risk_event health=healthy" in risk.text
+    assert "预算：remaining_notional=120.0 remaining_order_count=8 current_mode=degraded" in risk.text
+    assert "治理状态：status=published trigger=risk_event health=healthy" in risk.text
 
 
 @pytest.mark.asyncio
@@ -129,7 +129,7 @@ async def test_notifier_service_accepts_manual_takeover_command_and_records_audi
 
     payload = await service.handle_command("/takeover reduce_only flatten risk manually")
 
-    assert payload.text == "Manual takeover requested: reduce_only (reason=flatten risk manually)"
+    assert payload.text == "已请求人工接管：reduce_only（原因：flatten risk manually）"
     assert runtime.mode == RunMode.REDUCE_ONLY
     assert runtime.faults == {
         "manual_takeover": {
@@ -159,7 +159,7 @@ async def test_notifier_service_rejects_manual_takeover_without_supported_mode()
 
     payload = await service.handle_command("/takeover normal")
 
-    assert payload.text == "Usage: /takeover <degraded|reduce_only|halted> [reason]"
+    assert payload.text == "用法：/takeover <degraded|reduce_only|halted> [reason]"
     assert runtime.mode == RunMode.DEGRADED
     assert history.list_recent_rows("risk_events", limit=1) == []
 
@@ -177,7 +177,7 @@ async def test_notifier_service_accepts_manual_release_to_degraded() -> None:
 
     payload = await service.handle_command("/release degraded operator approved first release")
 
-    assert payload.text == "Manual release requested: degraded (reason=operator approved first release)"
+    assert payload.text == "已请求人工解除：degraded（原因：operator approved first release）"
     assert runtime.manual_release_target == "degraded"
     assert history.list_recent_rows("risk_events", limit=1) == [
         {
@@ -209,7 +209,7 @@ async def test_notifier_service_records_failed_critical_delivery_for_retry() -> 
     with pytest.raises(RuntimeError, match="telegram down"):
         await service.deliver_text(
             adapter=_Adapter(),
-            text="entered halted mode",
+            text="进入 halted 模式",
             severity="CRITICAL",
             category="mode_change",
             dedupe_key="mode:halted",
@@ -223,7 +223,7 @@ async def test_notifier_service_records_failed_critical_delivery_for_retry() -> 
             "status": "failed",
             "attempt_count": 3,
             "needs_retry": True,
-            "text": "entered halted mode",
+            "text": "进入 halted 模式",
         }
     ]
 
@@ -239,7 +239,7 @@ async def test_notifier_service_flushes_pending_retry_notifications() -> None:
             "status": "failed",
             "attempt_count": 3,
             "needs_retry": True,
-            "text": "entered halted mode",
+            "text": "进入 halted 模式",
         }
     )
     service = NotifierService(
@@ -258,7 +258,7 @@ async def test_notifier_service_flushes_pending_retry_notifications() -> None:
     flushed = await service.flush_pending_notifications(adapter=_Adapter())
 
     assert flushed == 1
-    assert delivered == ["entered halted mode"]
+    assert delivered == ["进入 halted 模式"]
     assert history.written_rows["notification_events"][-1] == {
         "category": "mode_change",
         "dedupe_key": "mode:halted",
@@ -266,7 +266,7 @@ async def test_notifier_service_flushes_pending_retry_notifications() -> None:
         "status": "sent",
         "attempt_count": 1,
         "needs_retry": False,
-        "text": "entered halted mode",
+        "text": "进入 halted 模式",
     }
 
 
@@ -292,7 +292,7 @@ async def test_notifier_service_prioritizes_critical_retries_and_skips_resolved_
             "status": "failed",
             "attempt_count": 3,
             "needs_retry": True,
-            "text": "entered halted mode",
+            "text": "进入 halted 模式",
         }
     )
     history.append_notification_event(
@@ -322,7 +322,7 @@ async def test_notifier_service_prioritizes_critical_retries_and_skips_resolved_
     flushed = await service.flush_pending_notifications(adapter=_Adapter())
 
     assert flushed == 1
-    assert delivered == ["entered halted mode"]
+    assert delivered == ["进入 halted 模式"]
 
 
 @pytest.mark.asyncio
@@ -379,10 +379,91 @@ async def test_notifier_service_emits_proactive_notifications_from_history_rows(
 
     assert flushed == 4
     assert delivered == [
-        "Mode changed to reduce-only",
-        "Snapshot published: snap-002 (mode=degraded, approval=approved)",
-        "Recovery failed: exchange_state_mismatch",
-        "Risk event: runtime_mode_changed startup gating tightened runtime to reduce_only",
+        "运行模式已切换为只减仓",
+        "治理快照已发布：snap-002（模式=degraded，审批=approved）",
+        "恢复流程失败：exchange_state_mismatch",
+        "风控事件：runtime_mode_changed startup gating tightened runtime to reduce_only",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_notifier_service_emits_chinese_trade_notifications_for_submit_cancel_open_and_close() -> None:
+    history = PostgresRuntimeStore(dsn="postgresql://xuanshu:xuanshu@localhost:5432/xuanshu")
+    history.append_order_fact(
+        {
+            "symbol": "BTC-USDT-SWAP",
+            "side": "buy",
+            "status": "submitted",
+            "client_order_id": "BTCUSDTSWAPbreakout000001",
+            "order_id": "ord-open-1",
+            "intent": "open",
+            "strategy_id": "breakout",
+            "strategy_logic": "趋势突破，最近成交偏买方，准备顺势开多。",
+        }
+    )
+    history.append_order_fact(
+        {
+            "symbol": "BTC-USDT-SWAP",
+            "side": "sell",
+            "status": "canceled",
+            "client_order_id": "BTCUSDTSWAPbreakout000002",
+            "order_id": "ord-close-1",
+            "intent": "close",
+            "strategy_id": "breakout",
+            "strategy_logic": "平仓挂单超时未成交，已撤单等待下一次机会。",
+        }
+    )
+    history.append_position_fact(
+        {
+            "symbol": "BTC-USDT-SWAP",
+            "net_quantity": 0.0,
+            "average_price": 0.0,
+            "unrealized_pnl": 0.0,
+        }
+    )
+    history.append_position_fact(
+        {
+            "symbol": "BTC-USDT-SWAP",
+            "net_quantity": 2.0,
+            "average_price": 100.2,
+            "unrealized_pnl": 0.3,
+            "intent": "open",
+            "strategy_id": "breakout",
+            "strategy_logic": "趋势突破已确认，按 breakout 策略完成开仓。",
+        }
+    )
+    history.append_position_fact(
+        {
+            "symbol": "BTC-USDT-SWAP",
+            "net_quantity": 0.0,
+            "average_price": 0.0,
+            "unrealized_pnl": 1.1,
+            "intent": "close",
+            "strategy_id": "breakout",
+            "strategy_logic": "达到平仓条件，已落袋离场。",
+        }
+    )
+    service = NotifierService(
+        okx_symbols=("BTC-USDT-SWAP",),
+        runtime_store=_RuntimeStore(),
+        snapshot_store=_SnapshotStore(),
+        history_store=history,
+    )
+
+    delivered: list[str] = []
+
+    class _Adapter:
+        async def send_text(self, payload: TextMessagePayload) -> None:
+            delivered.append(payload.text)
+
+    flushed = await service.flush_proactive_notifications(adapter=_Adapter(), limit=10)
+
+    assert flushed == 4
+    assert delivered == [
+        "订单已提交：BTC-USDT-SWAP 买入开仓\n策略：breakout\n逻辑：趋势突破，最近成交偏买方，准备顺势开多。\n客户端单号：BTCUSDTSWAPbreakout000001\n订单号：ord-open-1",
+        "订单已撤销：BTC-USDT-SWAP 卖出平仓\n策略：breakout\n逻辑：平仓挂单超时未成交，已撤单等待下一次机会。\n客户端单号：BTCUSDTSWAPbreakout000002\n订单号：ord-close-1",
+        "已开仓：BTC-USDT-SWAP 当前仓位=2.0 均价=100.2\n策略：breakout\n逻辑：趋势突破已确认，按 breakout 策略完成开仓。",
+        "已平仓：BTC-USDT-SWAP 当前仓位=0.0 浮盈亏=1.1\n策略：breakout\n逻辑：达到平仓条件，已落袋离场。",
     ]
 
 
@@ -420,7 +501,7 @@ async def test_notifier_service_ignores_account_snapshot_updated_risk_events_for
 
     assert flushed == 1
     assert delivered == [
-        "Risk event: runtime_mode_changed startup gating tightened runtime to reduce_only",
+        "风控事件：runtime_mode_changed startup gating tightened runtime to reduce_only",
     ]
 
 
@@ -458,7 +539,7 @@ async def test_notifier_service_ignores_signal_blocked_risk_events_for_proactive
 
     assert flushed == 1
     assert delivered == [
-        "Risk event: runtime_mode_changed startup gating tightened runtime to reduce_only",
+        "风控事件：runtime_mode_changed startup gating tightened runtime to reduce_only",
     ]
 
 
@@ -493,7 +574,7 @@ async def test_notifier_service_marks_recovery_failures_as_critical_retriable_no
         "status": "failed",
         "attempt_count": 3,
         "needs_retry": True,
-        "text": "Recovery failed: exchange_state_mismatch",
+        "text": "恢复流程失败：exchange_state_mismatch",
     }
 
 

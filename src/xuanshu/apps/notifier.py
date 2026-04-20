@@ -164,7 +164,7 @@ async def _run_notifier(runtime: NotifierRuntime) -> None:
     try:
         await runtime.service.deliver_text(
             adapter=runtime.adapter,
-            text="Notifier runtime started",
+            text="通知服务已启动",
             severity="INFO",
             category="runtime_started",
             dedupe_key="runtime_started",

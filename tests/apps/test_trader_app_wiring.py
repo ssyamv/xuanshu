@@ -1500,6 +1500,152 @@ def test_trader_runtime_logs_order_submission(monkeypatch) -> None:
     )
 
 
+def test_trader_runtime_records_trade_notification_metadata_for_order_and_position_events(monkeypatch) -> None:
+    _set_required_settings_env(monkeypatch)
+    fake_redis = _FakeRedis()
+    fake_rest = _FakeRestClient()
+
+    monkeypatch.setattr(
+        trader_app,
+        "build_snapshot_store",
+        lambda settings: RedisSnapshotStore(redis_client=fake_redis),
+    )
+    monkeypatch.setattr(
+        trader_app,
+        "build_runtime_state_store",
+        lambda settings: RedisRuntimeStateStore(redis_client=fake_redis),
+    )
+
+    async def _noop_wait_forever() -> None:
+        return None
+
+    monkeypatch.setattr(trader_app, "_wait_forever", _noop_wait_forever)
+
+    runtime = trader_app.build_trader_runtime()
+    _replace_runtime_streams_with_empty_event_streams(runtime)
+    runtime.components = trader_app.TraderComponents(
+        state_engine=runtime.components.state_engine,
+        risk_kernel=runtime.components.risk_kernel,
+        checkpoint_service=runtime.components.checkpoint_service,
+        okx_rest_client=fake_rest,
+        okx_public_stream=runtime.components.okx_public_stream,
+        okx_private_stream=runtime.components.okx_private_stream,
+        client_order_id_builder=runtime.components.client_order_id_builder,
+    )
+    runtime.execution_coordinator = trader_app.ExecutionCoordinator(rest_client=fake_rest)
+    runtime.snapshot_store.set_latest_snapshot(
+        "snap-live",
+        runtime.startup_snapshot.model_copy(
+            update={
+                "version_id": "snap-live",
+                "market_mode": RunMode.NORMAL,
+                "approval_state": ApprovalState.APPROVED,
+                "strategy_enable_flags": {"breakout": True, "mean_reversion": False, "risk_pause": True},
+            }
+        ),
+    )
+
+    async def _exercise_runtime() -> None:
+        try:
+            await trader_app._run_trader(runtime)
+            await trader_app._dispatch_runtime_event(
+                runtime,
+                OrderbookTopEvent(
+                    event_type=TraderEventType.ORDERBOOK_TOP,
+                    symbol="BTC-USDT-SWAP",
+                    exchange="okx",
+                    generated_at=datetime.now(UTC),
+                    public_sequence="pub-1",
+                    bid_price=100.0,
+                    ask_price=100.2,
+                    bid_size=5.0,
+                    ask_size=6.0,
+                ),
+            )
+            await trader_app._dispatch_runtime_event(
+                runtime,
+                MarketTradeEvent(
+                    event_type=TraderEventType.MARKET_TRADE,
+                    symbol="BTC-USDT-SWAP",
+                    exchange="okx",
+                    generated_at=datetime.now(UTC),
+                    public_sequence="pub-2",
+                    price=100.3,
+                    size=5.0,
+                    side="buy",
+                ),
+            )
+            await trader_app._dispatch_runtime_event(
+                runtime,
+                MarketTradeEvent(
+                    event_type=TraderEventType.MARKET_TRADE,
+                    symbol="BTC-USDT-SWAP",
+                    exchange="okx",
+                    generated_at=datetime.now(UTC),
+                    public_sequence="pub-3",
+                    price=100.4,
+                    size=4.0,
+                    side="buy",
+                ),
+            )
+            await trader_app._dispatch_runtime_event(
+                runtime,
+                OrderUpdateEvent(
+                    event_type=TraderEventType.ORDER_UPDATE,
+                    symbol="BTC-USDT-SWAP",
+                    exchange="okx",
+                    generated_at=datetime.now(UTC),
+                    private_sequence="pri-1",
+                    order_id="ord-1",
+                    client_order_id="BTCUSDTSWAPbreakout000001",
+                    side="buy",
+                    price=100.4,
+                    size=1.0,
+                    filled_size=1.0,
+                    status="filled",
+                ),
+            )
+            await trader_app._dispatch_runtime_event(
+                runtime,
+                PositionUpdateEvent(
+                    event_type=TraderEventType.POSITION_UPDATE,
+                    symbol="BTC-USDT-SWAP",
+                    exchange="okx",
+                    generated_at=datetime.now(UTC),
+                    private_sequence="pri-2",
+                    net_quantity=1.0,
+                    average_price=100.4,
+                    mark_price=100.5,
+                    unrealized_pnl=0.2,
+                ),
+            )
+        finally:
+            await runtime.components.aclose()
+
+    asyncio.run(_exercise_runtime())
+
+    assert runtime.history_store.written_rows["orders"][0] == {
+        "symbol": "BTC-USDT-SWAP",
+        "side": "buy",
+        "status": "submitted",
+        "client_order_id": "BTCUSDTSWAPbreakout000001",
+        "order_id": "ord-1",
+        "intent": "open",
+        "strategy_id": "breakout",
+        "strategy_logic": "趋势突破，最近成交偏买方，准备顺势开多。",
+    }
+    assert runtime.history_store.written_rows["positions"][-1] == {
+        "symbol": "BTC-USDT-SWAP",
+        "net_quantity": 1.0,
+        "average_price": 100.4,
+        "mark_price": 100.5,
+        "unrealized_pnl": 0.2,
+        "intent": "open",
+        "strategy_id": "breakout",
+        "strategy_logic": "趋势突破，最近成交偏买方，准备顺势开多。",
+    }
+
+
 def test_trader_entrypoint_fails_fast_without_required_settings(monkeypatch) -> None:
     _set_required_settings_env(monkeypatch)
     monkeypatch.setenv("XUANSHU_TRADER_STARTING_NAV", "0")
