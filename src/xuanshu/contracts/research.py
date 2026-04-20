@@ -39,6 +39,10 @@ class StrategyPackage(BaseModel):
     @field_validator("generated_at")
     @classmethod
     def validate_generated_at(cls, value: datetime) -> datetime:
-        if value.tzinfo is None or value.utcoffset() is None:
-            raise ValueError("generated_at must be timezone-aware")
-        return value.astimezone(UTC)
+        return _normalize_timezone_aware_timestamp(value, field_name="generated_at")
+
+
+def _normalize_timezone_aware_timestamp(value: datetime, *, field_name: str) -> datetime:
+    if value.tzinfo is None or value.utcoffset() is None:
+        raise ValueError(f"{field_name} must be timezone-aware")
+    return value.astimezone(UTC)
