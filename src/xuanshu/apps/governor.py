@@ -194,14 +194,14 @@ def _coerce_historical_timestamp(value: object) -> datetime | None:
     return None
 
 
-def _build_bootstrap_snapshot() -> StrategyConfigSnapshot:
+def _build_bootstrap_snapshot(settings: GovernorRuntimeSettings) -> StrategyConfigSnapshot:
     generated_at = datetime.now(UTC)
     return StrategyConfigSnapshot(
         version_id="bootstrap",
         generated_at=generated_at,
         effective_from=generated_at,
         expires_at=generated_at + timedelta(minutes=5),
-        symbol_whitelist=["BTC-USDT-SWAP"],
+        symbol_whitelist=list(settings.okx_symbols),
         strategy_enable_flags={"breakout": True, "mean_reversion": False, "risk_pause": True},
         risk_multiplier=0.5,
         per_symbol_max_position=0.12,
@@ -224,7 +224,7 @@ def build_governor_runtime() -> GovernorRuntime:
         snapshot_store=build_snapshot_store(settings),
         runtime_store=build_runtime_state_store(settings),
         history_store=build_history_store(settings),
-        last_snapshot=_build_bootstrap_snapshot(),
+        last_snapshot=_build_bootstrap_snapshot(settings),
     )
 
 
@@ -241,7 +241,7 @@ async def _run_governor_cycle(runtime: GovernorRuntime) -> None:
         runtime_store=runtime.runtime_store,
         snapshot_store=runtime.snapshot_store,
         history_store=runtime.history_store,
-        symbols=runtime.last_snapshot.symbol_whitelist,
+        symbols=runtime.settings.okx_symbols,
         fallback_snapshot=runtime.last_snapshot,
     )
     trigger_reason = runtime.service.determine_trigger_reason(
@@ -385,7 +385,7 @@ async def _run_governor_loop(runtime: GovernorRuntime) -> None:
             runtime_store=runtime.runtime_store,
             snapshot_store=runtime.snapshot_store,
             history_store=runtime.history_store,
-            symbols=runtime.last_snapshot.symbol_whitelist,
+            symbols=runtime.settings.okx_symbols,
             fallback_snapshot=runtime.last_snapshot,
         )
         trigger_reason = runtime.service.determine_trigger_reason(

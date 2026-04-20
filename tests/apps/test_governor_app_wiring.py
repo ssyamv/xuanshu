@@ -304,6 +304,60 @@ def test_governor_runtime_runs_one_cycle_and_publishes_snapshot(monkeypatch) -> 
     assert [snapshot.version_id for snapshot in runtime.published_snapshots] == ["snap-new"]
 
 
+def test_governor_runtime_observes_configured_symbol_scope_instead_of_stale_snapshot_whitelist(monkeypatch) -> None:
+    _set_required_settings_env(monkeypatch)
+    _clear_unrelated_settings_env(monkeypatch)
+    captured_state_summary = None
+    fake_redis = _FakeRedis()
+
+    class _Runner:
+        async def run(self, state_summary):
+            nonlocal captured_state_summary
+            captured_state_summary = state_summary
+            now = datetime.now(UTC)
+            return {
+                "version_id": "snap-scope",
+                "generated_at": now.isoformat().replace("+00:00", "Z"),
+                "effective_from": now.isoformat().replace("+00:00", "Z"),
+                "expires_at": (now + timedelta(minutes=5)).isoformat().replace("+00:00", "Z"),
+                "symbol_whitelist": ["BTC-USDT-SWAP", "ETH-USDT-SWAP"],
+                "strategy_enable_flags": {"breakout": True, "mean_reversion": False, "risk_pause": True},
+                "risk_multiplier": 0.5,
+                "per_symbol_max_position": 0.12,
+                "max_leverage": 3,
+                "market_mode": RunMode.NORMAL,
+                "approval_state": ApprovalState.APPROVED,
+                "source_reason": "cycle",
+                "ttl_sec": 300,
+            }
+
+    monkeypatch.setattr(governor_app, "build_governor_client", lambda settings: GovernorClient(_Runner()))
+    monkeypatch.setattr(
+        governor_app,
+        "build_runtime_state_store",
+        lambda settings: governor_app.RedisRuntimeStateStore(redis_client=fake_redis),
+    )
+
+    runtime = governor_app.build_governor_runtime()
+    runtime.last_snapshot = runtime.last_snapshot.model_copy(update={"symbol_whitelist": ["BTC-USDT-SWAP"]})
+    runtime.runtime_store.set_symbol_runtime_summary(
+        "BTC-USDT-SWAP",
+        {"symbol": "BTC-USDT-SWAP", "mid_price": 100.1, "net_quantity": 1.0},
+    )
+    runtime.runtime_store.set_symbol_runtime_summary(
+        "ETH-USDT-SWAP",
+        {"symbol": "ETH-USDT-SWAP", "mid_price": 200.2, "net_quantity": 0.0},
+    )
+
+    asyncio.run(governor_app._run_governor_cycle(runtime))
+
+    assert captured_state_summary is not None
+    assert captured_state_summary["symbol_summaries"] == [
+        {"symbol": "BTC-USDT-SWAP", "mid_price": 100.1, "net_quantity": 1.0},
+        {"symbol": "ETH-USDT-SWAP", "mid_price": 200.2, "net_quantity": 0.0},
+    ]
+
+
 def test_governor_runtime_publishes_snapshot_to_shared_redis_store(monkeypatch) -> None:
     _set_required_settings_env(monkeypatch)
     _clear_unrelated_settings_env(monkeypatch)
@@ -537,6 +591,7 @@ def test_governor_runtime_records_snapshot_publication_for_notifier(monkeypatch)
         {
             "version_id": "snap-audit",
             "status": "published",
+            "error": None,
             "research_provider": "api",
             "research_status": "skipped",
             "research_provider_success": None,
@@ -894,6 +949,7 @@ def test_governor_cycle_freezes_snapshot_and_tracks_consecutive_failures(monkeyp
         {
             "version_id": "bootstrap",
             "status": "frozen",
+            "error": "llm timeout",
             "research_provider": "api",
             "research_status": "skipped",
             "research_provider_success": None,
@@ -904,6 +960,7 @@ def test_governor_cycle_freezes_snapshot_and_tracks_consecutive_failures(monkeyp
         {
             "version_id": "bootstrap",
             "status": "frozen",
+            "error": "llm timeout",
             "research_provider": "api",
             "research_status": "skipped",
             "research_provider_success": None,
@@ -972,6 +1029,7 @@ def test_governor_cycle_contains_research_provider_failure_to_research_branch(mo
         {
             "version_id": "snap-research-failure-contained",
             "status": "published",
+            "error": None,
             "research_provider": "codex_cli",
             "research_status": "failed",
             "research_provider_success": False,

@@ -9,8 +9,10 @@ from xuanshu.contracts.checkpoint import ExecutionCheckpoint
 
 _ORDER_FIELDS = ("order_id", "symbol", "side", "price", "size", "status")
 _POSITION_FIELDS = ("symbol", "net_quantity", "mark_price", "unrealized_pnl")
+_POSITION_RECOVERY_FIELDS = ("symbol", "net_quantity")
 _ORDER_FIELD_ALIASES = {
     "order_id": "ordId",
+    "client_order_id": "clOrdId",
     "symbol": "instId",
     "side": "side",
     "price": "px",
@@ -54,11 +56,21 @@ class RecoverySupervisor:
                 "needs_reconcile": True,
                 "reason": "exchange_state_mismatch",
             }
-        checkpoint_orders = _normalize_checkpoint_items(checkpoint.open_orders_snapshot, fields=_ORDER_FIELDS)
+        checkpoint_orders = _normalize_checkpoint_items(
+            [item for item in checkpoint.open_orders_snapshot if getattr(item, "symbol", None) == symbol],
+            fields=_ORDER_FIELDS,
+        )
         exchange_orders = _normalize_exchange_items(open_orders, field_aliases=_ORDER_FIELD_ALIASES)
-        checkpoint_positions = _normalize_checkpoint_items(checkpoint.positions_snapshot, fields=_POSITION_FIELDS)
-        exchange_positions = _normalize_exchange_items(positions, field_aliases=_POSITION_FIELD_ALIASES)
-        if checkpoint_orders != exchange_orders or checkpoint_positions != exchange_positions:
+        checkpoint_positions = _normalize_checkpoint_items(
+            [item for item in checkpoint.positions_snapshot if getattr(item, "symbol", None) == symbol],
+            fields=_POSITION_RECOVERY_FIELDS,
+        )
+        exchange_positions = _normalize_exchange_items(
+            positions,
+            field_aliases=_POSITION_FIELD_ALIASES,
+            fields=_POSITION_RECOVERY_FIELDS,
+        )
+        if not _orders_match(checkpoint_orders, exchange_orders) or checkpoint_positions != exchange_positions:
             return {
                 "run_mode": "halted",
                 "needs_reconcile": True,
@@ -82,18 +94,85 @@ def _normalize_exchange_items(
     items: list[dict[str, object]],
     *,
     field_aliases: dict[str, str],
+    fields: tuple[str, ...] | None = None,
 ) -> list[tuple[object, ...]]:
     normalized_items: list[tuple[object, ...]] = []
+    selected_fields = fields or tuple(field_aliases.keys())
     for item in items:
         payload = item if isinstance(item, dict) else {}
+        if field_aliases is _POSITION_FIELD_ALIASES and _is_flat_exchange_position_payload(payload):
+            continue
         normalized_item = tuple(
             _normalize_exchange_value(field, payload.get(exchange_field))
-            for field, exchange_field in field_aliases.items()
+            for field in selected_fields
+            for exchange_field in (field_aliases[field],)
         )
-        if field_aliases is _POSITION_FIELD_ALIASES and _is_flat_exchange_position(normalized_item):
-            continue
         normalized_items.append(normalized_item)
     return sorted(normalized_items, key=_item_sort_key)
+
+
+def _orders_match(
+    checkpoint_orders: list[tuple[object, ...]],
+    exchange_orders: list[tuple[object, ...]],
+) -> bool:
+    if len(checkpoint_orders) != len(exchange_orders):
+        return False
+    remaining_exchange = list(exchange_orders)
+    for checkpoint_order in checkpoint_orders:
+        for index, exchange_order in enumerate(remaining_exchange):
+            if _checkpoint_order_matches_exchange_order(checkpoint_order, exchange_order):
+                remaining_exchange.pop(index)
+                break
+        else:
+            return False
+    return not remaining_exchange
+
+
+def _checkpoint_order_matches_exchange_order(
+    checkpoint_order: tuple[object, ...],
+    exchange_order: tuple[object, ...],
+) -> bool:
+    if len(checkpoint_order) != len(_ORDER_FIELDS):
+        return False
+    if len(exchange_order) != len(_ORDER_FIELD_ALIASES):
+        return False
+
+    checkpoint_order_id, checkpoint_symbol, checkpoint_side, checkpoint_price, checkpoint_size, checkpoint_status = (
+        checkpoint_order
+    )
+    (
+        exchange_order_id,
+        exchange_client_order_id,
+        exchange_symbol,
+        exchange_side,
+        exchange_price,
+        exchange_size,
+        exchange_status,
+    ) = exchange_order
+
+    if checkpoint_symbol != exchange_symbol or checkpoint_side != exchange_side:
+        return False
+    if checkpoint_size != exchange_size:
+        return False
+    if checkpoint_order_id not in {exchange_order_id, exchange_client_order_id}:
+        return False
+    if not _statuses_compatible(checkpoint_status, exchange_status):
+        return False
+    return _prices_compatible(checkpoint_price, exchange_price)
+
+
+def _statuses_compatible(checkpoint_status: object, exchange_status: object) -> bool:
+    if checkpoint_status == exchange_status:
+        return True
+    return {checkpoint_status, exchange_status} == {"submitted", "live"}
+
+
+def _prices_compatible(checkpoint_price: object, exchange_price: object) -> bool:
+    if checkpoint_price == exchange_price:
+        return True
+    if checkpoint_price == 0.0 and exchange_price in {None, 0.0}:
+        return True
+    return False
 
 
 def _item_sort_key(item: tuple[object, ...]) -> tuple[tuple[str, object], ...]:
@@ -140,10 +219,13 @@ def _coerce_float(value: object) -> object:
     return float("nan")
 
 
-def _is_flat_exchange_position(item: tuple[object, ...]) -> bool:
-    if len(item) != len(_POSITION_FIELDS):
-        return False
-    _, net_quantity, mark_price, unrealized_pnl = item
+def _is_flat_exchange_position_payload(payload: dict[str, object]) -> bool:
+    net_quantity = _normalize_exchange_value("net_quantity", payload.get(_POSITION_FIELD_ALIASES["net_quantity"]))
+    mark_price = _normalize_exchange_value("mark_price", payload.get(_POSITION_FIELD_ALIASES["mark_price"]))
+    unrealized_pnl = _normalize_exchange_value(
+        "unrealized_pnl",
+        payload.get(_POSITION_FIELD_ALIASES["unrealized_pnl"]),
+    )
     if not isinstance(net_quantity, float) or net_quantity != 0.0:
         return False
     return mark_price is None and unrealized_pnl is None

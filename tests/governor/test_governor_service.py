@@ -862,6 +862,91 @@ def test_governor_ignores_non_blocking_risk_events_when_selecting_trigger_reason
     assert trigger == "schedule"
 
 
+def test_governor_ignores_resolved_startup_gating_events_after_healthy_checkpoint() -> None:
+    service = GovernorService()
+
+    class _RuntimeStore:
+        def get_run_mode(self) -> RunMode | None:
+            return RunMode.HALTED
+
+        def get_fault_flags(self) -> dict[str, object] | None:
+            return {}
+
+        def get_symbol_runtime_summary(self, symbol: str) -> dict[str, object] | None:
+            return {"symbol": symbol, "mid_price": 100.1, "net_quantity": 3.5}
+
+    class _SnapshotStore:
+        def get_latest_snapshot(self):
+            return snapshot
+
+    class _HistoryStore:
+        def list_recent_rows(self, table: str, limit: int = 10) -> list[dict[str, object]]:
+            if table == "risk_events":
+                return [
+                    {
+                        "event_type": "runtime_mode_changed",
+                        "detail": "startup gating tightened runtime to halted",
+                        "created_at": "2026-04-20T07:12:15.967111Z",
+                    },
+                    {
+                        "event_type": "startup_recovery_failed",
+                        "detail": "exchange_state_mismatch",
+                        "created_at": "2026-04-20T07:12:15.714284Z",
+                    },
+                ]
+            if table == "execution_checkpoints":
+                return [
+                    {
+                        "checkpoint_id": "runtime",
+                        "created_at": "2026-04-20T07:13:36.894177Z",
+                        "current_mode": "halted",
+                        "positions_snapshot": [{"symbol": "BTC-USDT-SWAP", "net_quantity": 3.5}],
+                        "open_orders_snapshot": [],
+                        "budget_state": {
+                            "max_daily_loss": 100.0,
+                            "remaining_daily_loss": 100.0,
+                            "remaining_notional": 100.0,
+                            "remaining_order_count": 10,
+                        },
+                        "needs_reconcile": False,
+                    }
+                ]
+            return []
+
+    snapshot = StrategyConfigSnapshot(
+        version_id="snap-halted",
+        generated_at=datetime.now(UTC),
+        effective_from=datetime.now(UTC),
+        expires_at=datetime.now(UTC) + timedelta(minutes=5),
+        symbol_whitelist=["BTC-USDT-SWAP"],
+        strategy_enable_flags={"breakout": True, "mean_reversion": False, "risk_pause": True},
+        risk_multiplier=0.0,
+        per_symbol_max_position=0.0,
+        max_leverage=1,
+        market_mode=RunMode.HALTED,
+        approval_state=ApprovalState.REJECTED,
+        source_reason="cached",
+        ttl_sec=300,
+    )
+
+    summary = service.build_state_summary(
+        runtime_store=_RuntimeStore(),
+        snapshot_store=_SnapshotStore(),
+        history_store=_HistoryStore(),
+        symbols=snapshot.symbol_whitelist,
+        now=datetime(2026, 4, 20, 7, 14, tzinfo=UTC),
+    )
+    trigger = service.determine_trigger_reason(
+        summary,
+        latest_snapshot=snapshot,
+        now=datetime(2026, 4, 20, 7, 14, tzinfo=UTC),
+    )
+
+    assert summary["recent_risk_events"] == []
+    assert summary["committee_summary"]["recommended_mode_floor"] == "normal"
+    assert trigger == "mode_change"
+
+
 def test_governor_guardrails_allow_recovery_from_degraded_without_faults_or_blocking_events() -> None:
     service = GovernorService()
     candidate = StrategyConfigSnapshot(
@@ -893,6 +978,40 @@ def test_governor_guardrails_allow_recovery_from_degraded_without_faults_or_bloc
     assert governed.market_mode == RunMode.NORMAL
     assert governed.risk_multiplier == 0.5
     assert governed.approval_state == ApprovalState.APPROVED
+
+
+def test_governor_guardrails_restore_normal_mode_from_stale_halted_state() -> None:
+    service = GovernorService()
+    candidate = StrategyConfigSnapshot(
+        version_id="snap-recover",
+        generated_at=datetime.now(UTC),
+        effective_from=datetime.now(UTC),
+        expires_at=datetime.now(UTC) + timedelta(minutes=5),
+        symbol_whitelist=["BTC-USDT-SWAP"],
+        strategy_enable_flags={"breakout": True, "mean_reversion": False, "risk_pause": True},
+        risk_multiplier=0.0,
+        per_symbol_max_position=0.0,
+        max_leverage=1,
+        market_mode=RunMode.HALTED,
+        approval_state=ApprovalState.REJECTED,
+        source_reason="candidate",
+        ttl_sec=300,
+    )
+
+    governed = service.apply_guardrails(
+        candidate,
+        {
+            "current_run_mode": "halted",
+            "active_fault_flags": [],
+            "recent_risk_events": [],
+            "symbol_summaries": [{"symbol": "BTC-USDT-SWAP"}],
+        },
+    )
+
+    assert governed.market_mode == RunMode.NORMAL
+    assert governed.approval_state == ApprovalState.APPROVED
+    assert governed.risk_multiplier == 0.25
+    assert governed.per_symbol_max_position == 0.12
 
 
 def test_governor_expert_opinions_do_not_keep_tightening_risk_for_stale_degraded_mode() -> None:

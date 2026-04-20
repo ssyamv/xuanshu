@@ -113,6 +113,7 @@ def _build_checkpoint(
 def _okx_open_order(
     *,
     order_id: str = "ord-1",
+    client_order_id: str | None = None,
     symbol: str = "BTC-USDT-SWAP",
     side: str = "buy",
     price: str = "100.0",
@@ -121,6 +122,7 @@ def _okx_open_order(
 ) -> dict[str, object]:
     return {
         "ordId": order_id,
+        "clOrdId": client_order_id or order_id,
         "instId": symbol,
         "side": side,
         "px": price,
@@ -182,6 +184,135 @@ async def test_recovery_supervisor_allows_matching_checkpoint_and_exchange_state
     assert result["needs_reconcile"] is False
     assert result["reason"] == "checkpoint_matches_exchange"
     assert rest_client.account_summary_calls == []
+
+
+@pytest.mark.asyncio
+async def test_recovery_supervisor_allows_staged_checkpoint_orders_to_match_live_exchange_orders() -> None:
+    checkpoint = _build_checkpoint(
+        positions_snapshot=[
+            CheckpointPosition(
+                symbol="BTC-USDT-SWAP",
+                net_quantity=1.0,
+                mark_price=102.5,
+                unrealized_pnl=3.0,
+            )
+        ],
+        open_orders_snapshot=[
+            CheckpointOrder(
+                order_id="btc-meanrev-000001",
+                symbol="BTC-USDT-SWAP",
+                side="sell",
+                price=0.0,
+                size=3.5,
+                status="submitted",
+            )
+        ],
+    )
+    rest_client = _FakeRestClient(
+        open_orders=[
+            _okx_open_order(
+                order_id="3494886837340479488",
+                client_order_id="btc-meanrev-000001",
+                side="sell",
+                price="",
+                size="3.5",
+                status="live",
+            )
+        ],
+        positions=[_okx_position()],
+    )
+    supervisor = RecoverySupervisor(rest_client=rest_client)
+
+    result = await supervisor.run_startup_recovery(
+        "BTC-USDT-SWAP",
+        checkpoint,
+        timestamp="2026-04-19T00:00:00.000Z",
+    )
+
+    assert result["run_mode"] == "normal"
+    assert result["needs_reconcile"] is False
+    assert result["reason"] == "checkpoint_matches_exchange"
+
+
+@pytest.mark.asyncio
+async def test_recovery_supervisor_ignores_position_mark_to_market_drift_when_size_matches() -> None:
+    checkpoint = _build_checkpoint(
+        positions_snapshot=[
+            CheckpointPosition(
+                symbol="BTC-USDT-SWAP",
+                net_quantity=3.5,
+                mark_price=74675.9,
+                unrealized_pnl=-5.19,
+            )
+        ],
+        open_orders_snapshot=[],
+    )
+    rest_client = _FakeRestClient(
+        positions=[
+            _okx_position(
+                symbol="BTC-USDT-SWAP",
+                net_quantity="3.5",
+                mark_price="74415.1",
+                unrealized_pnl="3.933999999999796",
+            )
+        ],
+    )
+    rest_client._open_orders = []
+    supervisor = RecoverySupervisor(rest_client=rest_client)
+
+    result = await supervisor.run_startup_recovery(
+        "BTC-USDT-SWAP",
+        checkpoint,
+        timestamp="2026-04-19T00:00:00.000Z",
+    )
+
+    assert result["run_mode"] == "normal"
+    assert result["needs_reconcile"] is False
+    assert result["reason"] == "checkpoint_matches_exchange"
+
+
+@pytest.mark.asyncio
+async def test_recovery_supervisor_compares_only_the_requested_symbol_slice_of_checkpoint_state() -> None:
+    checkpoint = _build_checkpoint(
+        positions_snapshot=[
+            CheckpointPosition(
+                symbol="BTC-USDT-SWAP",
+                net_quantity=3.5,
+                mark_price=74675.9,
+                unrealized_pnl=-5.19,
+            ),
+            CheckpointPosition(
+                symbol="ETH-USDT-SWAP",
+                net_quantity=3.5,
+                mark_price=2281.5,
+                unrealized_pnl=0.27,
+            ),
+        ],
+        open_orders_snapshot=[],
+    )
+    rest_client = _FakeRestClient(
+        open_orders=[],
+        positions=[
+            _okx_position(
+                symbol="BTC-USDT-SWAP",
+                net_quantity="3.5",
+                mark_price="74415.1",
+                unrealized_pnl="3.933999999999796",
+            )
+        ],
+    )
+    rest_client._open_orders = []
+    supervisor = RecoverySupervisor(rest_client=rest_client)
+
+    result = await supervisor.run_startup_recovery(
+        "BTC-USDT-SWAP",
+        checkpoint,
+        timestamp="2026-04-19T00:00:00.000Z",
+    )
+
+    assert result["run_mode"] == "normal"
+    assert result["needs_reconcile"] is False
+    assert result["reason"] == "checkpoint_matches_exchange"
 
 
 @pytest.mark.asyncio

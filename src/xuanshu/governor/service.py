@@ -67,15 +67,78 @@ class GovernorService:
         return {**_BASELINE_STRATEGY_FLAGS, **normalized}
 
     @staticmethod
-    def _filter_blocking_risk_events(recent_risk_events: object) -> list[Mapping[str, object]]:
+    def _filter_blocking_risk_events(
+        recent_risk_events: object,
+        latest_checkpoint: object | None = None,
+    ) -> list[Mapping[str, object]]:
         if not isinstance(recent_risk_events, list):
             return []
+        checkpoint_created_at = GovernorService._coerce_datetime(
+            latest_checkpoint.get("created_at")
+            if isinstance(latest_checkpoint, Mapping)
+            else None
+        )
+        checkpoint_cleared_reconcile = (
+            isinstance(latest_checkpoint, Mapping)
+            and latest_checkpoint.get("needs_reconcile") is False
+            and checkpoint_created_at is not None
+        )
         return [
             item
             for item in recent_risk_events
             if isinstance(item, Mapping)
             and item.get("event_type") not in {"signal_blocked", "account_snapshot_updated", "manual_release_requested"}
+            and not GovernorService._is_resolved_startup_gating_event(
+                item,
+                checkpoint_created_at=checkpoint_created_at,
+                checkpoint_cleared_reconcile=checkpoint_cleared_reconcile,
+            )
         ]
+
+    @staticmethod
+    def _is_resolved_startup_gating_event(
+        event: Mapping[str, object],
+        *,
+        checkpoint_created_at: datetime | None,
+        checkpoint_cleared_reconcile: bool,
+    ) -> bool:
+        if not checkpoint_cleared_reconcile or checkpoint_created_at is None:
+            return False
+        event_type = event.get("event_type")
+        if event_type == "startup_recovery_failed":
+            event_created_at = GovernorService._coerce_datetime(event.get("created_at"))
+            return event_created_at is not None and event_created_at <= checkpoint_created_at
+        if event_type == "runtime_mode_changed":
+            detail = event.get("detail")
+            event_created_at = GovernorService._coerce_datetime(event.get("created_at"))
+            return (
+                isinstance(detail, str)
+                and "startup gating tightened runtime" in detail
+                and event_created_at is not None
+                and event_created_at <= checkpoint_created_at
+            )
+        return False
+
+    @staticmethod
+    def _coerce_datetime(value: object) -> datetime | None:
+        if isinstance(value, datetime):
+            if value.tzinfo is None or value.utcoffset() is None:
+                return None
+            return value.astimezone(UTC)
+        if isinstance(value, str):
+            normalized = value.strip()
+            if not normalized:
+                return None
+            if normalized.endswith("Z"):
+                normalized = normalized[:-1] + "+00:00"
+            try:
+                parsed = datetime.fromisoformat(normalized)
+            except ValueError:
+                return None
+            if parsed.tzinfo is None or parsed.utcoffset() is None:
+                return None
+            return parsed.astimezone(UTC)
+        return None
 
     def freeze_on_failure(self, last_snapshot: StrategyConfigSnapshot) -> StrategyConfigSnapshot:
         return last_snapshot.model_copy(deep=True)
@@ -99,7 +162,12 @@ class GovernorService:
             for symbol in symbols
             if (summary := runtime_store.get_symbol_runtime_summary(symbol)) is not None
         ]
-        recent_risk_events = history_store.list_recent_rows("risk_events", limit=5)
+        latest_checkpoint_rows = history_store.list_recent_rows("execution_checkpoints", limit=1)
+        latest_checkpoint = latest_checkpoint_rows[0] if latest_checkpoint_rows else None
+        recent_risk_events = self._filter_blocking_risk_events(
+            history_store.list_recent_rows("risk_events", limit=5),
+            latest_checkpoint=latest_checkpoint,
+        )
         recent_governor_runs = history_store.list_recent_rows("governor_runs", limit=5)
         manual_release_target = getattr(runtime_store, "get_manual_release_target", lambda: None)()
         summary = {
@@ -387,6 +455,13 @@ class GovernorService:
 
         approval_state = candidate.approval_state
         per_symbol_max_position = candidate.per_symbol_max_position
+        recovery_ready = (
+            current_run_mode is not None
+            and current_run_mode != RunMode.NORMAL
+            and not active_fault_flags
+            and not recent_risk_events
+            and manual_release_target is None
+        )
         if any(
             isinstance(item, Mapping) and item.get("event_type") == "recovery_failed"
             for item in recent_risk_events
@@ -397,6 +472,11 @@ class GovernorService:
 
         if manual_release_target == RunMode.DEGRADED:
             market_mode = RunMode.DEGRADED
+            approval_state = ApprovalState.APPROVED
+            risk_multiplier = max(risk_multiplier, 0.25)
+            per_symbol_max_position = max(per_symbol_max_position, 0.12)
+        elif recovery_ready:
+            market_mode = RunMode.NORMAL
             approval_state = ApprovalState.APPROVED
             risk_multiplier = max(risk_multiplier, 0.25)
             per_symbol_max_position = max(per_symbol_max_position, 0.12)
