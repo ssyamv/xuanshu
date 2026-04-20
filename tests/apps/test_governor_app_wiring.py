@@ -300,7 +300,7 @@ def test_governor_runtime_runs_one_cycle_and_publishes_snapshot(monkeypatch) -> 
         "risk",
         "event_filter",
     ]
-    assert runtime.last_snapshot.version_id.startswith("cycle-")
+    assert runtime.last_snapshot.version_id.startswith("governor-")
     assert [snapshot.version_id for snapshot in runtime.published_snapshots] == [runtime.last_snapshot.version_id]
 
 
@@ -396,7 +396,7 @@ def test_governor_runtime_publishes_snapshot_to_shared_redis_store(monkeypatch) 
 
     stored = runtime.snapshot_store.get_latest_snapshot()
     assert stored is not None
-    assert stored.version_id.startswith("cycle-")
+    assert stored.version_id.startswith("governor-")
 
 
 def test_governor_cycle_can_publish_snapshot_from_approved_research(monkeypatch) -> None:
@@ -581,7 +581,7 @@ def test_governor_runtime_records_snapshot_publication_for_notifier(monkeypatch)
     asyncio.run(governor_app._run_governor_cycle(runtime))
 
     snapshot_version = history_store.written_rows["strategy_snapshots"][0]["version_id"]
-    assert snapshot_version.startswith("cycle-")
+    assert snapshot_version.startswith("governor-")
     assert history_store.written_rows["strategy_snapshots"] == [
         {
             "version_id": snapshot_version,
@@ -885,8 +885,8 @@ def test_governor_loop_runs_multiple_cycles_on_schedule(monkeypatch) -> None:
         asyncio.run(governor_app._run_governor_loop(runtime))
 
     assert len(runtime.published_snapshots) == 2
-    assert runtime.published_snapshots[0].version_id.startswith("cycle-")
-    assert runtime.published_snapshots[1].version_id.startswith("cycle-")
+    assert runtime.published_snapshots[0].version_id.startswith("governor-")
+    assert runtime.published_snapshots[1].version_id.startswith("governor-")
     assert waits == [5, 5]
 
 
@@ -939,8 +939,8 @@ def test_governor_loop_short_circuits_wait_on_event_trigger(monkeypatch) -> None
         asyncio.run(governor_app._run_governor_loop(runtime))
 
     assert len(runtime.published_snapshots) == 2
-    assert runtime.published_snapshots[0].version_id.startswith("cycle-")
-    assert runtime.published_snapshots[1].version_id.startswith("cycle-")
+    assert runtime.published_snapshots[0].version_id.startswith("governor-")
+    assert runtime.published_snapshots[1].version_id.startswith("governor-")
     assert waits == [30, 0]
 
 
@@ -1096,7 +1096,7 @@ def test_governor_cycle_contains_research_provider_failure_to_research_branch(mo
 
     asyncio.run(governor_app._run_governor_cycle(runtime))
 
-    assert runtime.last_snapshot.version_id.startswith("cycle-")
+    assert runtime.last_snapshot.version_id.startswith("governor-")
     assert history_store.written_rows["governor_runs"] == [
         {
             "version_id": runtime.last_snapshot.version_id,

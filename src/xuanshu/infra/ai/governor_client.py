@@ -205,13 +205,8 @@ def _normalize_snapshot_bounds(payload: dict[str, object]) -> dict[str, object]:
 
 
 def _build_snapshot_version_id(payload: Mapping[str, object]) -> str:
-    source_reason = str(payload.get("source_reason") or "governor").strip().lower()
-    normalized_reason = "".join(
-        character if character.isalnum() else "_"
-        for character in source_reason
-    ).strip("_") or "governor"
     generated_at = _coerce_datetime(payload.get("generated_at")) or datetime.now(UTC)
-    return f"{normalized_reason}-{generated_at.strftime('%Y%m%dT%H%M%SZ')}"
+    return f"governor-{generated_at.strftime('%Y%m%dT%H%M%SZ')}"
 
 
 def _coerce_datetime(value: object) -> datetime | None:

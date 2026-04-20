@@ -86,7 +86,7 @@ async def test_governor_client_overrides_model_supplied_version_id() -> None:
     snapshot = await client.generate_snapshot({"version_id": "snap-invalid"})
 
     assert snapshot.version_id != "snap-bounded"
-    assert snapshot.version_id.startswith("governor_ai-20260420T000000Z")
+    assert snapshot.version_id == "governor-20260420T000000Z"
 
 
 @pytest.mark.asyncio
