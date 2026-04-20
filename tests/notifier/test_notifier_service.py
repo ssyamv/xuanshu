@@ -65,6 +65,12 @@ class _SnapshotStore:
     def get_latest_snapshot(self):
         class _Snapshot:
             version_id = "snap-live"
+            market_mode = RunMode.DEGRADED
+            symbol_whitelist = ["BTC-USDT-SWAP"]
+            strategy_enable_flags = {"breakout": False, "mean_reversion": False, "risk_pause": True}
+            risk_multiplier = 0.25
+            per_symbol_max_position = 0.12
+            max_leverage = 1
 
         return _Snapshot()
 
@@ -106,6 +112,8 @@ async def test_notifier_service_renders_status_and_market_queries_from_runtime_s
     assert "故障标记：public_ws_disconnected" in status.text
     assert "预算：remaining_notional=120.0 remaining_order_count=8" in status.text
     assert "治理状态：status=published trigger=risk_event health=healthy" in status.text
+    assert "当前策略：risk_pause" in status.text
+    assert "参数：risk_multiplier=0.25 per_symbol_max_position=0.12 max_leverage=1" in status.text
     assert "BTC-USDT-SWAP" in market.text
     assert "ETH-USDT-SWAP" in market.text
     assert "BTC-USDT-SWAP: net=1.25 avg=99.8 upnl=1.2" in positions.text
@@ -333,6 +341,11 @@ async def test_notifier_service_emits_proactive_notifications_from_history_rows(
             "version_id": "snap-002",
             "market_mode": "degraded",
             "approval_state": "approved",
+            "symbol_whitelist": ["BTC-USDT-SWAP"],
+            "strategy_enable_flags": {"breakout": False, "mean_reversion": False, "risk_pause": True},
+            "risk_multiplier": 0.25,
+            "per_symbol_max_position": 0.12,
+            "max_leverage": 1,
         }
     )
     history.append_governor_run(
@@ -384,12 +397,10 @@ async def test_notifier_service_emits_proactive_notifications_from_history_rows(
 
     flushed = await service.flush_proactive_notifications(adapter=_Adapter())
 
-    assert flushed == 6
+    assert flushed == 4
     assert delivered == [
         "运行模式已切换为只减仓",
-        "治理研究已产出候选：1 个（provider=api，status=candidate_built，packages=pkg-001）",
-        "治理自动审批完成：approved（validation=succeeded）",
-        "治理快照已发布：snap-002（模式=degraded，审批=approved）",
+        "当前生效策略：risk_pause（模式=degraded，标的=BTC-USDT-SWAP，参数：risk_multiplier=0.25 per_symbol_max_position=0.12 max_leverage=1）",
         "恢复流程失败：exchange_state_mismatch",
         "风控事件：runtime_mode_changed startup gating tightened runtime to reduce_only",
     ]
@@ -403,6 +414,11 @@ async def test_notifier_service_skips_already_sent_governor_publication_even_whe
             "version_id": "snap-002",
             "market_mode": "degraded",
             "approval_state": "approved",
+            "symbol_whitelist": ["BTC-USDT-SWAP"],
+            "strategy_enable_flags": {"breakout": False, "mean_reversion": False, "risk_pause": True},
+            "risk_multiplier": 0.25,
+            "per_symbol_max_position": 0.12,
+            "max_leverage": 1,
         }
     )
     history.append_governor_run(
@@ -420,35 +436,13 @@ async def test_notifier_service_skips_already_sent_governor_publication_even_whe
     )
     history.append_notification_event(
         {
-            "category": "governor_research_ready",
-            "dedupe_key": "governor_run:snap-002:research_ready",
-            "severity": "INFO",
-            "status": "sent",
-            "attempt_count": 1,
-            "needs_retry": False,
-            "text": "治理研究已产出候选：1 个（provider=api，status=candidate_built，packages=pkg-001）",
-        }
-    )
-    history.append_notification_event(
-        {
-            "category": "governor_approval_completed",
-            "dedupe_key": "governor_run:snap-002:approval_completed",
-            "severity": "INFO",
-            "status": "sent",
-            "attempt_count": 1,
-            "needs_retry": False,
-            "text": "治理自动审批完成：approved（validation=succeeded）",
-        }
-    )
-    history.append_notification_event(
-        {
             "category": "governor_snapshot_published",
             "dedupe_key": "governor_run:snap-002:published",
             "severity": "INFO",
             "status": "sent",
             "attempt_count": 1,
             "needs_retry": False,
-            "text": "治理快照已发布：snap-002（模式=degraded，审批=approved）",
+            "text": "当前生效策略：risk_pause（模式=degraded，标的=BTC-USDT-SWAP，参数：risk_multiplier=0.25 per_symbol_max_position=0.12 max_leverage=1）",
         }
     )
     for index in range(130):

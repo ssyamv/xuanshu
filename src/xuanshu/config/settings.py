@@ -162,7 +162,9 @@ class GovernorRuntimeSettings(_XuanshuBaseSettings):
     openai_api_key: SecretStr | None = Field(default=None, validation_alias="OPENAI_API_KEY")
     research_provider: ResearchProviderName = Field(default=ResearchProviderName.API)
     ai_timeout_sec: int = Field(default=12, gt=0, le=300)
-    governor_interval_sec: int = Field(default=30, gt=0, le=3600)
+    governor_interval_sec: int = Field(default=86_400, gt=0, le=604_800)
+    research_history_days: int = Field(default=180, gt=0, le=365)
+    research_bar: str = Field(default="1H", min_length=1)
 
     @model_validator(mode="after")
     def validate_provider_requirements(self) -> "GovernorRuntimeSettings":

@@ -30,11 +30,9 @@ _PROACTIVE_CATEGORY_PRIORITY: dict[str, int] = {
     "trade_position_opened": 2,
     "trade_position_closed": 3,
     "mode_change": 4,
-    "governor_research_ready": 5,
-    "governor_approval_completed": 6,
-    "governor_snapshot_published": 7,
-    "recovery_failed": 8,
-    "risk_event": 9,
+    "governor_snapshot_published": 5,
+    "recovery_failed": 6,
+    "risk_event": 7,
 }
 
 
@@ -332,6 +330,9 @@ class NotifierService:
                 f"trigger={governor_health.get('trigger', 'unknown')} "
                 f"health={governor_health.get('health_state', 'unknown')}"
             )
+        strategy_summary_lines = self._render_strategy_summary(snapshot)
+        if strategy_summary_lines:
+            lines.extend(strategy_summary_lines)
         return "\n".join(lines)
 
     def _render_mode(self) -> str:
@@ -602,57 +603,95 @@ class NotifierService:
             version_id = row.get("version_id")
             if not isinstance(version_id, str):
                 continue
-            research_status = str(row.get("research_status", "")).strip()
-            research_provider = str(row.get("research_provider", "")).strip() or "unknown"
-            validation_status = str(row.get("validation_status", "")).strip() or "unknown"
-            approval_status = str(row.get("approval_status", "")).strip() or "unknown"
-            approval_decision = str(row.get("approval_decision", "")).strip() or approval_status
-            research_candidate_count = row.get("research_candidate_count", 0)
-            approved_package_ids = row.get("approved_research_candidate_ids") or []
-
-            if (
-                isinstance(research_candidate_count, int)
-                and research_candidate_count > 0
-                and research_status
-                and research_status != "not_requested"
-            ):
-                package_summary = ",".join(str(item) for item in approved_package_ids) or "none"
-                candidates.append(
-                    {
-                        "category": "governor_research_ready",
-                        "dedupe_key": f"governor_run:{version_id}:research_ready",
-                        "severity": "INFO",
-                        "text": (
-                            "治理研究已产出候选："
-                            f"{research_candidate_count} 个"
-                            f"（provider={research_provider}，status={research_status}，packages={package_summary}）"
-                        ),
-                    }
-                )
-
-            if approval_status in {"approved", "approved_with_guardrails", "rejected", "needs_revision"}:
-                candidates.append(
-                    {
-                        "category": "governor_approval_completed",
-                        "dedupe_key": f"governor_run:{version_id}:approval_completed",
-                        "severity": "INFO",
-                        "text": f"治理自动审批完成：{approval_decision}（validation={validation_status}）",
-                    }
-                )
 
             if row.get("status") == "published":
                 snapshot = snapshots_by_version.get(version_id, {})
-                market_mode = snapshot.get("market_mode", "unknown")
-                approval = snapshot.get("approval_state", "unknown")
+                summary = self._format_governor_snapshot_summary(snapshot)
+                if summary is None:
+                    latest_snapshot = self._snapshot_store.get_latest_snapshot()
+                    if getattr(latest_snapshot, "version_id", None) == version_id:
+                        summary = self._format_governor_snapshot_summary(latest_snapshot)
+                if summary is None:
+                    continue
                 candidates.append(
                     {
                         "category": "governor_snapshot_published",
                         "dedupe_key": f"governor_run:{version_id}:published",
                         "severity": "INFO",
-                        "text": f"治理快照已发布：{version_id}（模式={market_mode}，审批={approval}）",
+                        "text": summary,
                     }
                 )
         return candidates
+
+    def _render_strategy_summary(self, snapshot: object) -> list[str]:
+        summary = self._extract_snapshot_strategy_summary(snapshot)
+        if summary is None:
+            return []
+        return [
+            f"当前策略：{summary['strategies']}",
+            (
+                "参数："
+                f"risk_multiplier={summary['risk_multiplier']} "
+                f"per_symbol_max_position={summary['per_symbol_max_position']} "
+                f"max_leverage={summary['max_leverage']}"
+            ),
+            f"标的：{summary['symbols']}",
+        ]
+
+    def _format_governor_snapshot_summary(self, snapshot: object) -> str | None:
+        summary = self._extract_snapshot_strategy_summary(snapshot)
+        if summary is None:
+            return None
+        return (
+            f"当前生效策略：{summary['strategies']}（模式={summary['market_mode']}，"
+            f"标的={summary['symbols']}，参数：risk_multiplier={summary['risk_multiplier']} "
+            f"per_symbol_max_position={summary['per_symbol_max_position']} "
+            f"max_leverage={summary['max_leverage']}）"
+        )
+
+    def _extract_snapshot_strategy_summary(self, snapshot: object) -> dict[str, str] | None:
+        if snapshot is None:
+            return None
+        if isinstance(snapshot, dict):
+            strategy_enable_flags = snapshot.get("strategy_enable_flags")
+            symbol_whitelist = snapshot.get("symbol_whitelist")
+            risk_multiplier = snapshot.get("risk_multiplier")
+            per_symbol_max_position = snapshot.get("per_symbol_max_position")
+            max_leverage = snapshot.get("max_leverage")
+            market_mode = snapshot.get("market_mode")
+        else:
+            strategy_enable_flags = getattr(snapshot, "strategy_enable_flags", None)
+            symbol_whitelist = getattr(snapshot, "symbol_whitelist", None)
+            risk_multiplier = getattr(snapshot, "risk_multiplier", None)
+            per_symbol_max_position = getattr(snapshot, "per_symbol_max_position", None)
+            max_leverage = getattr(snapshot, "max_leverage", None)
+            market_mode = getattr(snapshot, "market_mode", None)
+
+        if not isinstance(strategy_enable_flags, dict):
+            return None
+        enabled_strategies = [
+            strategy_id
+            for strategy_id, enabled in strategy_enable_flags.items()
+            if enabled is True and isinstance(strategy_id, str)
+        ]
+        if not enabled_strategies:
+            enabled_strategies = ["none"]
+
+        symbols = ",".join(
+            symbol for symbol in symbol_whitelist if isinstance(symbol, str) and symbol.strip()
+        ) if isinstance(symbol_whitelist, list) else ""
+        if not symbols:
+            symbols = "unknown"
+
+        market_mode_value = market_mode.value if isinstance(market_mode, RunMode) else str(market_mode or "unknown")
+        return {
+            "strategies": ", ".join(enabled_strategies),
+            "symbols": symbols,
+            "risk_multiplier": str(risk_multiplier if risk_multiplier is not None else "n/a"),
+            "per_symbol_max_position": str(per_symbol_max_position if per_symbol_max_position is not None else "n/a"),
+            "max_leverage": str(max_leverage if max_leverage is not None else "n/a"),
+            "market_mode": market_mode_value,
+        }
 
     def _collect_recovery_failure_candidates(self, *, limit: int) -> list[dict[str, str]]:
         rows = self._history_store.list_recent_rows("risk_events", limit=limit)

@@ -726,7 +726,7 @@ class GovernorService:
             approved_source_reason = str(state_summary.get("approved_source_reason") or "").strip()
             if approval_record is not None and approved_source_reason:
                 snapshot = snapshot.model_copy(update={"source_reason": approved_source_reason})
-            if trigger_reason == "schedule" and self._snapshots_are_semantically_equal(snapshot, last_snapshot):
+            if self._snapshots_are_semantically_equal(snapshot, last_snapshot):
                 return GovernorCycleResult(snapshot=last_snapshot, status="unchanged", error=None)
             status = "published"
             error = None

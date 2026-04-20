@@ -117,6 +117,18 @@ class PostgresRuntimeStore:
             {"strategy_package_id": strategy_package_id},
         ) is not None
 
+    def find_strategy_package(self, *, strategy_package_id: str) -> dict[str, Any] | None:
+        return self._find_row_by_payload_fields(
+            "strategy_packages",
+            {"strategy_package_id": strategy_package_id},
+        )
+
+    def find_strategy_snapshot(self, *, version_id: str) -> dict[str, Any] | None:
+        return self._find_row_by_payload_fields(
+            "strategy_snapshots",
+            {"version_id": version_id},
+        )
+
     def has_backtest_report(self, *, backtest_report_id: str) -> bool:
         return self._find_row_by_payload_fields(
             "backtest_reports",

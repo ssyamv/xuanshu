@@ -3,16 +3,19 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 
 from xuanshu.config.settings import GovernorRuntimeSettings
 from xuanshu.contracts.approval import ApprovalDecision, ApprovalRecord
+from xuanshu.contracts.backtest import BacktestReport
 from xuanshu.contracts.research import ResearchTrigger, StrategyPackage
 from xuanshu.contracts.strategy import StrategyConfigSnapshot
 from xuanshu.core.enums import ApprovalState, RunMode
 from xuanshu.governor.backtest import BacktestValidator
 from xuanshu.governor.research_providers import ResearchProviderName, create_research_provider
-from xuanshu.governor.service import GovernorService, _APPROVED_RESEARCH_SOURCE_REASON
+from xuanshu.governor.service import GovernorCycleResult, GovernorService, _APPROVED_RESEARCH_SOURCE_REASON
 from xuanshu.governor.research import StrategyResearchEngine
+from xuanshu.infra.okx.rest import OkxRestClient
 from xuanshu.infra.ai.governor_client import (
     CodexCliGovernorAgentRunner,
     ConfiguredGovernorAgentRunner,
@@ -29,6 +32,7 @@ from xuanshu.infra.storage.redis_store import (
 from xuanshu.ops.runtime_logging import configure_runtime_logger
 
 _LOGGER = configure_runtime_logger("xuanshu.governor")
+_OKX_REST_BASE_URL = "https://www.okx.com"
 
 
 @dataclass(slots=True)
@@ -38,6 +42,7 @@ class GovernorRuntime:
     research_engine: StrategyResearchEngine
     backtest_validator: BacktestValidator
     governor_client: GovernorClient
+    market_data_client: OkxRestClient
     case_store: QdrantCaseStore
     snapshot_store: SnapshotStore
     runtime_store: RuntimeStateStore
@@ -82,6 +87,14 @@ def build_backtest_validator() -> BacktestValidator:
     return BacktestValidator()
 
 
+def build_market_data_client(settings: GovernorRuntimeSettings) -> OkxRestClient:
+    return OkxRestClient(
+        base_url=_OKX_REST_BASE_URL,
+        api_key="public",
+        timeout=float(settings.ai_timeout_sec),
+    )
+
+
 def build_snapshot_store(settings: GovernorRuntimeSettings) -> SnapshotStore:
     return RedisSnapshotStore(redis_url=str(settings.redis_url))
 
@@ -123,8 +136,18 @@ async def _prepare_research_candidates(
     if not symbol_scope:
         return ResearchCandidateBuildResult(status="missing_symbol_summaries")
 
-    historical_rows = _load_research_historical_rows(runtime, symbol_scope)
-    if not historical_rows:
+    selected_symbol_scope: list[str] | None = None
+    historical_rows: list[dict[str, object]] = []
+    for symbol in symbol_scope:
+        candidate_scope = [symbol]
+        candidate_rows = await _load_research_historical_rows(runtime, candidate_scope)
+        if not candidate_rows:
+            continue
+        selected_symbol_scope = candidate_scope
+        historical_rows = candidate_rows
+        break
+
+    if selected_symbol_scope is None:
         return ResearchCandidateBuildResult(status="insufficient_history")
 
     return ResearchCandidateBuildResult(
@@ -133,7 +156,7 @@ async def _prepare_research_candidates(
         candidates=[
             await runtime.research_engine.build_candidate_package_from_provider(
                 trigger=ResearchTrigger.SCHEDULE,
-                symbol_scope=symbol_scope,
+                symbol_scope=selected_symbol_scope,
                 market_environment="trend",
                 historical_rows=historical_rows,
                 research_reason="governor strategy research",
@@ -142,17 +165,79 @@ async def _prepare_research_candidates(
     )
 
 
-def _load_research_historical_rows(
+async def _load_research_historical_rows(
     runtime: GovernorRuntime,
     symbol_scope: list[str],
 ) -> list[dict[str, object]]:
+    if len(symbol_scope) != 1:
+        return []
+    return await _fetch_okx_historical_rows(runtime, symbol_scope[0])
+
+
+async def _fetch_okx_historical_rows(
+    runtime: GovernorRuntime,
+    symbol: str,
+) -> list[dict[str, object]]:
+    window_end = datetime.now(UTC)
+    window_start = window_end - timedelta(days=runtime.settings.research_history_days)
+    after: str | None = None
     historical_rows: list[dict[str, object]] = []
-    for table in ("orders", "fills", "positions"):
-        for row in reversed(runtime.history_store.list_recent_rows(table, limit=20)):
-            historical_row = _coerce_historical_row(row, symbol_scope)
-            if historical_row is not None:
-                historical_rows.append(historical_row)
+
+    while True:
+        candles = await runtime.market_data_client.fetch_history_candles(
+            symbol,
+            bar=runtime.settings.research_bar,
+            after=after,
+            limit=100,
+        )
+        if not candles:
+            break
+        normalized_batch = [_coerce_okx_candle_row(item) for item in candles]
+        normalized_batch = [row for row in normalized_batch if row is not None]
+        if not normalized_batch:
+            break
+
+        historical_rows.extend(
+            row for row in normalized_batch if row["timestamp"] >= window_start
+        )
+        oldest_timestamp = min(row["timestamp"] for row in normalized_batch)
+        if oldest_timestamp <= window_start:
+            break
+        oldest_ts_ms = int(oldest_timestamp.timestamp() * 1000)
+        after = str(oldest_ts_ms)
+        await asyncio.sleep(0.25)
+
+    historical_rows.sort(key=lambda row: row["timestamp"])
+    if not historical_rows:
+        return []
     return historical_rows
+
+
+def _coerce_okx_candle_row(row: object) -> dict[str, object] | None:
+    if not isinstance(row, dict):
+        return None
+    timestamp = _coerce_okx_timestamp(row.get("ts"))
+    close = _coerce_historical_close(row.get("close"))
+    if timestamp is None or close is None:
+        return None
+    return {
+        "timestamp": timestamp,
+        "close": close,
+    }
+
+
+def _coerce_okx_timestamp(value: object) -> datetime | None:
+    if isinstance(value, str):
+        normalized = value.strip()
+        if not normalized:
+            return None
+        try:
+            return datetime.fromtimestamp(int(normalized) / 1000, tz=UTC)
+        except ValueError:
+            return None
+    if isinstance(value, int | float | Decimal):
+        return datetime.fromtimestamp(int(value) / 1000, tz=UTC)
+    return None
 
 
 def _coerce_historical_row(
@@ -245,6 +330,7 @@ def build_governor_runtime() -> GovernorRuntime:
         research_engine=build_research_engine(settings),
         backtest_validator=build_backtest_validator(),
         governor_client=build_governor_client(settings),
+        market_data_client=build_market_data_client(settings),
         case_store=build_case_store(settings),
         snapshot_store=build_snapshot_store(settings),
         runtime_store=build_runtime_state_store(settings),
@@ -361,46 +447,103 @@ async def _run_governor_cycle(runtime: GovernorRuntime) -> None:
                 backtest_report_id=backtest_report.backtest_report_id,
             ):
                 runtime.history_store.append_backtest_report(backtest_report.model_dump(mode="json"))
-            approval_record = runtime.service.build_auto_approval_record(
-                state_summary=state_summary,
-                strategy_package_id=candidate.strategy_package_id,
-                backtest_report_id=backtest_report.backtest_report_id,
-                created_at=datetime.now(UTC),
-            )
-            approval_status = approval_record.decision.value
-            approval_record_id = approval_record.approval_record_id
-            existing_approval_record = runtime.history_store.find_approval_record(
-                strategy_package_id=candidate.strategy_package_id,
-                backtest_report_id=backtest_report.backtest_report_id,
-            )
-            if existing_approval_record is None or existing_approval_record.get("approval_record_id") != approval_record.approval_record_id:
-                runtime.history_store.append_approval_record(approval_record.model_dump(mode="json"))
-            state_summary["approval_required"] = True
-            state_summary["approval_record"] = approval_record.model_dump(mode="json")
-            runtime.runtime_store.set_pending_approval_summary(
-                {
-                    "pending_count": 0,
-                    "latest_strategy_package_id": candidate.strategy_package_id,
-                    "latest_backtest_report_id": backtest_report.backtest_report_id,
-                    "approval_status": approval_status,
-                }
-            )
-            if approval_record.decision in {
-                ApprovalDecision.APPROVED,
-                ApprovalDecision.APPROVED_WITH_GUARDRAILS,
-            }:
-                approved_research_candidates = [candidate]
-                state_summary["research_candidates"] = [candidate.model_dump(mode="json")]
-                state_summary["approved_source_reason"] = _APPROVED_RESEARCH_SOURCE_REASON
-                runtime.runtime_store.set_latest_approved_package_summary(
+            if backtest_report.net_pnl <= 0.0:
+                validation_status = "failed"
+                validation_error = (
+                    f"candidate net_pnl {backtest_report.net_pnl} "
+                    "did not exceed minimum quality threshold 0.0"
+                )
+                approval_status = "validation_failed"
+                runtime.runtime_store.set_pending_approval_summary(
                     {
+                        "pending_count": 0,
                         "latest_strategy_package_id": candidate.strategy_package_id,
-                        "backtest_report_id": backtest_report.backtest_report_id,
-                        "approval_record_id": approval_record.approval_record_id,
-                        "approved_at": approval_record.created_at.isoformat().replace("+00:00", "Z"),
-                        "approval_decision": approval_record.decision.value,
+                        "approval_status": approval_status,
                     }
                 )
+                state_summary["validation_status"] = validation_status
+                state_summary["validation_error"] = validation_error
+                runtime.runtime_store.set_backtest_health_summary(
+                    {
+                        "status": "candidate_rejected_low_quality",
+                        "candidate_strategy_package_id": candidate.strategy_package_id,
+                        "candidate_backtest_report_id": backtest_report.backtest_report_id,
+                    }
+                )
+                backtest_report_id = None
+            else:
+                baseline_report = _build_baseline_backtest_report(
+                    runtime=runtime,
+                    historical_rows=historical_rows,
+                )
+                if baseline_report is not None and backtest_report.net_pnl <= baseline_report.net_pnl:
+                    validation_status = "failed"
+                    validation_error = (
+                        f"candidate net_pnl {backtest_report.net_pnl} "
+                        f"did not exceed current strategy {baseline_report.net_pnl}"
+                    )
+                    approval_status = "validation_failed"
+                    runtime.runtime_store.set_pending_approval_summary(
+                        {
+                            "pending_count": 0,
+                            "latest_strategy_package_id": candidate.strategy_package_id,
+                            "approval_status": approval_status,
+                        }
+                    )
+                    state_summary["validation_status"] = validation_status
+                    state_summary["validation_error"] = validation_error
+                    state_summary["baseline_backtest_report"] = baseline_report.model_dump(mode="json")
+                    runtime.runtime_store.set_backtest_health_summary(
+                        {
+                            "status": "candidate_rejected_underperforming_baseline",
+                            "candidate_strategy_package_id": candidate.strategy_package_id,
+                            "candidate_backtest_report_id": backtest_report.backtest_report_id,
+                        }
+                    )
+                    backtest_report_id = None
+                else:
+                    if baseline_report is not None:
+                        state_summary["baseline_backtest_report"] = baseline_report.model_dump(mode="json")
+                    approval_record = runtime.service.build_auto_approval_record(
+                        state_summary=state_summary,
+                        strategy_package_id=candidate.strategy_package_id,
+                        backtest_report_id=backtest_report.backtest_report_id,
+                        created_at=datetime.now(UTC),
+                    )
+                    approval_status = approval_record.decision.value
+                    approval_record_id = approval_record.approval_record_id
+                    existing_approval_record = runtime.history_store.find_approval_record(
+                        strategy_package_id=candidate.strategy_package_id,
+                        backtest_report_id=backtest_report.backtest_report_id,
+                    )
+                    if existing_approval_record is None or existing_approval_record.get("approval_record_id") != approval_record.approval_record_id:
+                        runtime.history_store.append_approval_record(approval_record.model_dump(mode="json"))
+                    state_summary["approval_required"] = True
+                    state_summary["approval_record"] = approval_record.model_dump(mode="json")
+                    runtime.runtime_store.set_pending_approval_summary(
+                        {
+                            "pending_count": 0,
+                            "latest_strategy_package_id": candidate.strategy_package_id,
+                            "latest_backtest_report_id": backtest_report.backtest_report_id,
+                            "approval_status": approval_status,
+                        }
+                    )
+                    if approval_record.decision in {
+                        ApprovalDecision.APPROVED,
+                        ApprovalDecision.APPROVED_WITH_GUARDRAILS,
+                    }:
+                        approved_research_candidates = [candidate]
+                        state_summary["research_candidates"] = [candidate.model_dump(mode="json")]
+                        state_summary["approved_source_reason"] = _APPROVED_RESEARCH_SOURCE_REASON
+                        runtime.runtime_store.set_latest_approved_package_summary(
+                            {
+                                "latest_strategy_package_id": candidate.strategy_package_id,
+                                "backtest_report_id": backtest_report.backtest_report_id,
+                                "approval_record_id": approval_record.approval_record_id,
+                                "approved_at": approval_record.created_at.isoformat().replace("+00:00", "Z"),
+                                "approval_decision": approval_record.decision.value,
+                            }
+                        )
 
         state_summary["validation_status"] = validation_status
         state_summary["validation_error"] = validation_error
@@ -419,6 +562,12 @@ async def _run_governor_cycle(runtime: GovernorRuntime) -> None:
             "version_id": snapshot.version_id,
             "market_mode": snapshot.market_mode.value,
             "approval_state": snapshot.approval_state.value,
+            "symbol_whitelist": list(snapshot.symbol_whitelist),
+            "strategy_enable_flags": dict(snapshot.strategy_enable_flags),
+            "risk_multiplier": snapshot.risk_multiplier,
+            "per_symbol_max_position": snapshot.per_symbol_max_position,
+            "max_leverage": snapshot.max_leverage,
+            "source_reason": snapshot.source_reason,
         }
         if approved_research_candidates and backtest_report_id is not None and approval_record is not None:
             payload.update(
@@ -432,13 +581,20 @@ async def _run_governor_cycle(runtime: GovernorRuntime) -> None:
             )
         runtime.history_store.append_strategy_snapshot(payload)
 
-    result = await runtime.service.run_cycle(
-        state_summary=state_summary,
-        last_snapshot=runtime.last_snapshot,
-        governor_client=runtime.governor_client,
-        publish_snapshot=_publish_snapshot,
-        trigger_reason=trigger_reason,
-    )
+    if trigger_reason == "schedule" and research_status != "candidate_built":
+        result = GovernorCycleResult(
+            snapshot=runtime.last_snapshot,
+            status="unchanged",
+            error=research_error,
+        )
+    else:
+        result = await runtime.service.run_cycle(
+            state_summary=state_summary,
+            last_snapshot=runtime.last_snapshot,
+            governor_client=runtime.governor_client,
+            publish_snapshot=_publish_snapshot,
+            trigger_reason=trigger_reason,
+        )
     runtime.last_snapshot = published_snapshot or result.snapshot
     runtime.history_store.append_governor_run(
         {
@@ -510,6 +666,75 @@ async def _run_governor_loop(runtime: GovernorRuntime) -> None:
         )
         delay_sec = 0 if trigger_reason != "schedule" else runtime.settings.governor_interval_sec
         await _wait_for_next_cycle(delay_sec)
+
+
+def _build_baseline_backtest_report(
+    *,
+    runtime: GovernorRuntime,
+    historical_rows: list[dict[str, object]],
+) -> BacktestReport | None:
+    if not _snapshot_has_tradable_strategy(runtime.last_snapshot):
+        return _build_zero_trade_backtest_report(
+            strategy_package_id=f"baseline-{runtime.last_snapshot.version_id}",
+            symbol_scope=list(runtime.last_snapshot.symbol_whitelist),
+            historical_rows=historical_rows,
+        )
+    current_snapshot_row = runtime.history_store.find_strategy_snapshot(version_id=runtime.last_snapshot.version_id)
+    if current_snapshot_row is None:
+        return None
+    strategy_package_id = current_snapshot_row.get("strategy_package_id")
+    if not isinstance(strategy_package_id, str) or not strategy_package_id.strip():
+        return None
+    strategy_package_row = runtime.history_store.find_strategy_package(strategy_package_id=strategy_package_id)
+    if strategy_package_row is None:
+        return None
+    baseline_package = StrategyPackage.model_validate(strategy_package_row)
+    return runtime.backtest_validator.validate(
+        package=baseline_package,
+        historical_rows=historical_rows,
+    )
+
+
+def _snapshot_has_tradable_strategy(snapshot: StrategyConfigSnapshot) -> bool:
+    return bool(
+        snapshot.strategy_enable_flags.get("breakout") is True
+        or snapshot.strategy_enable_flags.get("mean_reversion") is True
+    )
+
+
+def _build_zero_trade_backtest_report(
+    *,
+    strategy_package_id: str,
+    symbol_scope: list[str],
+    historical_rows: list[dict[str, object]],
+) -> BacktestReport:
+    normalized_rows = sorted(
+        historical_rows,
+        key=lambda row: row["timestamp"],
+    )
+    timestamps = [row["timestamp"].astimezone(UTC) for row in normalized_rows]
+    return BacktestReport(
+        backtest_report_id=f"{strategy_package_id}-zero-baseline",
+        strategy_package_id=strategy_package_id,
+        symbol_scope=symbol_scope,
+        dataset_range={
+            "start": timestamps[0],
+            "end": timestamps[-1],
+            "regime_fit": "unknown",
+        },
+        sample_count=len(historical_rows),
+        trade_count=0,
+        trade_count_sufficiency="insufficient",
+        net_pnl=0.0,
+        max_drawdown=0.0,
+        win_rate=0.0,
+        profit_factor=0.0,
+        stability_score=0.0,
+        overfit_risk="high",
+        failure_modes=[],
+        invalidating_conditions=[],
+        generated_at=timestamps[-1],
+    )
 
 
 async def _run_governor(runtime: GovernorRuntime) -> None:

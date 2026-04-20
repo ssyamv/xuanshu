@@ -1403,3 +1403,44 @@ async def test_governor_service_blocks_validation_failed_before_publication() ->
     assert result.status == "validation_failed"
     assert result.error == "historical_rows timestamps must be unique"
     assert result.snapshot.version_id == "snap-last"
+
+
+@pytest.mark.asyncio
+async def test_governor_service_skips_semantically_equal_snapshot_for_mode_change() -> None:
+    service = GovernorService()
+    published: list[str] = []
+    last_snapshot = StrategyConfigSnapshot(
+        version_id="snap-last",
+        generated_at=datetime.now(UTC),
+        effective_from=datetime.now(UTC),
+        expires_at=datetime.now(UTC) + timedelta(minutes=5),
+        symbol_whitelist=["BTC-USDT-SWAP"],
+        strategy_enable_flags={"breakout": False, "mean_reversion": False, "risk_pause": True},
+        risk_multiplier=0.25,
+        per_symbol_max_position=0.12,
+        max_leverage=1,
+        market_mode=RunMode.NORMAL,
+        approval_state=ApprovalState.APPROVED,
+        source_reason="approved research package|guardrailed",
+        ttl_sec=300,
+    )
+    candidate_snapshot = last_snapshot.model_copy(
+        update={
+            "version_id": "snap-same-semantics",
+            "generated_at": datetime.now(UTC) + timedelta(seconds=5),
+            "effective_from": datetime.now(UTC) + timedelta(seconds=5),
+            "expires_at": datetime.now(UTC) + timedelta(minutes=6),
+        }
+    )
+
+    result = await service.run_cycle(
+        state_summary={"scope": "governor"},
+        last_snapshot=last_snapshot,
+        governor_client=_GovernorClientReturning(candidate_snapshot),
+        publish_snapshot=lambda snapshot: published.append(snapshot.version_id),
+        trigger_reason="mode_change",
+    )
+
+    assert published == []
+    assert result.status == "unchanged"
+    assert result.snapshot.version_id == "snap-last"

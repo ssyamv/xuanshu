@@ -184,8 +184,9 @@ def _parse_suggestion_payload(payload: object) -> ResearchProviderSuggestion:
 
 
 def _canonicalize_historical_rows(historical_rows: list[dict[str, object]]) -> list[dict[str, object]]:
+    sampled_rows = _sample_research_rows(historical_rows, limit=240)
     canonical_rows: list[dict[str, object]] = []
-    for row in historical_rows:
+    for row in sampled_rows:
         timestamp = row.get("timestamp")
         canonical_rows.append(
             {
@@ -194,3 +195,16 @@ def _canonicalize_historical_rows(historical_rows: list[dict[str, object]]) -> l
             }
         )
     return canonical_rows
+
+
+def _sample_research_rows(historical_rows: list[dict[str, object]], *, limit: int) -> list[dict[str, object]]:
+    if len(historical_rows) <= limit:
+        return historical_rows
+    if limit <= 1:
+        return [historical_rows[-1]]
+    last_index = len(historical_rows) - 1
+    sampled_indices = {
+        round(index * last_index / (limit - 1))
+        for index in range(limit)
+    }
+    return [historical_rows[index] for index in sorted(sampled_indices)]

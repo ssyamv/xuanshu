@@ -49,14 +49,22 @@ class StrategyResearchEngine:
             research_reason=research_reason,
         )
         provider_reason = f"{research_reason} | {self._normalize_text(suggestion.thesis, 'thesis')}"
+        normalized_strategy_family = self._normalize_provider_strategy_family(
+            suggestion.strategy_family,
+            market_environment=market_environment,
+        )
+        normalized_entry_signal = self._normalize_provider_entry_signal(
+            suggestion.entry_signal,
+            strategy_family=normalized_strategy_family,
+        )
         return self._build_candidate_package(
             trigger=trigger,
             symbol_scope=symbol_scope,
             market_environment=market_environment,
             historical_rows=historical_rows,
             research_reason=provider_reason,
-            strategy_family=suggestion.strategy_family,
-            entry_signal=suggestion.entry_signal,
+            strategy_family=normalized_strategy_family,
+            entry_signal=normalized_entry_signal,
             stop_loss_bps=suggestion.exit_stop_loss_bps,
             take_profit_bps=suggestion.exit_take_profit_bps,
             risk_fraction=suggestion.risk_fraction,
@@ -211,6 +219,32 @@ class StrategyResearchEngine:
     @staticmethod
     def _select_strategy_family(market_environment: str) -> str:
         return "breakout" if market_environment == "trend" else "mean_reversion"
+
+    @classmethod
+    def _normalize_provider_strategy_family(cls, value: str, *, market_environment: str) -> str:
+        normalized = cls._normalize_free_text_label(value)
+        if normalized == "breakout" or any(
+            token in normalized for token in ("breakout", "trend", "momentum", "continuation", "follow")
+        ):
+            return "breakout"
+        if normalized == "mean_reversion" or any(
+            token in normalized for token in ("mean reversion", "mean_reversion", "reversion", "range")
+        ):
+            return "mean_reversion"
+        return cls._select_strategy_family(market_environment)
+
+    @classmethod
+    def _normalize_provider_entry_signal(cls, value: str, *, strategy_family: str) -> str:
+        normalized = cls._normalize_free_text_label(value)
+        if strategy_family == "breakout":
+            return "breakout_confirmed"
+        if "range retest" in normalized or "range_retest" in normalized or "retest" in normalized:
+            return "range_retest"
+        return "mean_reversion_signal"
+
+    @staticmethod
+    def _normalize_free_text_label(value: str) -> str:
+        return " ".join(value.strip().lower().replace("-", " ").replace("_", " ").split())
 
     @staticmethod
     def _normalize_text(value: str, field_name: str) -> str:

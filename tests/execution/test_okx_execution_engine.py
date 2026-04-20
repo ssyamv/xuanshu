@@ -733,6 +733,7 @@ def test_okx_rest_client_builds_signed_headers_and_place_order_payload() -> None
         "instId": "BTC-USDT-SWAP",
         "tdMode": "cross",
         "side": "buy",
+        "posSide": "long",
         "ordType": "market",
         "sz": "1",
         "clOrdId": "btc-breakout-000001",
@@ -1231,5 +1232,51 @@ def test_okx_rest_client_rejects_blank_symbols_for_signed_getters() -> None:
         asyncio.run(client.fetch_positions("\t", timestamp))
 
     assert get_called is False
+
+    asyncio.run(client.aclose())
+
+
+def test_okx_rest_client_fetch_history_candles_uses_public_endpoint_and_parses_rows() -> None:
+    client = OkxRestClient(
+        base_url="https://www.okx.com",
+        api_key="api-key",
+    )
+    captured: list[str] = []
+
+    class DummyResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, object]:
+            return {
+                "code": "0",
+                "data": [
+                    ["1713715200000", "100", "101", "99", "100.5", "1", "2", "3", "1"],
+                    ["1713711600000", "99", "100", "98", "99.5", "1", "2", "3", "1"],
+                ],
+            }
+
+    async def fake_get(path: str) -> DummyResponse:
+        captured.append(path)
+        return DummyResponse()
+
+    client.client.get = fake_get  # type: ignore[method-assign]
+
+    rows = asyncio.run(
+        client.fetch_history_candles(
+            "BTC-USDT-SWAP",
+            bar="1H",
+            after="1713708000000",
+            limit=100,
+        )
+    )
+
+    assert captured == [
+        "/api/v5/market/history-candles?instId=BTC-USDT-SWAP&bar=1H&limit=100&after=1713708000000"
+    ]
+    assert rows == [
+        {"ts": "1713715200000", "open": "100", "high": "101", "low": "99", "close": "100.5"},
+        {"ts": "1713711600000", "open": "99", "high": "100", "low": "98", "close": "99.5"},
+    ]
 
     asyncio.run(client.aclose())

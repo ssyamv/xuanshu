@@ -126,6 +126,30 @@ class OkxRestClient:
     async def fetch_account_summary(self, timestamp: str) -> list[dict[str, object]]:
         return await self._signed_get("/api/v5/account/balance", timestamp)
 
+    async def fetch_history_candles(
+        self,
+        symbol: str,
+        *,
+        bar: str = "1H",
+        after: str | None = None,
+        before: str | None = None,
+        limit: int = 100,
+    ) -> list[dict[str, object]]:
+        self._validate_non_blank_fields({"instId": symbol, "bar": bar})
+        if limit <= 0 or limit > 100:
+            raise ValueError("limit must be between 1 and 100")
+        params = {"instId": symbol, "bar": bar, "limit": str(limit)}
+        if after is not None:
+            self._validate_non_blank_fields({"after": after})
+            params["after"] = after
+        if before is not None:
+            self._validate_non_blank_fields({"before": before})
+            params["before"] = before
+        path = self._build_query_path("/api/v5/market/history-candles", params)
+        response = await self.client.get(path)
+        response.raise_for_status()
+        return self._extract_candle_data_payload(response.json())
+
     async def _signed_get(self, path: str, timestamp: str) -> list[dict[str, object]]:
         headers = self.build_signed_headers("GET", path, "", timestamp)
         response = await self.client.get(path, headers=headers)
@@ -158,6 +182,25 @@ class OkxRestClient:
                     payload=item,
                 )
         return data
+
+    def _extract_candle_data_payload(self, payload: object) -> list[dict[str, object]]:
+        payload_object = self._validate_payload_object(payload)
+        self._raise_for_business_error(payload_object)
+        data = self._extract_data_list(payload_object)
+        normalized: list[dict[str, object]] = []
+        for item in data:
+            if not isinstance(item, list) or len(item) < 5:
+                raise ValueError("OKX candle payload items must be arrays with at least 5 entries")
+            normalized.append(
+                {
+                    "ts": item[0],
+                    "open": item[1],
+                    "high": item[2],
+                    "low": item[3],
+                    "close": item[4],
+                }
+            )
+        return normalized
 
     def _validate_payload_object(self, payload: object) -> dict[str, object]:
         if not isinstance(payload, dict):

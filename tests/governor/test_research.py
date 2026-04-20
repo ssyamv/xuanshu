@@ -73,13 +73,51 @@ async def test_strategy_research_engine_builds_candidate_package_from_provider_a
     )
 
     assert package.strategy_family == "breakout"
-    assert package.entry_rules == {"signal": "provider_breakout_signal"}
+    assert package.entry_rules == {"signal": "breakout_confirmed"}
     assert package.exit_rules == {"stop_loss_bps": 65, "take_profit_bps": 150}
     assert package.position_sizing_rules == {"risk_fraction": 0.003}
     assert package.risk_constraints == {"max_hold_minutes": 90}
     assert package.failure_modes == ["whipsaw"]
     assert package.invalidating_conditions == ["trend breakdown"]
     assert package.research_reason == "manual trend study | trend continuation remains intact"
+
+
+@pytest.mark.asyncio
+async def test_strategy_research_engine_normalizes_descriptive_provider_strategy_fields() -> None:
+    class _Provider:
+        provider_name = ResearchProviderName.CODEX_CLI
+
+        async def generate_analysis(self, *, symbol_scope, market_environment, historical_rows, research_reason):
+            return research_providers_module.ResearchProviderSuggestion(
+                thesis="short-horizon downside continuation remains intact",
+                strategy_family="intraday trend-following pullback continuation",
+                entry_signal=(
+                    "After a weak countertrend bounce, require price to fail to reclaim the prior "
+                    "short-term swing area and then print a fresh local low."
+                ),
+                exit_stop_loss_bps=65,
+                exit_take_profit_bps=150,
+                risk_fraction=0.003,
+                max_hold_minutes=90,
+                failure_modes=["sharp reversal"],
+                invalidating_conditions=["structure break"],
+            )
+
+    engine = StrategyResearchEngine(provider=_Provider())
+
+    package = await engine.build_candidate_package_from_provider(
+        trigger=ResearchTrigger.SCHEDULE,
+        symbol_scope=["ETH-USDT-SWAP"],
+        market_environment="trend",
+        historical_rows=[
+            {"timestamp": datetime(2026, 4, 19, 0, 0, tzinfo=UTC), "close": 100.0},
+            {"timestamp": datetime(2026, 4, 19, 0, 5, tzinfo=UTC), "close": 103.0},
+        ],
+        research_reason="governor strategy research",
+    )
+
+    assert package.strategy_family == "breakout"
+    assert package.entry_rules == {"signal": "breakout_confirmed"}
 
 
 def test_strategy_research_engine_canonicalizes_equivalent_inputs_into_same_package_id() -> None:
@@ -242,6 +280,48 @@ async def test_codex_cli_research_provider_invokes_codex_exec(monkeypatch) -> No
     assert '"failure_modes": string[]' in prompt
     assert '"invalidating_conditions": string[]' in prompt
     assert "Do not return keys outside this schema." in prompt
+
+
+@pytest.mark.asyncio
+async def test_codex_cli_research_provider_compacts_large_historical_context(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    def _fake_run(cmd: list[str], *, capture_output: bool, text: bool, check: bool, cwd: str | None) -> CompletedProcess[str]:
+        captured["prompt"] = cmd[3]
+        return CompletedProcess(
+            args=cmd,
+            returncode=0,
+            stdout="""```json
+{
+  "thesis": "codex trend thesis",
+  "strategy_family": "breakout",
+  "entry_signal": "codex_breakout",
+  "exit_stop_loss_bps": 45,
+  "exit_take_profit_bps": 125,
+  "risk_fraction": 0.0025,
+  "max_hold_minutes": 60,
+  "failure_modes": ["late entry"],
+  "invalidating_conditions": ["regime shift"]
+}
+```""",
+            stderr="",
+        )
+
+    monkeypatch.setattr(research_providers_module.subprocess, "run", _fake_run)
+
+    provider = CodexCliResearchProvider(command="codex", cwd="/tmp/xuanshu")
+    historical_rows = [
+        {"timestamp": datetime(2026, 1, 1, 0, 0, tzinfo=UTC) + timedelta(hours=index), "close": 100.0 + index}
+        for index in range(500)
+    ]
+    await provider.generate_analysis(
+        symbol_scope=["BTC-USDT-SWAP"],
+        market_environment="trend",
+        historical_rows=historical_rows,
+        research_reason="manual trend study",
+    )
+
+    assert captured["prompt"].count('"timestamp"') <= 240
 
 
 def test_create_research_provider_rejects_unsupported_provider() -> None:
