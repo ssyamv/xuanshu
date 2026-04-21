@@ -8,6 +8,7 @@ from itertools import product
 import json
 
 from xuanshu.contracts.research import ResearchTrigger, StrategyPackage
+from xuanshu.contracts.strategy_definition import StrategyDefinition
 from xuanshu.governor.research_providers import ResearchProvider
 
 
@@ -152,6 +153,7 @@ class StrategyResearchEngine:
                 market_environment=market_environment,
                 historical_rows=historical_rows,
                 research_reason=research_reason,
+                directionality=directionality,
                 strategy_family=strategy_family,
                 entry_signal=entry_signal,
                 stop_loss_bps=stop_loss,
@@ -200,6 +202,7 @@ class StrategyResearchEngine:
         market_environment: str,
         historical_rows: list[dict[str, object]],
         research_reason: str,
+        directionality: str = "long_only",
         strategy_family: str | None = None,
         entry_signal: str | None = None,
         stop_loss_bps: int = 50,
@@ -269,7 +272,7 @@ class StrategyResearchEngine:
             risk_fraction=risk_fraction,
             max_hold_minutes=max_hold_minutes,
             lookback=parameter_set["lookback"],
-            directionality="long_short",
+            directionality=directionality,
         )
 
         return StrategyPackage(
@@ -282,7 +285,7 @@ class StrategyResearchEngine:
                 strategy_family or self._select_strategy_family(normalized_market_environment),
                 "strategy_family",
             ),
-            directionality="long_short",
+            directionality=directionality,
             entry_rules={
                 "signal": self._normalize_text(
                     entry_signal or self._select_entry_signal(normalized_market_environment),
@@ -308,6 +311,19 @@ class StrategyResearchEngine:
                 for item in (invalidating_conditions or [])
             ],
             research_reason=normalized_research_reason,
+            strategy_definition=self._build_strategy_definition(
+                strategy_package_id=strategy_package_id,
+                symbol=normalized_symbol_scope[0],
+                strategy_family=self._normalize_text(
+                    strategy_family or self._select_strategy_family(normalized_market_environment),
+                    "strategy_family",
+                ),
+                directionality=directionality,
+                stop_loss_bps=stop_loss_bps,
+                take_profit_bps=take_profit_bps,
+            ),
+            score=performance_summary["return_percent"],
+            score_basis="backtest_return_percent",
         )
 
     @staticmethod
@@ -450,10 +466,69 @@ class StrategyResearchEngine:
     @staticmethod
     def _candidate_directionalities(*, strategy_family: str, market_environment: str) -> list[str]:
         if strategy_family == "breakout" and market_environment == "trend":
-            return ["long_only", "long_short"]
+            return ["long_only"]
         if strategy_family == "mean_reversion":
-            return ["long_short", "short_only", "long_only"]
-        return ["long_short"]
+            return ["long_only", "short_only"]
+        return ["long_only"]
+
+    @staticmethod
+    def _build_strategy_definition(
+        *,
+        strategy_package_id: str,
+        symbol: str,
+        strategy_family: str,
+        directionality: str,
+        stop_loss_bps: int,
+        take_profit_bps: int,
+    ) -> StrategyDefinition:
+        if directionality == "short_only":
+            entry_rules = {
+                "all": [
+                    {"op": "crosses_below", "left": "close", "right": "sma_20"},
+                    {"op": "less_than", "left": "sma_20", "right": "ema_50"},
+                ]
+            }
+            exit_rules = {
+                "any": [
+                    {"op": "crosses_above", "left": "close", "right": "sma_20"},
+                    {"op": "take_profit_bps", "value": take_profit_bps},
+                    {"op": "stop_loss_bps", "value": stop_loss_bps},
+                ]
+            }
+        else:
+            entry_rules = {
+                "all": [
+                    {"op": "crosses_above", "left": "close", "right": "sma_20"},
+                    {"op": "greater_than", "left": "sma_20", "right": "ema_50"},
+                ]
+            }
+            exit_rules = {
+                "any": [
+                    {"op": "crosses_below", "left": "close", "right": "sma_20"},
+                    {"op": "take_profit_bps", "value": take_profit_bps},
+                    {"op": "stop_loss_bps", "value": stop_loss_bps},
+                ]
+            }
+
+        return StrategyDefinition(
+            strategy_def_id=f"{strategy_package_id}-def",
+            symbol=symbol,
+            strategy_family=strategy_family,
+            directionality=directionality,
+            feature_spec={
+                "indicators": [
+                    {"name": "sma", "source": "close", "window": 20},
+                    {"name": "ema", "source": "close", "window": 50},
+                ]
+            },
+            entry_rules=entry_rules,
+            exit_rules=exit_rules,
+            position_sizing_rules={"risk_fraction": 0.01},
+            risk_constraints={"max_hold_minutes": 240},
+            parameter_set={"fast_window": 20, "slow_window": 50},
+            score=0.0,
+            score_basis="backtest_return_percent",
+        )
 
     @staticmethod
     def _default_lookback_for_entry_signal(*, strategy_family: str, entry_signal: str) -> int:

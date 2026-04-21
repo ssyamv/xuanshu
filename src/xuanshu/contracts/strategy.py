@@ -1,8 +1,27 @@
 from datetime import UTC, datetime
 
-from pydantic import BaseModel, Field, ValidationInfo, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator, model_validator
 
 from xuanshu.core.enums import ApprovalState, RunMode
+
+
+class ApprovedStrategyBinding(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    strategy_def_id: str = Field(min_length=1)
+    strategy_package_id: str = Field(min_length=1)
+    backtest_report_id: str = Field(min_length=1)
+    score: float = Field(ge=0.0)
+    score_basis: str = Field(min_length=1)
+    approval_record_id: str = Field(min_length=1)
+    activated_at: datetime
+
+    @field_validator("activated_at")
+    @classmethod
+    def validate_activated_at(cls, value: datetime) -> datetime:
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("activated_at must be timezone-aware")
+        return value.astimezone(UTC)
 
 
 class StrategyConfigSnapshot(BaseModel):
@@ -19,6 +38,7 @@ class StrategyConfigSnapshot(BaseModel):
     approval_state: ApprovalState
     source_reason: str = Field(min_length=1)
     ttl_sec: int = Field(gt=0)
+    symbol_strategy_bindings: dict[str, ApprovedStrategyBinding] = Field(default_factory=dict)
 
     def is_effective(self, reference_time: datetime) -> bool:
         reference_time = self._normalize_reference_time(reference_time)
