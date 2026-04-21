@@ -19,6 +19,23 @@ from xuanshu.infra.storage.postgres_store import PostgresRuntimeStore
 from xuanshu.governor.service import GovernorService
 
 
+def _sample_strategy_definition() -> dict[str, object]:
+    return {
+        "strategy_def_id": "strat-governor-001",
+        "symbol": "BTC-USDT-SWAP",
+        "strategy_family": "breakout",
+        "directionality": "long_short",
+        "feature_spec": {"indicators": [{"name": "sma", "source": "close", "window": 20}]},
+        "entry_rules": {"all": [{"op": "crosses_above", "left": "close", "right": "sma_20"}]},
+        "exit_rules": {"any": [{"op": "crosses_below", "left": "close", "right": "sma_20"}]},
+        "position_sizing_rules": {"risk_fraction": 0.01},
+        "risk_constraints": {"max_hold_minutes": 240},
+        "parameter_set": {"lookback": 20},
+        "score": 67.5,
+        "score_basis": "backtest_return_percent",
+    }
+
+
 class _GovernorClientReturning:
     def __init__(self, snapshot: StrategyConfigSnapshot) -> None:
         self.snapshot = snapshot
@@ -614,6 +631,9 @@ def test_governor_committee_summary_includes_research_candidates() -> None:
         failure_modes=[],
         invalidating_conditions=[],
         research_reason="manual study",
+        strategy_definition=_sample_strategy_definition(),
+        score=67.5,
+        score_basis="backtest_return_percent",
     )
 
     summary = service.build_committee_summary(
@@ -655,6 +675,9 @@ def test_governor_committee_summary_rejects_research_candidates_when_tightened()
         failure_modes=[],
         invalidating_conditions=[],
         research_reason="manual study",
+        strategy_definition=_sample_strategy_definition(),
+        score=67.5,
+        score_basis="backtest_return_percent",
     )
 
     summary = service.build_committee_summary(

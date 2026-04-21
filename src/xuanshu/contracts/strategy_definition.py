@@ -17,7 +17,7 @@ _SUPPORTED_OPERATORS = {
     "stop_loss_bps",
     "time_stop_minutes",
 }
-_SUPPORTED_DIRECTIONALITY = {"long_only", "short_only"}
+_SUPPORTED_DIRECTIONALITY = {"long_only", "short_only", "long_short"}
 _SUPPORTED_SCORE_BASES = {"backtest_return_percent"}
 
 

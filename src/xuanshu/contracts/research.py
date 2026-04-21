@@ -38,8 +38,8 @@ class StrategyPackage(BaseModel):
     failure_modes: list[NormalizedStr]
     invalidating_conditions: list[NormalizedStr]
     research_reason: NormalizedStr
-    score: float = Field(default=0.0, ge=0.0)
-    score_basis: NormalizedStr = "backtest_return_percent"
+    score: float
+    score_basis: NormalizedStr
 
 
     @field_validator("generated_at")

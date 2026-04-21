@@ -27,6 +27,23 @@ from xuanshu.infra.storage.postgres_store import PostgresRuntimeStore
 from xuanshu.infra.storage.redis_store import RedisSnapshotStore
 
 
+def _sample_strategy_definition() -> dict[str, object]:
+    return {
+        "strategy_def_id": "strat-app-001",
+        "symbol": "BTC-USDT-SWAP",
+        "strategy_family": "breakout",
+        "directionality": "long_short",
+        "feature_spec": {"indicators": [{"name": "sma", "source": "close", "window": 20}]},
+        "entry_rules": {"all": [{"op": "crosses_above", "left": "close", "right": "sma_20"}]},
+        "exit_rules": {"any": [{"op": "crosses_below", "left": "close", "right": "sma_20"}]},
+        "position_sizing_rules": {"risk_fraction": 0.01},
+        "risk_constraints": {"max_hold_minutes": 240},
+        "parameter_set": {"lookback": 20},
+        "score": 67.5,
+        "score_basis": "backtest_return_percent",
+    }
+
+
 class _FakeRedis:
     def __init__(self) -> None:
         self.values: dict[str, bytes] = {}
@@ -589,6 +606,9 @@ def test_governor_cycle_can_publish_snapshot_from_approved_research(monkeypatch)
         failure_modes=["range_whipsaw"],
         invalidating_conditions=["liquidity_collapse"],
         research_reason="manual research run",
+        strategy_definition=_sample_strategy_definition(),
+        score=67.5,
+        score_basis="backtest_return_percent",
     )
     historical_rows = [
         {"timestamp": datetime(2026, 4, 19, 0, 0, tzinfo=UTC), "close": 100.0},
@@ -674,6 +694,9 @@ def test_governor_cycle_does_not_send_unapproved_research_downstream(monkeypatch
         failure_modes=["range_whipsaw"],
         invalidating_conditions=["liquidity_collapse"],
         research_reason="manual research run",
+        strategy_definition=_sample_strategy_definition(),
+        score=67.5,
+        score_basis="backtest_return_percent",
     )
     historical_rows = [
         {"timestamp": datetime(2026, 4, 19, 0, 0, tzinfo=UTC), "close": 100.0},
@@ -907,6 +930,9 @@ def test_governor_cycle_selects_highest_net_pnl_candidate_above_threshold(monkey
         failure_modes=[],
         invalidating_conditions=[],
         research_reason="low candidate",
+        strategy_definition=_sample_strategy_definition(),
+        score=67.5,
+        score_basis="backtest_return_percent",
     )
     high_candidate = low_candidate.model_copy(
         update={
@@ -1000,6 +1026,9 @@ def test_governor_cycle_rejects_all_candidates_below_required_net_pnl(monkeypatc
         failure_modes=[],
         invalidating_conditions=[],
         research_reason="low candidate",
+        strategy_definition=_sample_strategy_definition(),
+        score=67.5,
+        score_basis="backtest_return_percent",
     )
     historical_rows = [
         {"timestamp": datetime(2026, 4, 19, 0, 0, tzinfo=UTC), "close": 100.0},
@@ -1092,6 +1121,9 @@ def test_governor_cycle_skips_invalid_candidates_and_keeps_evaluating_remaining_
         failure_modes=[],
         invalidating_conditions=[],
         research_reason="invalid candidate",
+        strategy_definition=_sample_strategy_definition(),
+        score=67.5,
+        score_basis="backtest_return_percent",
     )
     valid_candidate = invalid_candidate.model_copy(
         update={
@@ -1242,6 +1274,9 @@ def test_governor_cycle_restarts_search_when_observing_strategy_is_invalidated(m
         failure_modes=[],
         invalidating_conditions=[],
         research_reason="low candidate",
+        strategy_definition=_sample_strategy_definition(),
+        score=67.5,
+        score_basis="backtest_return_percent",
     )
     historical_rows = [
         {"timestamp": datetime(2026, 4, 19, 0, 0, tzinfo=UTC), "close": 100.0},
@@ -1928,6 +1963,9 @@ def test_governor_cycle_drops_candidate_that_underperforms_current_strategy(monk
             "failure_modes": [],
             "invalidating_conditions": [],
             "research_reason": "baseline",
+            "strategy_definition": _sample_strategy_definition(),
+            "score": 67.5,
+            "score_basis": "backtest_return_percent",
         }
     )
     history_store.append_strategy_snapshot(

@@ -57,6 +57,23 @@ def test_strategy_definition_rejects_unsupported_operator() -> None:
         StrategyDefinition.model_validate(payload)
 
 
+@pytest.mark.parametrize(
+    ("field_name", "bad_value", "message"),
+    [
+        ("feature_spec", {"indicators": [{"name": "vwap", "source": "close", "window": 20}]}, "unsupported indicator"),
+        ("feature_spec", {"indicators": [{"name": "sma", "source": "bid", "window": 20}]}, "unsupported source"),
+        ("directionality", "both", "unsupported directionality"),
+        ("score_basis", "sharpe_ratio", "unsupported score basis"),
+    ],
+)
+def test_strategy_definition_rejects_unsupported_dsl_values(field_name: str, bad_value: object, message: str) -> None:
+    payload = _sample_strategy_definition()
+    payload[field_name] = bad_value
+
+    with pytest.raises(ValidationError, match=message):
+        StrategyDefinition.model_validate(payload)
+
+
 def test_strategy_package_requires_embedded_strategy_definition() -> None:
     package = StrategyPackage.model_validate(
         {
@@ -144,3 +161,35 @@ def test_strategy_snapshot_accepts_symbol_strategy_bindings() -> None:
     )
 
     assert snapshot.symbol_strategy_bindings["BTC-USDT-SWAP"].score == 67.5
+
+
+def test_strategy_binding_rejects_unsupported_score_basis() -> None:
+    with pytest.raises(ValidationError, match="unsupported score basis"):
+        StrategyConfigSnapshot.model_validate(
+            {
+                "version_id": "snap-1",
+                "generated_at": "2026-04-21T00:00:00Z",
+                "effective_from": "2026-04-21T00:00:00Z",
+                "expires_at": "2026-04-21T00:05:00Z",
+                "symbol_whitelist": ["BTC-USDT-SWAP"],
+                "strategy_enable_flags": {"risk_pause": True},
+                "risk_multiplier": 0.5,
+                "per_symbol_max_position": 0.12,
+                "max_leverage": 3,
+                "market_mode": "normal",
+                "approval_state": "approved",
+                "source_reason": "approved research package",
+                "ttl_sec": 300,
+                "symbol_strategy_bindings": {
+                    "BTC-USDT-SWAP": {
+                        "strategy_def_id": "strat-btc-001",
+                        "strategy_package_id": "pkg-1",
+                        "backtest_report_id": "bt-1",
+                        "score": 67.5,
+                        "score_basis": "sharpe_ratio",
+                        "approval_record_id": "apr-1",
+                        "activated_at": "2026-04-21T00:00:00Z",
+                    }
+                },
+            }
+        )

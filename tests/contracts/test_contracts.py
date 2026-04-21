@@ -13,6 +13,23 @@ from xuanshu.contracts.strategy import StrategyConfigSnapshot
 from xuanshu.core.enums import EntryType, MarketRegime, OkxAccountMode, OrderSide, RunMode, SignalUrgency, VolatilityState
 
 
+def _sample_strategy_definition() -> dict[str, object]:
+    return {
+        "strategy_def_id": "strat-contract-001",
+        "symbol": "BTC-USDT-SWAP",
+        "strategy_family": "breakout",
+        "directionality": "long_short",
+        "feature_spec": {"indicators": [{"name": "sma", "source": "close", "window": 20}]},
+        "entry_rules": {"all": [{"op": "crosses_above", "left": "close", "right": "sma_20"}]},
+        "exit_rules": {"any": [{"op": "crosses_below", "left": "close", "right": "sma_20"}]},
+        "position_sizing_rules": {"risk_fraction": 0.01},
+        "risk_constraints": {"max_hold_minutes": 240},
+        "parameter_set": {"lookback": 20},
+        "score": 67.5,
+        "score_basis": "backtest_return_percent",
+    }
+
+
 def test_strategy_snapshot_and_expert_opinion_are_stable_contracts() -> None:
     snapshot = StrategyConfigSnapshot(
         version_id="snap-001",
@@ -64,6 +81,9 @@ def test_strategy_package_contract_is_typed() -> None:
         failure_modes=["range_whipsaw"],
         invalidating_conditions=["liquidity_collapse"],
         research_reason="manual research run",
+        strategy_definition=_sample_strategy_definition(),
+        score=67.5,
+        score_basis="backtest_return_percent",
     )
 
     assert package.directionality == "long_short"
@@ -88,6 +108,9 @@ def test_strategy_package_rejects_unknown_trigger_value() -> None:
         "failure_modes": ["range_whipsaw"],
         "invalidating_conditions": ["liquidity_collapse"],
         "research_reason": "manual research run",
+        "strategy_definition": _sample_strategy_definition(),
+        "score": 67.5,
+        "score_basis": "backtest_return_percent",
     }
 
     with pytest.raises(ValidationError):
@@ -117,6 +140,9 @@ def test_strategy_package_rejects_blank_entries(field_name: str) -> None:
         "failure_modes": ["range_whipsaw"],
         "invalidating_conditions": ["liquidity_collapse"],
         "research_reason": "manual research run",
+        "strategy_definition": _sample_strategy_definition(),
+        "score": 67.5,
+        "score_basis": "backtest_return_percent",
     }
     payload[field_name] = ["", "trend"] if field_name == "market_environment_scope" else ["BTC-USDT-SWAP", " "]
 
@@ -143,6 +169,9 @@ def test_strategy_package_rejects_naive_generated_at() -> None:
         "failure_modes": ["range_whipsaw"],
         "invalidating_conditions": ["liquidity_collapse"],
         "research_reason": "manual research run",
+        "strategy_definition": _sample_strategy_definition(),
+        "score": 67.5,
+        "score_basis": "backtest_return_percent",
     }
 
     with pytest.raises(ValidationError, match="timezone-aware"):
@@ -168,6 +197,9 @@ def test_strategy_package_normalizes_generated_at_to_utc() -> None:
         failure_modes=["range_whipsaw"],
         invalidating_conditions=["liquidity_collapse"],
         research_reason="manual research run",
+        strategy_definition=_sample_strategy_definition(),
+        score=67.5,
+        score_basis="backtest_return_percent",
     )
 
     assert package.generated_at == datetime(2026, 1, 1, 4, 0, tzinfo=UTC)

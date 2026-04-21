@@ -23,6 +23,14 @@ class ApprovedStrategyBinding(BaseModel):
             raise ValueError("activated_at must be timezone-aware")
         return value.astimezone(UTC)
 
+    @field_validator("score_basis")
+    @classmethod
+    def validate_score_basis(cls, value: str) -> str:
+        normalized = value.strip().lower()
+        if normalized != "backtest_return_percent":
+            raise ValueError("unsupported score basis")
+        return normalized
+
 
 class StrategyConfigSnapshot(BaseModel):
     version_id: str = Field(min_length=1)
