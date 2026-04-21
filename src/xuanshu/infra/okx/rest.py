@@ -31,11 +31,13 @@ class OkxRestClient:
         api_secret: str | None = None,
         passphrase: str | None = None,
         timeout: float = 5.0,
+        simulated_trading: bool = False,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
         self.api_secret = api_secret
         self.passphrase = passphrase
+        self.simulated_trading = simulated_trading
         self.client = httpx.AsyncClient(base_url=self.base_url, timeout=timeout)
         self._closed = False
 
@@ -70,6 +72,7 @@ class OkxRestClient:
             "OK-ACCESS-TIMESTAMP": timestamp,
             "OK-ACCESS-SIGN": signature,
             "Content-Type": "application/json",
+            **({"x-simulated-trading": "1"} if self.simulated_trading else {}),
         }
 
     def build_place_order_payload(

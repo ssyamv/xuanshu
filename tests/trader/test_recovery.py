@@ -23,8 +23,8 @@ class _FakeRestClient:
         self.open_orders_calls: list[tuple[str, str]] = []
         self.positions_calls: list[tuple[str, str]] = []
         self.account_summary_calls: list[str] = []
-        self._open_orders = open_orders or [{"ordId": "ord-1", "instId": "BTC-USDT-SWAP"}]
-        self._positions = positions or [{"instId": "BTC-USDT-SWAP", "pos": "1"}]
+        self._open_orders = open_orders if open_orders is not None else [{"ordId": "ord-1", "instId": "BTC-USDT-SWAP"}]
+        self._positions = positions if positions is not None else [{"instId": "BTC-USDT-SWAP", "pos": "1"}]
 
     async def fetch_open_orders(self, symbol: str, timestamp: str) -> list[dict[str, object]]:
         self.open_orders_calls.append((symbol, timestamp))
@@ -258,6 +258,50 @@ async def test_recovery_supervisor_ignores_position_mark_to_market_drift_when_si
         ],
     )
     rest_client._open_orders = []
+    supervisor = RecoverySupervisor(rest_client=rest_client)
+
+    result = await supervisor.run_startup_recovery(
+        "BTC-USDT-SWAP",
+        checkpoint,
+        timestamp="2026-04-19T00:00:00.000Z",
+    )
+
+    assert result["run_mode"] == "normal"
+    assert result["needs_reconcile"] is False
+    assert result["reason"] == "checkpoint_matches_exchange"
+
+
+@pytest.mark.asyncio
+async def test_recovery_supervisor_ignores_zero_quantity_position_side_residue() -> None:
+    checkpoint = _build_checkpoint(
+        positions_snapshot=[
+            CheckpointPosition(
+                symbol="BTC-USDT-SWAP",
+                net_quantity=3.5,
+                mark_price=74675.9,
+                unrealized_pnl=-5.19,
+            )
+        ],
+        open_orders_snapshot=[],
+    )
+    rest_client = _FakeRestClient(
+        open_orders=[],
+        positions=[
+            _okx_position(
+                symbol="BTC-USDT-SWAP",
+                net_quantity="3.5",
+                mark_price="74415.1",
+                unrealized_pnl="3.933999999999796",
+            ),
+            {
+                "instId": "BTC-USDT-SWAP",
+                "pos": "0",
+                "markPx": "",
+                "upl": "",
+                "posSide": "short",
+            },
+        ],
+    )
     supervisor = RecoverySupervisor(rest_client=rest_client)
 
     result = await supervisor.run_startup_recovery(

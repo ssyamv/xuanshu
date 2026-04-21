@@ -7,7 +7,7 @@ from datetime import UTC, datetime, timedelta
 
 from xuanshu.checkpoints.service import CheckpointService
 from xuanshu.config.settings import TraderRuntimeSettings
-from xuanshu.core.enums import ApprovalState, EntryType, OrderSide, RunMode, StrategyId, TraderEventType
+from xuanshu.core.enums import ApprovalState, EntryType, OkxAccountMode, OrderSide, RunMode, StrategyId, TraderEventType
 from xuanshu.contracts.checkpoint import (
     CheckpointBudgetState,
     CheckpointOrder,
@@ -46,6 +46,8 @@ from xuanshu.trader.recovery import RecoverySupervisor
 _OKX_REST_BASE_URL = "https://www.okx.com"
 _OKX_PUBLIC_WS_URL = "wss://ws.okx.com:8443/ws/v5/public"
 _OKX_PRIVATE_WS_URL = "wss://ws.okx.com:8443/ws/v5/private"
+_OKX_DEMO_PUBLIC_WS_URL = "wss://wspap.okx.com:8443/ws/v5/public"
+_OKX_DEMO_PRIVATE_WS_URL = "wss://wspap.okx.com:8443/ws/v5/private"
 _LOGGER = configure_runtime_logger("xuanshu.trader")
 _RUN_MODE_PRIORITY = {
     RunMode.NORMAL: 0,
@@ -126,6 +128,9 @@ def _build_startup_checkpoint(startup_snapshot: StrategyConfigSnapshot, current_
 
 
 def build_trader_components(settings: TraderRuntimeSettings) -> TraderComponents:
+    simulated_trading = settings.okx_account_mode == OkxAccountMode.DEMO
+    public_ws_url = _OKX_DEMO_PUBLIC_WS_URL if simulated_trading else _OKX_PUBLIC_WS_URL
+    private_ws_url = _OKX_DEMO_PRIVATE_WS_URL if simulated_trading else _OKX_PRIVATE_WS_URL
     return TraderComponents(
         state_engine=StateEngine(),
         risk_kernel=RiskKernel(nav=settings.trader_starting_nav),
@@ -135,9 +140,13 @@ def build_trader_components(settings: TraderRuntimeSettings) -> TraderComponents
             api_key=settings.okx_api_key.get_secret_value(),
             api_secret=settings.okx_api_secret.get_secret_value(),
             passphrase=settings.okx_api_passphrase.get_secret_value(),
+            simulated_trading=simulated_trading,
         ),
-        okx_public_stream=OkxPublicStream(url=_OKX_PUBLIC_WS_URL),
-        okx_private_stream=OkxPrivateStream(url=_OKX_PRIVATE_WS_URL),
+        okx_public_stream=OkxPublicStream(url=public_ws_url),
+        okx_private_stream=OkxPrivateStream(
+            url=private_ws_url,
+            simulated_trading=simulated_trading,
+        ),
         client_order_id_builder=build_client_order_id,
     )
 

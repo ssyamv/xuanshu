@@ -8,6 +8,11 @@ class RunMode(StrEnum):
     HALTED = "halted"
 
 
+class OkxAccountMode(StrEnum):
+    LIVE = "live"
+    DEMO = "demo"
+
+
 class StrategyId(StrEnum):
     BREAKOUT = "breakout"
     MEAN_REVERSION = "mean_reversion"

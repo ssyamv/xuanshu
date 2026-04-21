@@ -133,9 +133,32 @@ def test_trader_entrypoint_loads_settings_and_threads_it_into_components(monkeyp
     assert seen_components.components.client_order_id_builder("BTC-USDT-SWAP", "breakout", 1) == "BTCUSDTSWAPbreakout000001"
     assert seen_components.settings.okx_api_key.get_secret_value() == "api-key"
     assert seen_components.components.okx_rest_client.api_key == "api-key"
+    assert seen_components.components.okx_rest_client.simulated_trading is False
     assert seen_components.history_store.dsn == "postgresql+psycopg://xuanshu:xuanshu@localhost:5432/xuanshu"
     assert seen_components.components.okx_public_stream.url.endswith("/public")
     assert seen_components.components.okx_private_stream.url.endswith("/private")
+
+
+def test_trader_entrypoint_threads_demo_account_mode_into_okx_clients(monkeypatch) -> None:
+    _set_required_settings_env(monkeypatch)
+    monkeypatch.setenv("XUANSHU_OKX_ACCOUNT_MODE", "demo")
+
+    seen_runtime = None
+
+    async def fake_run_trader(runtime: trader_app.TraderRuntime) -> None:
+        nonlocal seen_runtime
+        seen_runtime = runtime
+        await runtime.components.okx_rest_client.aclose()
+
+    monkeypatch.setattr(trader_app, "_run_trader", fake_run_trader)
+
+    assert trader_app.main() == 0
+    assert seen_runtime is not None
+    assert seen_runtime.settings.okx_account_mode.value == "demo"
+    assert seen_runtime.components.okx_rest_client.simulated_trading is True
+    assert seen_runtime.components.okx_private_stream.simulated_trading is True
+    assert seen_runtime.components.okx_public_stream.url == "wss://wspap.okx.com:8443/ws/v5/public"
+    assert seen_runtime.components.okx_private_stream.url == "wss://wspap.okx.com:8443/ws/v5/private"
 
 
 def test_trader_entrypoint_loads_runtime_from_temp_dotenv(monkeypatch, tmp_path) -> None:
@@ -171,6 +194,16 @@ def test_trader_runtime_contract_lists_starting_nav() -> None:
 
     assert "XUANSHU_TRADER_STARTING_NAV=" in env_example
     assert "XUANSHU_TRADER_STARTING_NAV:" in compose
+
+
+def test_trader_runtime_contract_lists_account_mode() -> None:
+    env_example = Path(".env.example").read_text(encoding="utf-8")
+    prod_env_example = Path(".env.prod.example").read_text(encoding="utf-8")
+    compose = Path("docker-compose.yml").read_text(encoding="utf-8")
+
+    assert "XUANSHU_OKX_ACCOUNT_MODE=" in env_example
+    assert "XUANSHU_OKX_ACCOUNT_MODE=" in prod_env_example
+    assert "XUANSHU_OKX_ACCOUNT_MODE:" in compose
 
 
 def test_single_host_deploy_contract_lists_prod_env_template() -> None:
@@ -296,7 +329,7 @@ def test_trader_runtime_checks_checkpoint_before_waiting(monkeypatch) -> None:
 
     asyncio.run(_run_and_close_runtime())
 
-    assert seen_can_open == [False]
+    assert seen_can_open == [False, False]
 
 
 def test_trader_runtime_stays_alive_when_startup_gating_blocks_opening(monkeypatch) -> None:
@@ -1182,6 +1215,17 @@ def test_trader_runtime_consumes_public_and_private_streams_and_persists_runtime
         client_order_id_builder=runtime.components.client_order_id_builder,
     )
     runtime.execution_coordinator = trader_app.ExecutionCoordinator(rest_client=fake_rest)
+    runtime.snapshot_store.set_latest_snapshot(
+        "snap-live",
+        runtime.startup_snapshot.model_copy(
+            update={
+                "version_id": "snap-live",
+                "market_mode": RunMode.NORMAL,
+                "approval_state": ApprovalState.APPROVED,
+                "strategy_enable_flags": {"breakout": True, "mean_reversion": False, "risk_pause": True},
+            }
+        ),
+    )
 
     async def _run_and_close_runtime() -> None:
         try:

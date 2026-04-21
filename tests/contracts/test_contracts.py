@@ -10,7 +10,7 @@ from xuanshu.contracts.risk import CandidateSignal
 from xuanshu.contracts.market import MarketStateSnapshot
 from xuanshu.contracts.governance import ExpertOpinion
 from xuanshu.contracts.strategy import StrategyConfigSnapshot
-from xuanshu.core.enums import EntryType, MarketRegime, OrderSide, RunMode, SignalUrgency, VolatilityState
+from xuanshu.core.enums import EntryType, MarketRegime, OkxAccountMode, OrderSide, RunMode, SignalUrgency, VolatilityState
 
 
 def test_strategy_snapshot_and_expert_opinion_are_stable_contracts() -> None:
@@ -286,6 +286,28 @@ def test_trader_runtime_settings_load_default_run_mode_from_prefixed_env(monkeyp
     settings = TraderRuntimeSettings()
 
     assert settings.default_run_mode == RunMode.HALTED
+
+
+def test_trader_runtime_settings_load_okx_account_mode_from_prefixed_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("OKX_API_KEY", "okx-key")
+    monkeypatch.setenv("OKX_API_SECRET", "okx-secret")
+    monkeypatch.setenv("OKX_API_PASSPHRASE", "okx-passphrase")
+    monkeypatch.setenv("XUANSHU_OKX_ACCOUNT_MODE", "demo")
+
+    settings = TraderRuntimeSettings()
+
+    assert settings.okx_account_mode == OkxAccountMode.DEMO
+
+
+def test_trader_runtime_settings_default_okx_account_mode_is_live(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("OKX_API_KEY", "okx-key")
+    monkeypatch.setenv("OKX_API_SECRET", "okx-secret")
+    monkeypatch.setenv("OKX_API_PASSPHRASE", "okx-passphrase")
+    monkeypatch.delenv("XUANSHU_OKX_ACCOUNT_MODE", raising=False)
+
+    settings = TraderRuntimeSettings()
+
+    assert settings.okx_account_mode == OkxAccountMode.LIVE
 
 
 @pytest.mark.parametrize(

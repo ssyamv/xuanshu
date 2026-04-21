@@ -3,7 +3,7 @@ from pydantic.networks import AnyHttpUrl, PostgresDsn, RedisDsn
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from pydantic_settings.sources import DotEnvSettingsSource, EnvSettingsSource, PydanticBaseSettingsSource
 
-from xuanshu.core.enums import RunMode
+from xuanshu.core.enums import OkxAccountMode, RunMode
 from xuanshu.governor.research_providers import ResearchProviderName
 
 
@@ -141,6 +141,7 @@ class TraderRuntimeSettings(_XuanshuBaseSettings):
     okx_symbols: tuple[str, ...] = Field(default=("BTC-USDT-SWAP", "ETH-USDT-SWAP"), min_length=1)
     trader_starting_nav: float = Field(default=250_000.0, gt=0.0)
     default_run_mode: RunMode = Field(default=RunMode.NORMAL)
+    okx_account_mode: OkxAccountMode = Field(default=OkxAccountMode.LIVE)
     redis_url: RedisDsn = Field(default="redis://redis:6379/0", validation_alias="REDIS_URL")
     postgres_dsn: PostgresDsn = Field(
         default="postgresql+psycopg://xuanshu:xuanshu@postgres:5432/xuanshu",

@@ -26,6 +26,7 @@ class OkxPrivateStream:
     url: str
     connect_factory: Callable[..., object] = websockets.connect
     epoch_seconds_factory: Callable[[], int] = lambda: int(datetime.now(UTC).timestamp())
+    simulated_trading: bool = False
 
     def build_login_payload(
         self,
@@ -46,6 +47,7 @@ class OkxPrivateStream:
                     "passphrase": passphrase,
                     "timestamp": str(epoch_seconds),
                     "sign": signature,
+                    **({"simulatedTrading": "1"} if self.simulated_trading else {}),
                 }
             ],
         }
@@ -71,7 +73,12 @@ class OkxPrivateStream:
         passphrase: str,
     ):
         sequence = 0
-        async with self.connect_factory(self.url) as websocket:
+        connect_kwargs = (
+            {"additional_headers": {"x-simulated-trading": "1"}}
+            if self.simulated_trading
+            else {}
+        )
+        async with self.connect_factory(self.url, **connect_kwargs) as websocket:
             await websocket.send(
                 json.dumps(
                     self.build_login_payload(

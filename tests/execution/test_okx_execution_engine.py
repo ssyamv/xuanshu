@@ -289,6 +289,42 @@ def test_okx_private_stream_builds_login_and_decodes_order_position_and_account_
     assert account_events[0].available_balance == 800.0
 
 
+@pytest.mark.asyncio
+async def test_okx_private_stream_demo_mode_sets_simulated_markers() -> None:
+    websocket = _FakeWebSocket(
+        [
+            json.dumps({"event": "login", "code": "0", "msg": "", "connId": "abc"}),
+        ]
+    )
+    connect = _FakeConnect(websocket)
+    stream = OkxPrivateStream(
+        url="wss://ws.okx.com:8443/ws/v5/private",
+        connect_factory=connect,
+        epoch_seconds_factory=lambda: 1713484800,
+        simulated_trading=True,
+    )
+
+    login_payload = stream.build_login_payload(
+        api_key="test-key",
+        api_secret="test-secret",
+        passphrase="test-passphrase",
+        epoch_seconds=1713484800,
+    )
+    events = [
+        event
+        async for event in stream.iter_events(
+            symbols=("BTC-USDT-SWAP",),
+            api_key="test-key",
+            api_secret="test-secret",
+            passphrase="test-passphrase",
+        )
+    ]
+
+    assert events == []
+    assert login_payload["args"][0]["simulatedTrading"] == "1"
+    assert connect.calls[0][1] == {"additional_headers": {"x-simulated-trading": "1"}}
+
+
 def test_okx_private_stream_normalizes_fault_payloads() -> None:
     stream = OkxPrivateStream(url="wss://ws.okx.com:8443/ws/v5/private")
 
@@ -738,6 +774,27 @@ def test_okx_rest_client_builds_signed_headers_and_place_order_payload() -> None
         "sz": "1",
         "clOrdId": "btc-breakout-000001",
     }
+
+    asyncio.run(client.aclose())
+
+
+def test_okx_rest_client_demo_mode_adds_simulated_header() -> None:
+    client = OkxRestClient(
+        base_url="https://www.okx.com",
+        api_key="api-key",
+        api_secret="api-secret",
+        passphrase="api-passphrase",
+        simulated_trading=True,
+    )
+
+    headers = client.build_signed_headers(
+        method="POST",
+        path="/api/v5/trade/order",
+        body='{"instId":"BTC-USDT-SWAP"}',
+        timestamp="2026-04-19T00:00:00.000Z",
+    )
+
+    assert headers["x-simulated-trading"] == "1"
 
     asyncio.run(client.aclose())
 
