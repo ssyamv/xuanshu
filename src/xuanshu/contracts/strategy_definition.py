@@ -95,14 +95,20 @@ class StrategyDefinition(BaseModel):
     @classmethod
     def _validate_rule_tree(cls, node: object) -> None:
         if isinstance(node, dict):
-            if "all" in node or "any" in node:
-                key = "all" if "all" in node else "any"
+            has_all = "all" in node
+            has_any = "any" in node
+            if has_all or has_any:
+                if set(node.keys()) != {"all"} and set(node.keys()) != {"any"}:
+                    raise ValueError("combinator nodes must contain exactly one of all or any")
+                key = "all" if has_all else "any"
                 children = node[key]
                 if not isinstance(children, list) or not children:
                     raise ValueError(f"{key} must contain rule nodes")
                 for child in children:
                     cls._validate_rule_tree(child)
                 return
+            if "op" not in node:
+                raise ValueError("rule node must contain op")
             op = node.get("op")
             if not isinstance(op, str) or op.strip().lower() not in _SUPPORTED_OPERATORS:
                 raise ValueError("unsupported operator")

@@ -35,7 +35,14 @@ def _sample_strategy_definition(
     score: float = 67.5,
 ) -> dict[str, object]:
     if parameter_set is None:
-        parameter_set = {"lookback": 20}
+        parameter_set = {
+            "lookback": 20,
+            "signal_mode": "breakout_confirmed",
+            "stop_loss_bps": 50,
+            "take_profit_bps": 120,
+            "risk_fraction": 0.0025,
+            "max_hold_minutes": 60,
+        }
     return {
         "strategy_def_id": "strat-app-001",
         "symbol": "BTC-USDT-SWAP",
@@ -44,8 +51,8 @@ def _sample_strategy_definition(
         "feature_spec": {"indicators": [{"name": "sma", "source": "close", "window": 20}]},
         "entry_rules": {"all": [{"op": "crosses_above", "left": "close", "right": "sma_20"}]},
         "exit_rules": {"any": [{"op": "crosses_below", "left": "close", "right": "sma_20"}]},
-        "position_sizing_rules": {"risk_fraction": 0.01},
-        "risk_constraints": {"max_hold_minutes": 240},
+        "position_sizing_rules": {"risk_fraction": 0.0025},
+        "risk_constraints": {"max_hold_minutes": 60},
         "parameter_set": parameter_set,
         "score": score,
         "score_basis": "backtest_return_percent",
@@ -327,7 +334,7 @@ def test_governor_research_bridge_builds_candidates_from_store_backed_position_r
     }
     assert {tuple(candidate.symbol_scope) for candidate in candidates} == {("BTC-USDT-SWAP",)}
     assert {candidate.market_environment_scope[0] for candidate in candidates} >= {"trend", "range", "mean_reversion"}
-    assert first_candidate.entry_rules["signal"]
+    assert "all" in first_candidate.entry_rules
 
 
 def test_governor_research_bridge_builds_candidates_for_each_symbol_scope(monkeypatch) -> None:
@@ -596,6 +603,7 @@ def test_governor_cycle_can_publish_snapshot_from_approved_research(monkeypatch)
     monkeypatch.setattr(governor_app, "_MIN_RESEARCH_NET_PNL", 0.0)
     captured_state_summary = None
 
+    definition = _sample_strategy_definition(parameter_set={"lookback_fast": 20, "lookback_slow": 60})
     research_package = StrategyPackage(
         strategy_package_id="pkg-001",
         generated_at=datetime.now(UTC),
@@ -604,19 +612,17 @@ def test_governor_cycle_can_publish_snapshot_from_approved_research(monkeypatch)
         market_environment_scope=["trend"],
         strategy_family="breakout",
         directionality="long_only",
-        entry_rules={"signal": "breakout_confirmed"},
-        exit_rules={"stop_loss_bps": 50, "take_profit_bps": 120},
-        position_sizing_rules={"risk_fraction": 0.0025},
-        risk_constraints={"max_hold_minutes": 60},
-        parameter_set={"lookback_fast": 20, "lookback_slow": 60},
+        entry_rules=definition["entry_rules"],
+        exit_rules=definition["exit_rules"],
+        position_sizing_rules=definition["position_sizing_rules"],
+        risk_constraints=definition["risk_constraints"],
+        parameter_set=definition["parameter_set"],
         backtest_summary={"total_return": 0.18},
         performance_summary={"sharpe": 1.4},
         failure_modes=["range_whipsaw"],
         invalidating_conditions=["liquidity_collapse"],
         research_reason="manual research run",
-        strategy_definition=_sample_strategy_definition(
-            parameter_set={"lookback_fast": 20, "lookback_slow": 60},
-        ),
+        strategy_definition=definition,
         score=67.5,
         score_basis="backtest_return_percent",
     )
@@ -686,6 +692,7 @@ def test_governor_cycle_does_not_send_unapproved_research_downstream(monkeypatch
     history_store = PostgresRuntimeStore(dsn="postgresql://xuanshu:xuanshu@localhost:5432/xuanshu")
     fake_redis = _FakeRedis()
 
+    definition = _sample_strategy_definition(parameter_set={"lookback_fast": 20, "lookback_slow": 60})
     research_package = StrategyPackage(
         strategy_package_id="pkg-blocked",
         generated_at=datetime.now(UTC),
@@ -694,19 +701,17 @@ def test_governor_cycle_does_not_send_unapproved_research_downstream(monkeypatch
         market_environment_scope=["trend"],
         strategy_family="breakout",
         directionality="long_only",
-        entry_rules={"signal": "breakout_confirmed"},
-        exit_rules={"stop_loss_bps": 50, "take_profit_bps": 120},
-        position_sizing_rules={"risk_fraction": 0.0025},
-        risk_constraints={"max_hold_minutes": 60},
-        parameter_set={"lookback_fast": 20, "lookback_slow": 60},
+        entry_rules=definition["entry_rules"],
+        exit_rules=definition["exit_rules"],
+        position_sizing_rules=definition["position_sizing_rules"],
+        risk_constraints=definition["risk_constraints"],
+        parameter_set=definition["parameter_set"],
         backtest_summary={"total_return": 0.18},
         performance_summary={"sharpe": 1.4},
         failure_modes=["range_whipsaw"],
         invalidating_conditions=["liquidity_collapse"],
         research_reason="manual research run",
-        strategy_definition=_sample_strategy_definition(
-            parameter_set={"lookback_fast": 20, "lookback_slow": 60},
-        ),
+        strategy_definition=definition,
         score=67.5,
         score_basis="backtest_return_percent",
     )
@@ -924,6 +929,7 @@ def test_governor_cycle_selects_highest_net_pnl_candidate_above_threshold(monkey
                 "ttl_sec": 300,
             }
 
+    low_definition = _sample_strategy_definition()
     low_candidate = StrategyPackage(
         strategy_package_id="pkg-low",
         generated_at=datetime.now(UTC),
@@ -932,25 +938,55 @@ def test_governor_cycle_selects_highest_net_pnl_candidate_above_threshold(monkey
         market_environment_scope=["trend"],
         strategy_family="breakout",
         directionality="long_only",
-        entry_rules={"signal": "breakout_confirmed"},
-        exit_rules={"stop_loss_bps": 50, "take_profit_bps": 120},
-        position_sizing_rules={"risk_fraction": 0.0025},
-        risk_constraints={"max_hold_minutes": 60},
-        parameter_set={"lookback": 20},
+        entry_rules=low_definition["entry_rules"],
+        exit_rules=low_definition["exit_rules"],
+        position_sizing_rules=low_definition["position_sizing_rules"],
+        risk_constraints=low_definition["risk_constraints"],
+        parameter_set=low_definition["parameter_set"],
         backtest_summary={"row_count": 10},
         performance_summary={"return_percent": 0.2},
         failure_modes=[],
         invalidating_conditions=[],
         research_reason="low candidate",
-        strategy_definition=_sample_strategy_definition(),
+        strategy_definition=low_definition,
         score=67.5,
         score_basis="backtest_return_percent",
     )
     high_candidate = low_candidate.model_copy(
         update={
             "strategy_package_id": "pkg-high",
-            "exit_rules": {"stop_loss_bps": 35, "take_profit_bps": 180},
+            "exit_rules": {
+                "any": [
+                    {"op": "crosses_below", "left": "close", "right": "sma_20"},
+                    {"op": "take_profit_bps", "value": 180},
+                    {"op": "stop_loss_bps", "value": 35},
+                ]
+            },
             "position_sizing_rules": {"risk_fraction": 0.004},
+            "parameter_set": {
+                **low_candidate.parameter_set,
+                "take_profit_bps": 180,
+                "stop_loss_bps": 35,
+                "risk_fraction": 0.004,
+            },
+            "strategy_definition": low_candidate.strategy_definition.model_copy(
+                update={
+                    "exit_rules": {
+                        "any": [
+                            {"op": "crosses_below", "left": "close", "right": "sma_20"},
+                            {"op": "take_profit_bps", "value": 180},
+                            {"op": "stop_loss_bps", "value": 35},
+                        ]
+                    },
+                    "position_sizing_rules": {"risk_fraction": 0.004},
+                    "parameter_set": {
+                        **low_candidate.strategy_definition.parameter_set,
+                        "take_profit_bps": 180,
+                        "stop_loss_bps": 35,
+                        "risk_fraction": 0.004,
+                    },
+                }
+            ),
             "research_reason": "high candidate",
         }
     )
@@ -1020,6 +1056,11 @@ def test_governor_cycle_rejects_all_candidates_below_required_net_pnl(monkeypatc
     history_store = PostgresRuntimeStore(dsn="postgresql://xuanshu:xuanshu@localhost:5432/xuanshu")
     fake_redis = _FakeRedis()
 
+    candidate_definition = _sample_strategy_definition(
+        strategy_family="breakout",
+        directionality="short_only",
+        parameter_set={"lookback": 20, "signal_mode": "breakout_confirmed"},
+    )
     candidate = StrategyPackage(
         strategy_package_id="pkg-low",
         generated_at=datetime.now(UTC),
@@ -1028,17 +1069,17 @@ def test_governor_cycle_rejects_all_candidates_below_required_net_pnl(monkeypatc
         market_environment_scope=["trend"],
         strategy_family="breakout",
         directionality="short_only",
-        entry_rules={"signal": "breakout_confirmed"},
-        exit_rules={"stop_loss_bps": 50, "take_profit_bps": 120},
-        position_sizing_rules={"risk_fraction": 0.0025},
-        risk_constraints={"max_hold_minutes": 60},
-        parameter_set={"lookback": 20},
+        entry_rules=candidate_definition["entry_rules"],
+        exit_rules=candidate_definition["exit_rules"],
+        position_sizing_rules=candidate_definition["position_sizing_rules"],
+        risk_constraints=candidate_definition["risk_constraints"],
+        parameter_set=candidate_definition["parameter_set"],
         backtest_summary={"row_count": 10},
         performance_summary={"return_percent": 0.2},
         failure_modes=[],
         invalidating_conditions=[],
         research_reason="low candidate",
-        strategy_definition=_sample_strategy_definition(directionality="short_only"),
+        strategy_definition=candidate_definition,
         score=67.5,
         score_basis="backtest_return_percent",
     )
@@ -1115,6 +1156,10 @@ def test_governor_cycle_skips_invalid_candidates_and_keeps_evaluating_remaining_
     history_store = PostgresRuntimeStore(dsn="postgresql://xuanshu:xuanshu@localhost:5432/xuanshu")
     fake_redis = _FakeRedis()
 
+    invalid_definition = _sample_strategy_definition(
+        strategy_family="mean_reversion",
+        parameter_set={"lookback": 1, "signal_mode": "range_retest"},
+    )
     invalid_candidate = StrategyPackage(
         strategy_package_id="pkg-invalid",
         generated_at=datetime.now(UTC),
@@ -1123,20 +1168,17 @@ def test_governor_cycle_skips_invalid_candidates_and_keeps_evaluating_remaining_
         market_environment_scope=["range"],
         strategy_family="mean_reversion",
         directionality="long_only",
-        entry_rules={"signal": "range_retest"},
-        exit_rules={"stop_loss_bps": 50, "take_profit_bps": 120},
-        position_sizing_rules={"risk_fraction": 0.0025},
-        risk_constraints={"max_hold_minutes": 60},
-        parameter_set={"lookback": 1},
+        entry_rules=invalid_definition["entry_rules"],
+        exit_rules=invalid_definition["exit_rules"],
+        position_sizing_rules=invalid_definition["position_sizing_rules"],
+        risk_constraints=invalid_definition["risk_constraints"],
+        parameter_set=invalid_definition["parameter_set"],
         backtest_summary={"row_count": 10},
         performance_summary={"return_percent": 0.2},
         failure_modes=[],
         invalidating_conditions=[],
         research_reason="invalid candidate",
-        strategy_definition=_sample_strategy_definition(
-            strategy_family="mean_reversion",
-            parameter_set={"lookback": 1},
-        ),
+        strategy_definition=invalid_definition,
         score=67.5,
         score_basis="backtest_return_percent",
     )
@@ -1145,12 +1187,29 @@ def test_governor_cycle_skips_invalid_candidates_and_keeps_evaluating_remaining_
             "strategy_package_id": "pkg-valid",
             "market_environment_scope": ["trend"],
             "strategy_family": "breakout",
-            "entry_rules": {"signal": "breakout_confirmed"},
-            "parameter_set": {"lookback": 2},
+            "entry_rules": invalid_candidate.strategy_definition.model_copy(
+                update={"strategy_family": "breakout"}
+            ).entry_rules,
+            "exit_rules": invalid_candidate.strategy_definition.model_copy(
+                update={"strategy_family": "breakout"}
+            ).exit_rules,
+            "position_sizing_rules": invalid_candidate.position_sizing_rules,
+            "risk_constraints": invalid_candidate.risk_constraints,
+            "parameter_set": {
+                **invalid_candidate.parameter_set,
+                "lookback": 2,
+                "signal_mode": "breakout_confirmed",
+            },
             "strategy_definition": invalid_candidate.strategy_definition.model_copy(
                 update={
                     "strategy_family": "breakout",
-                    "parameter_set": {"lookback": 2},
+                    "parameter_set": {
+                        **invalid_candidate.strategy_definition.parameter_set,
+                        "lookback": 2,
+                        "signal_mode": "breakout_confirmed",
+                    },
+                    "entry_rules": invalid_candidate.strategy_definition.entry_rules,
+                    "exit_rules": invalid_candidate.strategy_definition.exit_rules,
                 }
             ),
             "research_reason": "valid candidate",
@@ -1277,6 +1336,7 @@ def test_governor_cycle_restarts_search_when_observing_strategy_is_invalidated(m
     history_store = PostgresRuntimeStore(dsn="postgresql://xuanshu:xuanshu@localhost:5432/xuanshu")
     fake_redis = _FakeRedis()
 
+    restart_definition = _sample_strategy_definition()
     candidate = StrategyPackage(
         strategy_package_id="pkg-low",
         generated_at=datetime.now(UTC),
@@ -1285,17 +1345,17 @@ def test_governor_cycle_restarts_search_when_observing_strategy_is_invalidated(m
         market_environment_scope=["trend"],
         strategy_family="breakout",
         directionality="long_only",
-        entry_rules={"signal": "breakout_confirmed"},
-        exit_rules={"stop_loss_bps": 50, "take_profit_bps": 120},
-        position_sizing_rules={"risk_fraction": 0.0025},
-        risk_constraints={"max_hold_minutes": 60},
-        parameter_set={"lookback": 20},
+        entry_rules=restart_definition["entry_rules"],
+        exit_rules=restart_definition["exit_rules"],
+        position_sizing_rules=restart_definition["position_sizing_rules"],
+        risk_constraints=restart_definition["risk_constraints"],
+        parameter_set=restart_definition["parameter_set"],
         backtest_summary={"row_count": 10},
         performance_summary={"return_percent": 0.2},
         failure_modes=[],
         invalidating_conditions=[],
         research_reason="low candidate",
-        strategy_definition=_sample_strategy_definition(),
+        strategy_definition=restart_definition,
         score=67.5,
         score_basis="backtest_return_percent",
     )
@@ -1965,6 +2025,7 @@ def test_governor_cycle_drops_candidate_that_underperforms_current_strategy(monk
             "source_reason": "approved research package",
         }
     )
+    restart_definition = _sample_strategy_definition()
     history_store.append_strategy_package(
         {
             "strategy_package_id": "pkg-current",
@@ -1974,17 +2035,17 @@ def test_governor_cycle_drops_candidate_that_underperforms_current_strategy(monk
             "market_environment_scope": ["trend"],
             "strategy_family": "breakout",
             "directionality": "long_only",
-            "entry_rules": {"signal": "breakout_confirmed"},
-            "exit_rules": {"stop_loss_bps": 50, "take_profit_bps": 120},
-            "position_sizing_rules": {"risk_fraction": 0.0025},
-            "risk_constraints": {"max_hold_minutes": 60},
-            "parameter_set": {"lookback": 20},
+            "entry_rules": restart_definition["entry_rules"],
+            "exit_rules": restart_definition["exit_rules"],
+            "position_sizing_rules": restart_definition["position_sizing_rules"],
+            "risk_constraints": restart_definition["risk_constraints"],
+            "parameter_set": restart_definition["parameter_set"],
             "backtest_summary": {},
             "performance_summary": {},
             "failure_modes": [],
             "invalidating_conditions": [],
             "research_reason": "baseline",
-            "strategy_definition": _sample_strategy_definition(),
+            "strategy_definition": restart_definition,
             "score": 67.5,
             "score_basis": "backtest_return_percent",
         }

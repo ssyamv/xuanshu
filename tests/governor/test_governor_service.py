@@ -8,7 +8,7 @@ from pydantic import SecretStr
 import xuanshu.infra.ai.governor_client as governor_client_module
 from xuanshu.contracts.approval import ApprovalDecision, ApprovalRecord
 from xuanshu.contracts.research import ResearchTrigger, StrategyPackage
-from xuanshu.contracts.strategy import StrategyConfigSnapshot
+from xuanshu.contracts.strategy import ApprovedStrategyBinding, StrategyConfigSnapshot
 from xuanshu.core.enums import ApprovalState, RunMode
 from xuanshu.infra.ai.governor_client import (
     CodexCliGovernorAgentRunner,
@@ -19,19 +19,34 @@ from xuanshu.infra.storage.postgres_store import PostgresRuntimeStore
 from xuanshu.governor.service import GovernorService
 
 
-def _sample_strategy_definition() -> dict[str, object]:
+def _sample_strategy_definition(
+    *,
+    strategy_family: str = "breakout",
+    directionality: str = "long_only",
+    parameter_set: dict[str, object] | None = None,
+    score: float = 67.5,
+) -> dict[str, object]:
+    if parameter_set is None:
+        parameter_set = {
+            "lookback_fast": 20,
+            "signal_mode": "breakout_confirmed",
+            "stop_loss_bps": 50,
+            "take_profit_bps": 120,
+            "risk_fraction": 0.0025,
+            "max_hold_minutes": 60,
+        }
     return {
         "strategy_def_id": "strat-governor-001",
         "symbol": "BTC-USDT-SWAP",
-        "strategy_family": "breakout",
-        "directionality": "long_only",
+        "strategy_family": strategy_family,
+        "directionality": directionality,
         "feature_spec": {"indicators": [{"name": "sma", "source": "close", "window": 20}]},
         "entry_rules": {"all": [{"op": "crosses_above", "left": "close", "right": "sma_20"}]},
         "exit_rules": {"any": [{"op": "crosses_below", "left": "close", "right": "sma_20"}]},
-        "position_sizing_rules": {"risk_fraction": 0.01},
-        "risk_constraints": {"max_hold_minutes": 240},
-        "parameter_set": {"lookback_fast": 20},
-        "score": 67.5,
+        "position_sizing_rules": {"risk_fraction": 0.0025},
+        "risk_constraints": {"max_hold_minutes": 60},
+        "parameter_set": parameter_set,
+        "score": score,
         "score_basis": "backtest_return_percent",
     }
 
@@ -613,6 +628,7 @@ def test_governor_restores_baseline_strategy_flags_when_candidate_flags_are_inco
 
 def test_governor_committee_summary_includes_research_candidates() -> None:
     service = GovernorService()
+    definition = _sample_strategy_definition()
     package = StrategyPackage(
         strategy_package_id="pkg-001",
         generated_at=datetime.now(UTC),
@@ -621,17 +637,17 @@ def test_governor_committee_summary_includes_research_candidates() -> None:
         market_environment_scope=["trend"],
         strategy_family="breakout",
         directionality="long_only",
-        entry_rules={"signal": "breakout_confirmed"},
-        exit_rules={"stop_loss_bps": 50},
-        position_sizing_rules={"risk_fraction": 0.0025},
-        risk_constraints={"max_hold_minutes": 60},
-        parameter_set={"lookback_fast": 20},
+        entry_rules=definition["entry_rules"],
+        exit_rules=definition["exit_rules"],
+        position_sizing_rules=definition["position_sizing_rules"],
+        risk_constraints=definition["risk_constraints"],
+        parameter_set=definition["parameter_set"],
         backtest_summary={"total_return": 0.18},
         performance_summary={"sharpe": 1.4},
         failure_modes=[],
         invalidating_conditions=[],
         research_reason="manual study",
-        strategy_definition=_sample_strategy_definition(),
+        strategy_definition=definition,
         score=67.5,
         score_basis="backtest_return_percent",
     )
@@ -657,6 +673,7 @@ def test_governor_committee_summary_rejects_research_candidates_when_tightened()
         },
         now=datetime.now(UTC),
     )
+    definition = _sample_strategy_definition()
     package = StrategyPackage(
         strategy_package_id="pkg-002",
         generated_at=datetime.now(UTC),
@@ -665,17 +682,17 @@ def test_governor_committee_summary_rejects_research_candidates_when_tightened()
         market_environment_scope=["trend"],
         strategy_family="breakout",
         directionality="long_only",
-        entry_rules={"signal": "breakout_confirmed"},
-        exit_rules={"stop_loss_bps": 50},
-        position_sizing_rules={"risk_fraction": 0.0025},
-        risk_constraints={"max_hold_minutes": 60},
-        parameter_set={"lookback_fast": 20},
+        entry_rules=definition["entry_rules"],
+        exit_rules=definition["exit_rules"],
+        position_sizing_rules=definition["position_sizing_rules"],
+        risk_constraints=definition["risk_constraints"],
+        parameter_set=definition["parameter_set"],
         backtest_summary={"total_return": 0.18},
         performance_summary={"sharpe": 1.4},
         failure_modes=[],
         invalidating_conditions=[],
         research_reason="manual study",
-        strategy_definition=_sample_strategy_definition(),
+        strategy_definition=definition,
         score=67.5,
         score_basis="backtest_return_percent",
     )
@@ -1467,3 +1484,52 @@ async def test_governor_service_skips_semantically_equal_snapshot_for_mode_chang
     assert published == []
     assert result.status == "unchanged"
     assert result.snapshot.version_id == "snap-last"
+
+
+@pytest.mark.asyncio
+async def test_governor_service_publishes_when_symbol_strategy_bindings_change() -> None:
+    service = GovernorService()
+    published: list[str] = []
+    last_snapshot = StrategyConfigSnapshot(
+        version_id="snap-last",
+        generated_at=datetime.now(UTC),
+        effective_from=datetime.now(UTC),
+        expires_at=datetime.now(UTC) + timedelta(minutes=5),
+        symbol_whitelist=["BTC-USDT-SWAP"],
+        strategy_enable_flags={"breakout": False, "mean_reversion": False, "risk_pause": True},
+        risk_multiplier=0.25,
+        per_symbol_max_position=0.12,
+        max_leverage=1,
+        market_mode=RunMode.NORMAL,
+        approval_state=ApprovalState.APPROVED,
+        source_reason="approved research package",
+        ttl_sec=300,
+    )
+    candidate_snapshot = last_snapshot.model_copy(
+        update={
+            "version_id": "snap-bindings",
+            "symbol_strategy_bindings": {
+                "BTC-USDT-SWAP": ApprovedStrategyBinding(
+                    strategy_def_id="strat-1",
+                    strategy_package_id="pkg-1",
+                    backtest_report_id="bt-1",
+                    score=67.5,
+                    score_basis="backtest_return_percent",
+                    approval_record_id="apr-1",
+                    activated_at=datetime.now(UTC),
+                )
+            },
+        }
+    )
+
+    result = await service.run_cycle(
+        state_summary={"scope": "governor"},
+        last_snapshot=last_snapshot,
+        governor_client=_GovernorClientReturning(candidate_snapshot),
+        publish_snapshot=lambda snapshot: published.append(snapshot.version_id),
+        trigger_reason="mode_change",
+    )
+
+    assert published == ["snap-bindings"]
+    assert result.status == "published"
+    assert result.snapshot.version_id == "snap-bindings"

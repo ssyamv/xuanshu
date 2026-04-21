@@ -103,6 +103,7 @@ def test_strategy_definition_rejects_non_positive_exit_values(op: str, value: in
 
 
 def test_strategy_package_requires_embedded_strategy_definition() -> None:
+    definition = _sample_strategy_definition()
     package = StrategyPackage.model_validate(
         {
             "strategy_package_id": "pkg-1",
@@ -112,17 +113,17 @@ def test_strategy_package_requires_embedded_strategy_definition() -> None:
             "market_environment_scope": ["trend"],
             "strategy_family": "volatility_break_retest",
             "directionality": "long_only",
-            "entry_rules": {"signal": "dsl"},
-            "exit_rules": {"mode": "dsl"},
-            "position_sizing_rules": {"risk_fraction": 0.01},
-            "risk_constraints": {"max_hold_minutes": 240},
-            "parameter_set": {"fast_window": 20},
+            "entry_rules": definition["entry_rules"],
+            "exit_rules": definition["exit_rules"],
+            "position_sizing_rules": definition["position_sizing_rules"],
+            "risk_constraints": definition["risk_constraints"],
+            "parameter_set": definition["parameter_set"],
             "backtest_summary": {"row_count": 100},
             "performance_summary": {"return_percent": 67.5},
             "failure_modes": ["late_reversal"],
             "invalidating_conditions": ["gap_down"],
             "research_reason": "ai candidate",
-            "strategy_definition": _sample_strategy_definition(),
+            "strategy_definition": definition,
             "score": 67.5,
             "score_basis": "backtest_return_percent",
         }
@@ -132,6 +133,7 @@ def test_strategy_package_requires_embedded_strategy_definition() -> None:
 
 
 def test_strategy_package_rejects_inconsistent_embedded_definition() -> None:
+    definition = _sample_strategy_definition()
     payload = {
         "strategy_package_id": "pkg-1",
         "generated_at": datetime.now(UTC),
@@ -140,17 +142,17 @@ def test_strategy_package_rejects_inconsistent_embedded_definition() -> None:
         "market_environment_scope": ["trend"],
         "strategy_family": "volatility_break_retest",
         "directionality": "long_only",
-        "entry_rules": {"signal": "dsl"},
-        "exit_rules": {"mode": "dsl"},
-        "position_sizing_rules": {"risk_fraction": 0.01},
-        "risk_constraints": {"max_hold_minutes": 240},
+        "entry_rules": definition["entry_rules"],
+        "exit_rules": definition["exit_rules"],
+        "position_sizing_rules": definition["position_sizing_rules"],
+        "risk_constraints": definition["risk_constraints"],
         "parameter_set": {"fast_window": 99},
         "backtest_summary": {"row_count": 100},
         "performance_summary": {"return_percent": 67.5},
         "failure_modes": ["late_reversal"],
         "invalidating_conditions": ["gap_down"],
         "research_reason": "ai candidate",
-        "strategy_definition": _sample_strategy_definition(),
+        "strategy_definition": definition,
         "score": 67.5,
         "score_basis": "backtest_return_percent",
     }
@@ -160,6 +162,7 @@ def test_strategy_package_rejects_inconsistent_embedded_definition() -> None:
 
 
 def test_strategy_package_rejects_missing_strategy_definition() -> None:
+    definition = _sample_strategy_definition()
     payload = {
         "strategy_package_id": "pkg-1",
         "generated_at": datetime.now(UTC),
@@ -168,11 +171,11 @@ def test_strategy_package_rejects_missing_strategy_definition() -> None:
         "market_environment_scope": ["trend"],
         "strategy_family": "volatility_break_retest",
         "directionality": "long_only",
-        "entry_rules": {"signal": "dsl"},
-        "exit_rules": {"mode": "dsl"},
-        "position_sizing_rules": {"risk_fraction": 0.01},
-        "risk_constraints": {"max_hold_minutes": 240},
-        "parameter_set": {"fast_window": 20},
+        "entry_rules": definition["entry_rules"],
+        "exit_rules": definition["exit_rules"],
+        "position_sizing_rules": definition["position_sizing_rules"],
+        "risk_constraints": definition["risk_constraints"],
+        "parameter_set": definition["parameter_set"],
         "backtest_summary": {"row_count": 100},
         "performance_summary": {"return_percent": 67.5},
         "failure_modes": ["late_reversal"],
@@ -187,6 +190,7 @@ def test_strategy_package_rejects_missing_strategy_definition() -> None:
 
 
 def test_strategy_package_rejects_negative_score() -> None:
+    definition = _sample_strategy_definition()
     payload = {
         "strategy_package_id": "pkg-1",
         "generated_at": datetime.now(UTC),
@@ -195,17 +199,17 @@ def test_strategy_package_rejects_negative_score() -> None:
         "market_environment_scope": ["trend"],
         "strategy_family": "volatility_break_retest",
         "directionality": "long_only",
-        "entry_rules": {"signal": "dsl"},
-        "exit_rules": {"mode": "dsl"},
-        "position_sizing_rules": {"risk_fraction": 0.01},
-        "risk_constraints": {"max_hold_minutes": 240},
-        "parameter_set": {"fast_window": 20},
+        "entry_rules": definition["entry_rules"],
+        "exit_rules": definition["exit_rules"],
+        "position_sizing_rules": definition["position_sizing_rules"],
+        "risk_constraints": definition["risk_constraints"],
+        "parameter_set": definition["parameter_set"],
         "backtest_summary": {"row_count": 100},
         "performance_summary": {"return_percent": 67.5},
         "failure_modes": ["late_reversal"],
         "invalidating_conditions": ["gap_down"],
         "research_reason": "ai candidate",
-        "strategy_definition": _sample_strategy_definition(),
+        "strategy_definition": definition,
         "score": -1.0,
         "score_basis": "backtest_return_percent",
     }
@@ -245,6 +249,80 @@ def test_strategy_snapshot_accepts_symbol_strategy_bindings() -> None:
     )
 
     assert snapshot.symbol_strategy_bindings["BTC-USDT-SWAP"].score == 67.5
+
+
+def test_strategy_package_rejects_entry_rule_mismatch() -> None:
+    definition = _sample_strategy_definition()
+    payload = {
+        "strategy_package_id": "pkg-1",
+        "generated_at": datetime.now(UTC),
+        "trigger": "schedule",
+        "symbol_scope": ["BTC-USDT-SWAP"],
+        "market_environment_scope": ["trend"],
+        "strategy_family": "volatility_break_retest",
+        "directionality": "long_only",
+        "entry_rules": {"all": [{"op": "crosses_below", "left": "close", "right": "sma_20"}]},
+        "exit_rules": definition["exit_rules"],
+        "position_sizing_rules": definition["position_sizing_rules"],
+        "risk_constraints": definition["risk_constraints"],
+        "parameter_set": definition["parameter_set"],
+        "backtest_summary": {"row_count": 100},
+        "performance_summary": {"return_percent": 67.5},
+        "failure_modes": ["late_reversal"],
+        "invalidating_conditions": ["gap_down"],
+        "research_reason": "ai candidate",
+        "strategy_definition": definition,
+        "score": 67.5,
+        "score_basis": "backtest_return_percent",
+    }
+
+    with pytest.raises(ValidationError, match="entry_rules must match"):
+        StrategyPackage.model_validate(payload)
+
+
+def test_strategy_package_rejects_risk_constraints_mismatch() -> None:
+    definition = _sample_strategy_definition()
+    payload = {
+        "strategy_package_id": "pkg-1",
+        "generated_at": datetime.now(UTC),
+        "trigger": "schedule",
+        "symbol_scope": ["BTC-USDT-SWAP"],
+        "market_environment_scope": ["trend"],
+        "strategy_family": "volatility_break_retest",
+        "directionality": "long_only",
+        "entry_rules": definition["entry_rules"],
+        "exit_rules": definition["exit_rules"],
+        "position_sizing_rules": definition["position_sizing_rules"],
+        "risk_constraints": {"max_hold_minutes": 999},
+        "parameter_set": definition["parameter_set"],
+        "backtest_summary": {"row_count": 100},
+        "performance_summary": {"return_percent": 67.5},
+        "failure_modes": ["late_reversal"],
+        "invalidating_conditions": ["gap_down"],
+        "research_reason": "ai candidate",
+        "strategy_definition": definition,
+        "score": 67.5,
+        "score_basis": "backtest_return_percent",
+    }
+
+    with pytest.raises(ValidationError, match="risk_constraints must match"):
+        StrategyPackage.model_validate(payload)
+
+
+def test_strategy_definition_rejects_combinator_shape_conflicts() -> None:
+    payload = _sample_strategy_definition()
+    payload["entry_rules"] = {"all": [], "any": []}
+
+    with pytest.raises(ValidationError, match="combinator nodes must contain exactly one of all or any"):
+        StrategyDefinition.model_validate(payload)
+
+
+def test_strategy_definition_rejects_combinator_and_operator_conflict() -> None:
+    payload = _sample_strategy_definition()
+    payload["entry_rules"] = {"all": [{"op": "crosses_above", "left": "close", "right": "sma_20"}], "op": "greater_than"}
+
+    with pytest.raises(ValidationError, match="combinator nodes must contain exactly one of all or any"):
+        StrategyDefinition.model_validate(payload)
 
 
 def test_strategy_binding_rejects_whitespace_identifiers() -> None:

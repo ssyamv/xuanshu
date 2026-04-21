@@ -63,6 +63,7 @@ def test_strategy_snapshot_and_expert_opinion_are_stable_contracts() -> None:
 
 
 def test_strategy_package_contract_is_typed() -> None:
+    definition = _sample_strategy_definition()
     package = StrategyPackage(
         strategy_package_id="pkg-001",
         generated_at=datetime.now(UTC),
@@ -71,17 +72,17 @@ def test_strategy_package_contract_is_typed() -> None:
         market_environment_scope=["trend"],
         strategy_family="breakout",
         directionality="long_only",
-        entry_rules={"signal": "breakout_confirmed"},
-        exit_rules={"stop_loss_bps": 50, "take_profit_bps": 120},
-        position_sizing_rules={"risk_fraction": 0.0025},
-        risk_constraints={"max_hold_minutes": 60},
-        parameter_set={"lookback_fast": 20, "lookback_slow": 60},
+        entry_rules=definition["entry_rules"],
+        exit_rules=definition["exit_rules"],
+        position_sizing_rules=definition["position_sizing_rules"],
+        risk_constraints=definition["risk_constraints"],
+        parameter_set=definition["parameter_set"],
         backtest_summary={"total_return": 0.18},
         performance_summary={"sharpe": 1.4},
         failure_modes=["range_whipsaw"],
         invalidating_conditions=["liquidity_collapse"],
         research_reason="manual research run",
-        strategy_definition=_sample_strategy_definition(),
+        strategy_definition=definition,
         score=67.5,
         score_basis="backtest_return_percent",
     )
@@ -90,6 +91,7 @@ def test_strategy_package_contract_is_typed() -> None:
 
 
 def test_strategy_package_rejects_unknown_trigger_value() -> None:
+    definition = _sample_strategy_definition()
     payload = {
         "strategy_package_id": "pkg-001",
         "generated_at": datetime.now(UTC),
@@ -98,17 +100,17 @@ def test_strategy_package_rejects_unknown_trigger_value() -> None:
         "market_environment_scope": ["trend"],
         "strategy_family": "breakout",
         "directionality": "long_only",
-        "entry_rules": {"signal": "breakout_confirmed"},
-        "exit_rules": {"stop_loss_bps": 50, "take_profit_bps": 120},
-        "position_sizing_rules": {"risk_fraction": 0.0025},
-        "risk_constraints": {"max_hold_minutes": 60},
-        "parameter_set": {"lookback_fast": 20, "lookback_slow": 60},
+        "entry_rules": definition["entry_rules"],
+        "exit_rules": definition["exit_rules"],
+        "position_sizing_rules": definition["position_sizing_rules"],
+        "risk_constraints": definition["risk_constraints"],
+        "parameter_set": definition["parameter_set"],
         "backtest_summary": {"total_return": 0.18},
         "performance_summary": {"sharpe": 1.4},
         "failure_modes": ["range_whipsaw"],
         "invalidating_conditions": ["liquidity_collapse"],
         "research_reason": "manual research run",
-        "strategy_definition": _sample_strategy_definition(),
+        "strategy_definition": definition,
         "score": 67.5,
         "score_basis": "backtest_return_percent",
     }
@@ -122,6 +124,7 @@ def test_strategy_package_rejects_unknown_trigger_value() -> None:
     ["symbol_scope", "market_environment_scope"],
 )
 def test_strategy_package_rejects_blank_entries(field_name: str) -> None:
+    definition = _sample_strategy_definition()
     payload = {
         "strategy_package_id": "pkg-001",
         "generated_at": datetime.now(UTC),
@@ -130,17 +133,17 @@ def test_strategy_package_rejects_blank_entries(field_name: str) -> None:
         "market_environment_scope": ["trend"],
         "strategy_family": "breakout",
         "directionality": "long_only",
-        "entry_rules": {"signal": "breakout_confirmed"},
-        "exit_rules": {"stop_loss_bps": 50, "take_profit_bps": 120},
-        "position_sizing_rules": {"risk_fraction": 0.0025},
-        "risk_constraints": {"max_hold_minutes": 60},
-        "parameter_set": {"lookback_fast": 20, "lookback_slow": 60},
+        "entry_rules": definition["entry_rules"],
+        "exit_rules": definition["exit_rules"],
+        "position_sizing_rules": definition["position_sizing_rules"],
+        "risk_constraints": definition["risk_constraints"],
+        "parameter_set": definition["parameter_set"],
         "backtest_summary": {"total_return": 0.18},
         "performance_summary": {"sharpe": 1.4},
         "failure_modes": ["range_whipsaw"],
         "invalidating_conditions": ["liquidity_collapse"],
         "research_reason": "manual research run",
-        "strategy_definition": _sample_strategy_definition(),
+        "strategy_definition": definition,
         "score": 67.5,
         "score_basis": "backtest_return_percent",
     }
@@ -151,6 +154,7 @@ def test_strategy_package_rejects_blank_entries(field_name: str) -> None:
 
 
 def test_strategy_package_rejects_naive_generated_at() -> None:
+    definition = _sample_strategy_definition()
     payload = {
         "strategy_package_id": "pkg-001",
         "generated_at": datetime.now(),
@@ -159,17 +163,17 @@ def test_strategy_package_rejects_naive_generated_at() -> None:
         "market_environment_scope": ["trend"],
         "strategy_family": "breakout",
         "directionality": "long_only",
-        "entry_rules": {"signal": "breakout_confirmed"},
-        "exit_rules": {"stop_loss_bps": 50, "take_profit_bps": 120},
-        "position_sizing_rules": {"risk_fraction": 0.0025},
-        "risk_constraints": {"max_hold_minutes": 60},
-        "parameter_set": {"lookback_fast": 20, "lookback_slow": 60},
+        "entry_rules": definition["entry_rules"],
+        "exit_rules": definition["exit_rules"],
+        "position_sizing_rules": definition["position_sizing_rules"],
+        "risk_constraints": definition["risk_constraints"],
+        "parameter_set": definition["parameter_set"],
         "backtest_summary": {"total_return": 0.18},
         "performance_summary": {"sharpe": 1.4},
         "failure_modes": ["range_whipsaw"],
         "invalidating_conditions": ["liquidity_collapse"],
         "research_reason": "manual research run",
-        "strategy_definition": _sample_strategy_definition(),
+        "strategy_definition": definition,
         "score": 67.5,
         "score_basis": "backtest_return_percent",
     }
@@ -179,6 +183,7 @@ def test_strategy_package_rejects_naive_generated_at() -> None:
 
 
 def test_strategy_package_normalizes_generated_at_to_utc() -> None:
+    definition = _sample_strategy_definition()
     package = StrategyPackage(
         strategy_package_id="pkg-001",
         generated_at=datetime(2026, 1, 1, 12, 0, tzinfo=timezone(timedelta(hours=8))),
@@ -187,17 +192,17 @@ def test_strategy_package_normalizes_generated_at_to_utc() -> None:
         market_environment_scope=["trend"],
         strategy_family="breakout",
         directionality="long_only",
-        entry_rules={"signal": "breakout_confirmed"},
-        exit_rules={"stop_loss_bps": 50, "take_profit_bps": 120},
-        position_sizing_rules={"risk_fraction": 0.0025},
-        risk_constraints={"max_hold_minutes": 60},
-        parameter_set={"lookback_fast": 20, "lookback_slow": 60},
+        entry_rules=definition["entry_rules"],
+        exit_rules=definition["exit_rules"],
+        position_sizing_rules=definition["position_sizing_rules"],
+        risk_constraints=definition["risk_constraints"],
+        parameter_set=definition["parameter_set"],
         backtest_summary={"total_return": 0.18},
         performance_summary={"sharpe": 1.4},
         failure_modes=["range_whipsaw"],
         invalidating_conditions=["liquidity_collapse"],
         research_reason="manual research run",
-        strategy_definition=_sample_strategy_definition(),
+        strategy_definition=definition,
         score=67.5,
         score_basis="backtest_return_percent",
     )

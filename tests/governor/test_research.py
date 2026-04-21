@@ -98,8 +98,8 @@ async def test_strategy_research_engine_builds_candidate_package_from_provider_a
 
     assert len(packages) > 20
     assert any(package.strategy_family == "breakout" for package in packages)
-    assert any(package.entry_rules == {"signal": "breakout_confirmed"} for package in packages)
-    assert any(package.exit_rules == {"stop_loss_bps": 65, "take_profit_bps": 150} for package in packages)
+    assert any(package.entry_rules == package.strategy_definition.entry_rules for package in packages)
+    assert any(package.exit_rules == package.strategy_definition.exit_rules for package in packages)
     assert any(package.position_sizing_rules == {"risk_fraction": 0.003} for package in packages)
     assert any(package.risk_constraints == {"max_hold_minutes": 90} for package in packages)
     assert any(package.strategy_definition.position_sizing_rules == {"risk_fraction": 0.003} for package in packages)
@@ -200,7 +200,7 @@ async def test_strategy_research_engine_normalizes_descriptive_provider_strategy
 
     package = packages[0]
     assert package.strategy_family == "breakout"
-    assert package.entry_rules == {"signal": "breakout_confirmed"}
+    assert package.entry_rules == package.strategy_definition.entry_rules
 
 
 @pytest.mark.asyncio

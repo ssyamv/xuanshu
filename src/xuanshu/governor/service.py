@@ -755,6 +755,7 @@ class GovernorService:
             "approval_state": candidate.approval_state,
             "source_reason": candidate.source_reason,
             "ttl_sec": candidate.ttl_sec,
+            "symbol_strategy_bindings": candidate.symbol_strategy_bindings,
         } == {
             "symbol_whitelist": previous.symbol_whitelist,
             "strategy_enable_flags": previous.strategy_enable_flags,
@@ -765,6 +766,7 @@ class GovernorService:
             "approval_state": previous.approval_state,
             "source_reason": previous.source_reason,
             "ttl_sec": previous.ttl_sec,
+            "symbol_strategy_bindings": previous.symbol_strategy_bindings,
         }
 
     def _extract_symbol_scope(self, state_summary: Mapping[str, object]) -> list[str]:

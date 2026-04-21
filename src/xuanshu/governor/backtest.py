@@ -39,12 +39,17 @@ class BacktestValidator:
         if not historical_rows:
             raise ValueError("historical_rows must not be empty")
 
-        strategy_family = self._normalize_strategy_family(package.strategy_family)
-        allowed_sides = self._normalize_directionality(package.directionality)
-        lookback = self._extract_positive_int(package.parameter_set, "lookback", default=1)
-        entry_signal = self._extract_entry_signal(package=package, strategy_family=strategy_family)
-        stop_loss_bps = self._extract_positive_float(package.exit_rules, "stop_loss_bps", default=50.0)
-        take_profit_bps = self._extract_positive_float(package.exit_rules, "take_profit_bps", default=100.0)
+        definition = package.strategy_definition
+        strategy_family = self._normalize_strategy_family(definition.strategy_family)
+        allowed_sides = self._normalize_directionality(definition.directionality)
+        lookback = self._extract_positive_int(definition.parameter_set, "lookback", default=1)
+        entry_signal = self._extract_entry_signal(
+            strategy_family=strategy_family,
+            parameter_set=definition.parameter_set,
+            lookback=lookback,
+        )
+        stop_loss_bps = self._extract_positive_float(definition.parameter_set, "stop_loss_bps", default=50.0)
+        take_profit_bps = self._extract_positive_float(definition.parameter_set, "take_profit_bps", default=100.0)
         risk_fraction = self._extract_positive_float(
             package.position_sizing_rules,
             "risk_fraction",
@@ -250,19 +255,25 @@ class BacktestValidator:
         raise ValueError("unsupported directionality")
 
     @staticmethod
-    def _extract_entry_signal(*, package: StrategyPackage, strategy_family: str) -> str:
-        signal = package.entry_rules.get("signal")
-        if not isinstance(signal, str) or not signal.strip():
-            raise ValueError("entry_rules.signal must be a non-empty string")
-
-        normalized_signal = signal.strip().lower()
+    def _extract_entry_signal(
+        *,
+        strategy_family: str,
+        parameter_set: dict[str, object],
+        lookback: int,
+    ) -> str:
+        signal = parameter_set.get("signal_mode")
         supported_signals = {
             "breakout": {"breakout_confirmed"},
             "mean_reversion": {"mean_reversion_signal", "range_retest"},
         }
-        if normalized_signal not in supported_signals[strategy_family]:
-            raise ValueError("entry_rules.signal is not supported for strategy_family")
-        return normalized_signal
+        if isinstance(signal, str) and signal.strip():
+            normalized_signal = signal.strip().lower()
+            if normalized_signal not in supported_signals[strategy_family]:
+                raise ValueError("signal_mode is not supported for strategy_family")
+            return normalized_signal
+        if strategy_family == "breakout":
+            return "breakout_confirmed"
+        return "range_retest" if lookback >= 2 else "mean_reversion_signal"
 
     @staticmethod
     def _extract_positive_int(config: dict[str, object], key: str, *, default: int) -> int:

@@ -22,7 +22,14 @@ def _sample_strategy_definition(
     strategy_family: str = "breakout",
     directionality: str,
     lookback: int = 20,
+    signal_mode: str | None = None,
+    stop_loss_bps: int = 50,
+    take_profit_bps: int = 100,
+    risk_fraction: float = 1.0,
+    max_hold_minutes: int = 60,
 ) -> dict[str, object]:
+    if signal_mode is None:
+        signal_mode = "breakout_confirmed" if strategy_family == "breakout" else "mean_reversion_signal"
     return {
         "strategy_def_id": "strat-backtest-001",
         "symbol": "BTC-USDT-SWAP",
@@ -31,9 +38,16 @@ def _sample_strategy_definition(
         "feature_spec": {"indicators": [{"name": "sma", "source": "close", "window": 20}]},
         "entry_rules": {"all": [{"op": "crosses_above", "left": "close", "right": "sma_20"}]},
         "exit_rules": {"any": [{"op": "crosses_below", "left": "close", "right": "sma_20"}]},
-        "position_sizing_rules": {"risk_fraction": 0.01},
-        "risk_constraints": {"max_hold_minutes": 240},
-        "parameter_set": {"lookback": lookback},
+        "position_sizing_rules": {"risk_fraction": risk_fraction},
+        "risk_constraints": {"max_hold_minutes": max_hold_minutes},
+        "parameter_set": {
+            "lookback": lookback,
+            "signal_mode": signal_mode,
+            "stop_loss_bps": stop_loss_bps,
+            "take_profit_bps": take_profit_bps,
+            "risk_fraction": risk_fraction,
+            "max_hold_minutes": max_hold_minutes,
+        },
         "score": 67.5,
         "score_basis": "backtest_return_percent",
     }
@@ -141,6 +155,7 @@ def test_approval_record_normalizes_timezone_aware_created_at_to_utc() -> None:
 
 def test_strategy_package_requires_timezone_aware_generated_at() -> None:
     with pytest.raises(ValidationError):
+        definition = _sample_strategy_definition(directionality="long_only")
         StrategyPackage(
             strategy_package_id="pkg-1",
             generated_at=datetime(2026, 4, 20, 12, 0, 0),
@@ -149,23 +164,24 @@ def test_strategy_package_requires_timezone_aware_generated_at() -> None:
             market_environment_scope=["trend"],
             strategy_family="breakout",
             directionality="long",
-            entry_rules={},
-            exit_rules={},
-            position_sizing_rules={},
-            risk_constraints={},
-            parameter_set={"lookback": 20},
+            entry_rules=definition["entry_rules"],
+            exit_rules=definition["exit_rules"],
+            position_sizing_rules=definition["position_sizing_rules"],
+            risk_constraints=definition["risk_constraints"],
+            parameter_set=definition["parameter_set"],
             backtest_summary={},
             performance_summary={},
             failure_modes=["late breakouts"],
             invalidating_conditions=["spread expansion"],
             research_reason="manual study",
-            strategy_definition=_sample_strategy_definition(directionality="long_only"),
+            strategy_definition=definition,
             score=67.5,
             score_basis="backtest_return_percent",
         )
 
 
 def test_strategy_package_normalizes_timezone_aware_generated_at_to_utc() -> None:
+    definition = _sample_strategy_definition(directionality="long_only")
     package = StrategyPackage(
         strategy_package_id="pkg-1",
         generated_at=datetime(2026, 4, 20, 20, 0, 0, tzinfo=timezone(timedelta(hours=8))),
@@ -174,20 +190,20 @@ def test_strategy_package_normalizes_timezone_aware_generated_at_to_utc() -> Non
         market_environment_scope=["trend"],
         strategy_family="breakout",
         directionality="long_only",
-        entry_rules={},
-        exit_rules={},
-        position_sizing_rules={},
-        risk_constraints={},
-        parameter_set={"lookback": 20},
+        entry_rules=definition["entry_rules"],
+        exit_rules=definition["exit_rules"],
+        position_sizing_rules=definition["position_sizing_rules"],
+        risk_constraints=definition["risk_constraints"],
+        parameter_set=definition["parameter_set"],
         backtest_summary={},
         performance_summary={},
-            failure_modes=["late breakouts"],
-            invalidating_conditions=["spread expansion"],
-            research_reason="manual study",
-            strategy_definition=_sample_strategy_definition(directionality="long_only"),
-            score=67.5,
-            score_basis="backtest_return_percent",
-        )
+        failure_modes=["late breakouts"],
+        invalidating_conditions=["spread expansion"],
+        research_reason="manual study",
+        strategy_definition=definition,
+        score=67.5,
+        score_basis="backtest_return_percent",
+    )
 
     assert package.generated_at == datetime(2026, 4, 20, 12, 0, tzinfo=UTC)
 
@@ -281,6 +297,16 @@ def _make_package(
         symbol_scope = ["BTC-USDT-SWAP"]
     if market_environment_scope is None:
         market_environment_scope = ["trend"] if strategy_family == "breakout" else ["range"]
+    definition = _sample_strategy_definition(
+        strategy_family=strategy_family,
+        directionality=directionality,
+        lookback=lookback,
+        signal_mode=signal,
+        stop_loss_bps=stop_loss_bps,
+        take_profit_bps=take_profit_bps,
+        risk_fraction=risk_fraction,
+        max_hold_minutes=max_hold_minutes,
+    )
     return StrategyPackage(
         strategy_package_id="pkg-1",
         generated_at=datetime.now(UTC),
@@ -289,21 +315,17 @@ def _make_package(
         market_environment_scope=market_environment_scope,
         strategy_family=strategy_family,
         directionality=directionality,
-        entry_rules={"signal": signal},
-        exit_rules={"stop_loss_bps": stop_loss_bps, "take_profit_bps": take_profit_bps},
-        position_sizing_rules={"risk_fraction": risk_fraction},
-        risk_constraints={"max_hold_minutes": max_hold_minutes},
-        parameter_set={"lookback": lookback},
+        entry_rules=definition["entry_rules"],
+        exit_rules=definition["exit_rules"],
+        position_sizing_rules=definition["position_sizing_rules"],
+        risk_constraints=definition["risk_constraints"],
+        parameter_set=definition["parameter_set"],
         backtest_summary={},
         performance_summary={},
         failure_modes=["late"],
         invalidating_conditions=["spread expansion"],
         research_reason="scheduled research",
-            strategy_definition=_sample_strategy_definition(
-                strategy_family=strategy_family,
-                directionality=directionality,
-                lookback=lookback,
-            ),
+        strategy_definition=definition,
         score=67.5,
         score_basis="backtest_return_percent",
     )

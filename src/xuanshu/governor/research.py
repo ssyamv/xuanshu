@@ -152,6 +152,11 @@ class StrategyResearchEngine:
                 "start_close": closes[0],
                 "end_close": closes[-1],
                 "lookback": lookback,
+                "signal_mode": entry_signal,
+                "stop_loss_bps": stop_loss,
+                "take_profit_bps": take_profit,
+                "risk_fraction": risk_fraction_value,
+                "max_hold_minutes": hold_minutes_value,
             }
             package = self._build_candidate_package(
                 trigger=trigger,
@@ -254,6 +259,20 @@ class StrategyResearchEngine:
                     strategy_family=strategy_family_value,
                     entry_signal=entry_signal_value,
                 ),
+                "signal_mode": entry_signal_value,
+                "stop_loss_bps": stop_loss_bps,
+                "take_profit_bps": take_profit_bps,
+                "risk_fraction": risk_fraction,
+                "max_hold_minutes": max_hold_minutes,
+            }
+        else:
+            parameter_set = {
+                **parameter_set,
+                "signal_mode": entry_signal_value,
+                "stop_loss_bps": stop_loss_bps,
+                "take_profit_bps": take_profit_bps,
+                "risk_fraction": risk_fraction,
+                "max_hold_minutes": max_hold_minutes,
             }
         if strategy_package_id is None:
             strategy_package_id = self._build_package_id(
@@ -273,6 +292,19 @@ class StrategyResearchEngine:
             )
         score = max(performance_summary["return_percent"], 0.0)
 
+        strategy_definition = self._build_strategy_definition(
+            strategy_package_id=strategy_package_id,
+            symbol=normalized_symbol_scope[0],
+            strategy_family=strategy_family_value,
+            directionality=directionality,
+            parameter_set=parameter_set,
+            stop_loss_bps=stop_loss_bps,
+            take_profit_bps=take_profit_bps,
+            risk_fraction=risk_fraction,
+            max_hold_minutes=max_hold_minutes,
+            score=score,
+        )
+
         return StrategyPackage(
             strategy_package_id=strategy_package_id,
             generated_at=self._extract_generated_at(normalized_rows),
@@ -281,29 +313,11 @@ class StrategyResearchEngine:
             market_environment_scope=[normalized_market_environment],
             strategy_family=strategy_family_value,
             directionality=directionality,
-            strategy_definition=self._build_strategy_definition(
-                strategy_package_id=strategy_package_id,
-                symbol=normalized_symbol_scope[0],
-                strategy_family=strategy_family_value,
-                directionality=directionality,
-                parameter_set=parameter_set,
-                stop_loss_bps=stop_loss_bps,
-                take_profit_bps=take_profit_bps,
-                risk_fraction=risk_fraction,
-                max_hold_minutes=max_hold_minutes,
-                score=score,
-            ),
-            entry_rules={"signal": entry_signal_value},
-            exit_rules={
-                "stop_loss_bps": stop_loss_bps,
-                "take_profit_bps": take_profit_bps,
-            },
-            position_sizing_rules={
-                "risk_fraction": risk_fraction,
-            },
-            risk_constraints={
-                "max_hold_minutes": max_hold_minutes,
-            },
+            strategy_definition=strategy_definition,
+            entry_rules=strategy_definition.entry_rules,
+            exit_rules=strategy_definition.exit_rules,
+            position_sizing_rules=strategy_definition.position_sizing_rules,
+            risk_constraints=strategy_definition.risk_constraints,
             parameter_set=parameter_set,
             backtest_summary=backtest_summary,
             performance_summary=performance_summary,

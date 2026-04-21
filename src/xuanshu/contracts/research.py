@@ -56,6 +56,14 @@ class StrategyPackage(BaseModel):
             raise ValueError("strategy_family must match strategy_definition.strategy_family")
         if self.directionality != definition.directionality:
             raise ValueError("directionality must match strategy_definition.directionality")
+        if self.entry_rules != definition.entry_rules:
+            raise ValueError("entry_rules must match strategy_definition.entry_rules")
+        if self.exit_rules != definition.exit_rules:
+            raise ValueError("exit_rules must match strategy_definition.exit_rules")
+        if self.position_sizing_rules != definition.position_sizing_rules:
+            raise ValueError("position_sizing_rules must match strategy_definition.position_sizing_rules")
+        if self.risk_constraints != definition.risk_constraints:
+            raise ValueError("risk_constraints must match strategy_definition.risk_constraints")
         if self.score != definition.score:
             raise ValueError("score must match strategy_definition.score")
         if self.score_basis != definition.score_basis:
