@@ -2,7 +2,7 @@ from datetime import UTC, datetime, timedelta, timezone
 from subprocess import CompletedProcess
 
 import pytest
-from pydantic import SecretStr, ValidationError
+from pydantic import SecretStr
 
 import xuanshu.governor.research_providers as research_providers_module
 from xuanshu.contracts.research import ResearchTrigger
@@ -287,37 +287,170 @@ async def test_strategy_research_engine_synthesizes_time_stop_minutes_from_provi
     assert all(package.strategy_definition.risk_constraints == package.risk_constraints for package in packages)
 
 
-def test_parse_suggestion_payload_rejects_invalid_nested_strategy_definition() -> None:
-    payload = """
-    {
-      "thesis": "invalid nested dsl",
-      "strategy_family": "breakout",
-      "entry_signal": "breakout_confirmed",
-      "exit_stop_loss_bps": 55,
-      "exit_take_profit_bps": 140,
-      "risk_fraction": 0.002,
-      "max_hold_minutes": 75,
-      "strategy_definition": {
+async def test_strategy_research_engine_skips_invalid_provider_dsl_and_keeps_valid_suggestions() -> None:
+    valid_definition = {
+        "strategy_def_id": "ai-base-001",
+        "symbol": "BTC-USDT-SWAP",
+        "strategy_family": "breakout",
+        "directionality": "long_only",
+        "feature_spec": {
+            "indicators": [
+                {"name": "sma", "source": "close", "window": 20},
+            ]
+        },
+        "entry_rules": {
+            "all": [
+                {"op": "crosses_above", "left": "close", "right": "sma_20"},
+            ]
+        },
+        "exit_rules": {
+            "any": [
+                {"op": "crosses_below", "left": "close", "right": "sma_20"},
+                {"op": "take_profit_bps", "value": 150},
+                {"op": "stop_loss_bps", "value": 65},
+            ]
+        },
+        "position_sizing_rules": {"risk_fraction": 0.003},
+        "risk_constraints": {"max_hold_minutes": 90},
+        "parameter_set": {
+            "lookback": 8,
+            "signal_mode": "provider_breakout_signal",
+            "stop_loss_bps": 65,
+            "take_profit_bps": 150,
+            "risk_fraction": 0.003,
+            "max_hold_minutes": 90,
+        },
+        "score": 12.5,
+        "score_basis": "backtest_return_percent",
+    }
+    invalid_definition = {
         "strategy_def_id": "ai-invalid-001",
         "symbol": "BTC-USDT-SWAP",
         "strategy_family": "breakout",
         "directionality": "long_only",
         "feature_spec": {"indicators": [{"name": "sma", "source": "close", "window": 20}]},
         "entry_rules": {"all": [{"op": "exec_python", "value": "boom"}]},
-        "exit_rules": {"any": [{"op": "take_profit_bps", "value": 140}]},
-        "position_sizing_rules": {"risk_fraction": 0.002},
-        "risk_constraints": {"max_hold_minutes": 75},
-        "parameter_set": {"lookback": 1},
+        "exit_rules": {"any": [{"op": "take_profit_bps", "value": 150}, {"op": "stop_loss_bps", "value": 65}]},
+        "position_sizing_rules": {"risk_fraction": 0.003},
+        "risk_constraints": {"max_hold_minutes": 90},
+        "parameter_set": {
+            "lookback": 8,
+            "signal_mode": "provider_breakout_signal",
+            "stop_loss_bps": 65,
+            "take_profit_bps": 150,
+            "risk_fraction": 0.003,
+            "max_hold_minutes": 90,
+        },
         "score": 12.5,
-        "score_basis": "backtest_return_percent"
-      },
-      "failure_modes": [],
-      "invalidating_conditions": []
+        "score_basis": "backtest_return_percent",
     }
-    """
 
-    with pytest.raises(ValidationError, match="unsupported operator"):
-        research_providers_module._parse_suggestion_payload(payload)
+    class _Provider:
+        provider_name = ResearchProviderName.API
+
+        async def generate_analyses(self, *, symbol_scope, market_environment, historical_rows, research_reason):
+            return [
+                research_providers_module.ResearchProviderSuggestion(
+                    thesis="invalid dsl should be skipped",
+                    strategy_family="breakout",
+                    entry_signal="provider_breakout_signal",
+                    exit_stop_loss_bps=65,
+                    exit_take_profit_bps=150,
+                    risk_fraction=0.003,
+                    max_hold_minutes=90,
+                    strategy_definition=invalid_definition,
+                    failure_modes=["whipsaw"],
+                    invalidating_conditions=["trend breakdown"],
+                ),
+                research_providers_module.ResearchProviderSuggestion(
+                    thesis="valid dsl should remain",
+                    strategy_family="breakout",
+                    entry_signal="provider_breakout_signal",
+                    exit_stop_loss_bps=65,
+                    exit_take_profit_bps=150,
+                    risk_fraction=0.003,
+                    max_hold_minutes=90,
+                    strategy_definition=valid_definition,
+                    failure_modes=["whipsaw"],
+                    invalidating_conditions=["trend breakdown"],
+                ),
+            ]
+
+    engine = StrategyResearchEngine(provider=_Provider())
+
+    packages = await engine.build_candidate_packages_from_provider(
+        trigger=ResearchTrigger.MANUAL,
+        symbol_scope=["BTC-USDT-SWAP"],
+        market_environment="trend",
+        historical_rows=[
+            {"timestamp": datetime(2026, 4, 19, 0, 0, tzinfo=UTC), "close": 100.0},
+            {"timestamp": datetime(2026, 4, 19, 0, 5, tzinfo=UTC), "close": 103.0},
+        ],
+        research_reason="manual trend study",
+    )
+
+    assert packages
+    assert all("valid dsl should remain" in package.research_reason for package in packages)
+    assert all("invalid dsl should be skipped" not in package.research_reason for package in packages)
+
+
+@pytest.mark.asyncio
+async def test_strategy_research_engine_returns_no_packages_when_all_provider_dsls_are_invalid() -> None:
+    invalid_definition = {
+        "strategy_def_id": "ai-invalid-001",
+        "symbol": "BTC-USDT-SWAP",
+        "strategy_family": "breakout",
+        "directionality": "long_only",
+        "feature_spec": {"indicators": [{"name": "sma", "source": "close", "window": 20}]},
+        "entry_rules": {"all": [{"op": "exec_python", "value": "boom"}]},
+        "exit_rules": {"any": [{"op": "take_profit_bps", "value": 150}, {"op": "stop_loss_bps", "value": 65}]},
+        "position_sizing_rules": {"risk_fraction": 0.003},
+        "risk_constraints": {"max_hold_minutes": 90},
+        "parameter_set": {
+            "lookback": 8,
+            "signal_mode": "provider_breakout_signal",
+            "stop_loss_bps": 65,
+            "take_profit_bps": 150,
+            "risk_fraction": 0.003,
+            "max_hold_minutes": 90,
+        },
+        "score": 12.5,
+        "score_basis": "backtest_return_percent",
+    }
+
+    class _Provider:
+        provider_name = ResearchProviderName.API
+
+        async def generate_analyses(self, *, symbol_scope, market_environment, historical_rows, research_reason):
+            return [
+                research_providers_module.ResearchProviderSuggestion(
+                    thesis="invalid dsl should be skipped",
+                    strategy_family="breakout",
+                    entry_signal="provider_breakout_signal",
+                    exit_stop_loss_bps=65,
+                    exit_take_profit_bps=150,
+                    risk_fraction=0.003,
+                    max_hold_minutes=90,
+                    strategy_definition=invalid_definition,
+                    failure_modes=["whipsaw"],
+                    invalidating_conditions=["trend breakdown"],
+                )
+            ]
+
+    engine = StrategyResearchEngine(provider=_Provider())
+
+    packages = await engine.build_candidate_packages_from_provider(
+        trigger=ResearchTrigger.MANUAL,
+        symbol_scope=["BTC-USDT-SWAP"],
+        market_environment="trend",
+        historical_rows=[
+            {"timestamp": datetime(2026, 4, 19, 0, 0, tzinfo=UTC), "close": 100.0},
+            {"timestamp": datetime(2026, 4, 19, 0, 5, tzinfo=UTC), "close": 103.0},
+        ],
+        research_reason="manual trend study",
+    )
+
+    assert packages == []
 
 
 @pytest.mark.asyncio

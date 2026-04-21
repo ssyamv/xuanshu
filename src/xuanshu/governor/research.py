@@ -7,6 +7,8 @@ from hashlib import sha256
 from itertools import product
 import json
 
+from pydantic import ValidationError
+
 from xuanshu.contracts.research import ResearchTrigger, StrategyPackage
 from xuanshu.contracts.strategy_definition import StrategyDefinition
 from xuanshu.governor.research_providers import ResearchProvider
@@ -83,11 +85,14 @@ class StrategyResearchEngine:
         packages: list[StrategyPackage] = []
         for suggestion in suggestions:
             provider_reason = f"{research_reason} | {self._normalize_text(suggestion.thesis, 'thesis')}"
-            base_strategy_definition = (
-                StrategyDefinition.model_validate(suggestion.strategy_definition)
-                if suggestion.strategy_definition is not None
-                else None
-            )
+            try:
+                base_strategy_definition = (
+                    StrategyDefinition.model_validate(suggestion.strategy_definition)
+                    if suggestion.strategy_definition is not None
+                    else None
+                )
+            except ValidationError:
+                continue
             if base_strategy_definition is not None:
                 normalized_strategy_family = self._normalize_text(
                     base_strategy_definition.strategy_family,

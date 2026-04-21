@@ -10,7 +10,6 @@ from typing import Protocol
 import httpx
 from pydantic import BaseModel, ConfigDict, Field, SecretStr
 
-from xuanshu.contracts.strategy_definition import StrategyDefinition
 from xuanshu.infra.ai.governor_client import _extract_json_object, _extract_response_text
 
 _DEFAULT_RESEARCH_MODEL = "gpt-4.1-mini"
@@ -57,7 +56,7 @@ class ResearchProviderSuggestion(BaseModel):
     exit_take_profit_bps: int = Field(gt=0)
     risk_fraction: float = Field(gt=0.0)
     max_hold_minutes: int = Field(gt=0)
-    strategy_definition: StrategyDefinition | None = None
+    strategy_definition: dict[str, object] | None = None
     failure_modes: list[str] = Field(default_factory=list)
     invalidating_conditions: list[str] = Field(default_factory=list)
 
