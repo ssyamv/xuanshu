@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -357,6 +358,16 @@ class StrategyResearchEngine:
                 score=score,
             )
         else:
+            strategy_family_value = strategy_definition.strategy_family
+            directionality = strategy_definition.directionality
+            parameter_set = dict(strategy_definition.parameter_set)
+            strategy_definition_for_id = strategy_definition.model_copy(
+                update={
+                    "symbol": normalized_symbol_scope[0],
+                    "score": score,
+                    "score_basis": "backtest_return_percent",
+                }
+            )
             if strategy_package_id is None:
                 strategy_package_id = self._build_package_id(
                     trigger=trigger,
@@ -372,19 +383,11 @@ class StrategyResearchEngine:
                     max_hold_minutes=max_hold_minutes,
                     lookback=parameter_set.get("lookback", 0),
                     directionality=directionality,
-                    strategy_definition=strategy_definition,
+                    strategy_definition=strategy_definition_for_id,
                 )
-            strategy_definition = self._normalize_candidate_strategy_definition(
-                strategy_definition=strategy_definition,
-                strategy_package_id=strategy_package_id,
-                symbol=normalized_symbol_scope[0],
-                score=score,
-                stop_loss_bps=stop_loss_bps,
-                take_profit_bps=take_profit_bps,
-                max_hold_minutes=max_hold_minutes,
+            strategy_definition = strategy_definition_for_id.model_copy(
+                update={"strategy_def_id": f"{strategy_package_id}-def"}
             )
-            strategy_family_value = strategy_definition.strategy_family
-            directionality = strategy_definition.directionality
             parameter_set = dict(strategy_definition.parameter_set)
 
         return StrategyPackage(
@@ -688,34 +691,6 @@ class StrategyResearchEngine:
         )
 
     @staticmethod
-    def _normalize_candidate_strategy_definition(
-        *,
-        strategy_definition: StrategyDefinition,
-        strategy_package_id: str | None,
-        symbol: str,
-        score: float,
-        stop_loss_bps: int,
-        take_profit_bps: int,
-        max_hold_minutes: int,
-    ) -> StrategyDefinition:
-        exit_rules = StrategyResearchEngine._ensure_required_exit_rules(
-            strategy_definition.exit_rules,
-            stop_loss_bps=stop_loss_bps,
-            take_profit_bps=take_profit_bps,
-            max_hold_minutes=max_hold_minutes,
-        )
-        update: dict[str, object] = {
-            "strategy_def_id": f"{strategy_package_id}-def" if strategy_package_id is not None else strategy_definition.strategy_def_id,
-            "symbol": symbol,
-            "exit_rules": exit_rules,
-            "score": score,
-            "score_basis": "backtest_return_percent",
-        }
-        if strategy_package_id is not None:
-            update["strategy_def_id"] = f"{strategy_package_id}-def"
-        return strategy_definition.model_copy(update=update)
-
-    @staticmethod
     def _ensure_required_exit_rules(
         exit_rules: dict[str, object],
         *,
@@ -723,37 +698,46 @@ class StrategyResearchEngine:
         take_profit_bps: int,
         max_hold_minutes: int,
     ) -> dict[str, object]:
-        required_nodes = [
-            {"op": "stop_loss_bps", "value": stop_loss_bps},
-            {"op": "take_profit_bps", "value": take_profit_bps},
-            {"op": "time_stop_minutes", "value": max_hold_minutes},
-        ]
-        if all(
-            StrategyResearchEngine._rule_tree_contains_op(exit_rules, node["op"])
-            for node in required_nodes
-        ):
-            return exit_rules
-        if isinstance(exit_rules, dict) and set(exit_rules.keys()) == {"any"} and isinstance(exit_rules["any"], list):
-            normalized = {"any": list(exit_rules["any"])}
+        normalized = copy.deepcopy(exit_rules)
+        required_values = {
+            "stop_loss_bps": stop_loss_bps,
+            "take_profit_bps": take_profit_bps,
+            "time_stop_minutes": max_hold_minutes,
+        }
+        present = {op: False for op in required_values}
+        StrategyResearchEngine._rewrite_exit_rule_values(normalized, required_values, present)
+        if all(present.values()):
+            return normalized
+        if isinstance(normalized, dict) and set(normalized.keys()) == {"any"} and isinstance(normalized["any"], list):
+            target = normalized
         else:
-            normalized = {"any": [exit_rules]}
-        for node in required_nodes:
-            if not StrategyResearchEngine._rule_tree_contains_op(normalized, node["op"]):
-                normalized["any"].append(node)
+            target = {"any": [normalized]}
+        for op, value in required_values.items():
+            if not present[op]:
+                target["any"].append({"op": op, "value": value})
+        normalized = target
         return normalized
 
     @classmethod
-    def _rule_tree_contains_op(cls, node: object, op: str) -> bool:
+    def _rewrite_exit_rule_values(
+        cls,
+        node: object,
+        required_values: dict[str, int],
+        present: dict[str, bool],
+    ) -> None:
         if isinstance(node, dict):
-            if node.get("op") == op:
-                return True
+            op = node.get("op")
+            if isinstance(op, str) and op in required_values:
+                node["value"] = required_values[op]
+                present[op] = True
             for key in ("all", "any"):
-                child_nodes = node.get(key)
-                if isinstance(child_nodes, list) and any(cls._rule_tree_contains_op(child, op) for child in child_nodes):
-                    return True
+                children = node.get(key)
+                if isinstance(children, list):
+                    for child in children:
+                        cls._rewrite_exit_rule_values(child, required_values, present)
         elif isinstance(node, list):
-            return any(cls._rule_tree_contains_op(child, op) for child in node)
-        return False
+            for child in node:
+                cls._rewrite_exit_rule_values(child, required_values, present)
 
     @staticmethod
     def _default_lookback_for_entry_signal(*, strategy_family: str, entry_signal: str) -> int:

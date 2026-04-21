@@ -4,6 +4,7 @@ from subprocess import CompletedProcess
 import pytest
 from pydantic import SecretStr
 
+from xuanshu.contracts.strategy_definition import StrategyDefinition
 import xuanshu.governor.research_providers as research_providers_module
 from xuanshu.contracts.research import ResearchTrigger
 from xuanshu.governor.research import StrategyResearchEngine
@@ -134,8 +135,9 @@ async def test_strategy_research_engine_uses_provider_strategy_definition_payloa
         "exit_rules": {
             "any": [
                 {"op": "crosses_below", "left": "close", "right": "sma_20"},
-                {"op": "take_profit_bps", "value": 150},
-                {"op": "stop_loss_bps", "value": 65},
+                {"op": "take_profit_bps", "value": 999},
+                {"op": "stop_loss_bps", "value": 12},
+                {"op": "time_stop_minutes", "value": 15},
             ]
         },
         "position_sizing_rules": {"risk_fraction": 0.003, "custom_bias": "aggressive"},
@@ -190,16 +192,24 @@ async def test_strategy_research_engine_uses_provider_strategy_definition_payloa
     assert any(package.strategy_definition.feature_spec == explicit_definition["feature_spec"] for package in packages)
     assert any(package.strategy_definition.entry_rules == explicit_definition["entry_rules"] for package in packages)
     assert any(package.strategy_definition.parameter_set["custom_bias"] == "aggressive" for package in packages)
-    assert any(
-        rule.get("op") == "time_stop_minutes" and rule.get("value") == 90
-        for package in packages
-        for rule in package.strategy_definition.exit_rules["any"]
-    )
     assert all(package.strategy_definition.strategy_def_id == f"{package.strategy_package_id}-def" for package in packages)
     assert all(package.entry_rules == package.strategy_definition.entry_rules for package in packages)
     assert all(package.exit_rules == package.strategy_definition.exit_rules for package in packages)
     assert all(package.position_sizing_rules == package.strategy_definition.position_sizing_rules for package in packages)
     assert all(package.risk_constraints == package.strategy_definition.risk_constraints for package in packages)
+    assert all(
+        {
+            "stop_loss_bps": next(rule["value"] for rule in package.exit_rules["any"] if rule.get("op") == "stop_loss_bps"),
+            "take_profit_bps": next(rule["value"] for rule in package.exit_rules["any"] if rule.get("op") == "take_profit_bps"),
+            "time_stop_minutes": next(rule["value"] for rule in package.exit_rules["any"] if rule.get("op") == "time_stop_minutes"),
+        }
+        == {
+            "stop_loss_bps": package.parameter_set["stop_loss_bps"],
+            "take_profit_bps": package.parameter_set["take_profit_bps"],
+            "time_stop_minutes": package.risk_constraints["max_hold_minutes"],
+        }
+        for package in packages
+    )
 
 
 @pytest.mark.asyncio
@@ -285,6 +295,54 @@ async def test_strategy_research_engine_synthesizes_time_stop_minutes_from_provi
         for package in packages
     )
     assert all(package.strategy_definition.risk_constraints == package.risk_constraints for package in packages)
+
+
+def test_strategy_research_engine_build_candidate_package_accepts_strategy_definition_without_package_id() -> None:
+    engine = StrategyResearchEngine()
+    strategy_definition = {
+        "strategy_def_id": "ai-base-003",
+        "symbol": "BTC-USDT-SWAP",
+        "strategy_family": "breakout",
+        "directionality": "long_only",
+        "feature_spec": {"indicators": [{"name": "sma", "source": "close", "window": 20}]},
+        "entry_rules": {"all": [{"op": "crosses_above", "left": "close", "right": "sma_20"}]},
+        "exit_rules": {
+            "any": [
+                {"op": "crosses_below", "left": "close", "right": "sma_20"},
+                {"op": "take_profit_bps", "value": 150},
+                {"op": "stop_loss_bps", "value": 65},
+                {"op": "time_stop_minutes", "value": 90},
+            ]
+        },
+        "position_sizing_rules": {"risk_fraction": 0.003},
+        "risk_constraints": {"max_hold_minutes": 90},
+        "parameter_set": {
+            "lookback": 8,
+            "signal_mode": "provider_breakout_signal",
+            "stop_loss_bps": 65,
+            "take_profit_bps": 150,
+            "risk_fraction": 0.003,
+            "max_hold_minutes": 90,
+        },
+        "score": 12.5,
+        "score_basis": "backtest_return_percent",
+    }
+
+    package = engine._build_candidate_package(
+        trigger=ResearchTrigger.MANUAL,
+        symbol_scope=["BTC-USDT-SWAP"],
+        market_environment="trend",
+        historical_rows=[
+            {"timestamp": datetime(2026, 4, 19, 0, 0, tzinfo=UTC), "close": 100.0},
+            {"timestamp": datetime(2026, 4, 19, 0, 5, tzinfo=UTC), "close": 103.0},
+        ],
+        research_reason="manual trend study",
+        strategy_definition=StrategyDefinition.model_validate(strategy_definition),
+    )
+
+    assert package.strategy_package_id.startswith("pkg-")
+    assert package.strategy_definition.strategy_def_id == f"{package.strategy_package_id}-def"
+    assert package.exit_rules == package.strategy_definition.exit_rules
 
 
 async def test_strategy_research_engine_skips_invalid_provider_dsl_and_keeps_valid_suggestions() -> None:
