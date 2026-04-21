@@ -18,12 +18,7 @@ POSTGRES_TABLES = (
     "risk_events",
     "strategy_snapshots",
     "execution_checkpoints",
-    "expert_opinions",
-    "governor_runs",
     "notification_events",
-    "strategy_packages",
-    "backtest_reports",
-    "approval_records",
     "strategy_replacements",
 )
 
@@ -68,12 +63,6 @@ class PostgresRuntimeStore:
     def append_strategy_snapshot(self, payload: dict[str, Any]) -> None:
         self._append_row("strategy_snapshots", payload)
 
-    def append_expert_opinion(self, payload: dict[str, Any]) -> None:
-        self._append_row("expert_opinions", payload)
-
-    def append_governor_run(self, payload: dict[str, Any]) -> None:
-        self._append_row("governor_runs", payload)
-
     def save_checkpoint(self, payload: dict[str, Any]) -> None:
         self._append_row("execution_checkpoints", payload)
 
@@ -103,54 +92,13 @@ class PostgresRuntimeStore:
             return True
         return False
 
-    def append_strategy_package(self, payload: dict[str, Any]) -> None:
-        self._append_row("strategy_packages", payload)
-
-    def append_backtest_report(self, payload: dict[str, Any]) -> None:
-        self._append_row("backtest_reports", payload)
-
-    def append_approval_record(self, payload: dict[str, Any]) -> None:
-        self._append_row("approval_records", payload)
-
     def append_strategy_replacement(self, payload: dict[str, Any]) -> None:
         self._append_row("strategy_replacements", payload)
-
-    def has_strategy_package(self, *, strategy_package_id: str) -> bool:
-        return self._find_row_by_payload_fields(
-            "strategy_packages",
-            {"strategy_package_id": strategy_package_id},
-        ) is not None
-
-    def find_strategy_package(self, *, strategy_package_id: str) -> dict[str, Any] | None:
-        return self._find_row_by_payload_fields(
-            "strategy_packages",
-            {"strategy_package_id": strategy_package_id},
-        )
 
     def find_strategy_snapshot(self, *, version_id: str) -> dict[str, Any] | None:
         return self._find_row_by_payload_fields(
             "strategy_snapshots",
             {"version_id": version_id},
-        )
-
-    def has_backtest_report(self, *, backtest_report_id: str) -> bool:
-        return self._find_row_by_payload_fields(
-            "backtest_reports",
-            {"backtest_report_id": backtest_report_id},
-        ) is not None
-
-    def find_approval_record(
-        self,
-        *,
-        strategy_package_id: str,
-        backtest_report_id: str,
-    ) -> dict[str, Any] | None:
-        return self._find_row_by_payload_fields(
-            "approval_records",
-            {
-                "strategy_package_id": strategy_package_id,
-                "backtest_report_id": backtest_report_id,
-            },
         )
 
     def list_recent_rows(self, table: str, limit: int = 10) -> list[dict[str, Any]]:

@@ -1,10 +1,9 @@
-from pydantic import BaseModel, Field, SecretStr, field_validator, model_validator
-from pydantic.networks import AnyHttpUrl, PostgresDsn, RedisDsn
+from pydantic import BaseModel, Field, SecretStr, field_validator
+from pydantic.networks import PostgresDsn, RedisDsn
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from pydantic_settings.sources import DotEnvSettingsSource, EnvSettingsSource, PydanticBaseSettingsSource
 
 from xuanshu.core.enums import OkxAccountMode, RunMode
-from xuanshu.governor.research_providers import ResearchProviderName
 
 
 class _SettingsEnvSource(EnvSettingsSource):
@@ -27,10 +26,6 @@ class OkxRuntimeSecrets(BaseModel):
     passphrase: SecretStr
 
 
-class OpenAiRuntimeSecrets(BaseModel):
-    api_key: SecretStr
-
-
 class TelegramRuntimeSecrets(BaseModel):
     bot_token: SecretStr
     chat_id: str = Field(min_length=1)
@@ -50,7 +45,6 @@ class _XuanshuBaseSettings(BaseSettings):
         "okx_api_key",
         "okx_api_secret",
         "okx_api_passphrase",
-        "openai_api_key",
         "telegram_bot_token",
         "telegram_chat_id",
         mode="before",
@@ -112,13 +106,10 @@ class Settings(_XuanshuBaseSettings):
     okx_api_key: SecretStr | None = Field(default=None, validation_alias="OKX_API_KEY")
     okx_api_secret: SecretStr | None = Field(default=None, validation_alias="OKX_API_SECRET")
     okx_api_passphrase: SecretStr | None = Field(default=None, validation_alias="OKX_API_PASSPHRASE")
-    openai_api_key: SecretStr | None = Field(default=None, validation_alias="OPENAI_API_KEY")
     telegram_bot_token: SecretStr | None = Field(default=None, validation_alias="TELEGRAM_BOT_TOKEN")
     telegram_chat_id: str | None = Field(default=None, validation_alias="TELEGRAM_CHAT_ID")
     redis_url: RedisDsn = Field(validation_alias="REDIS_URL")
     postgres_dsn: PostgresDsn = Field(validation_alias="POSTGRES_DSN")
-    qdrant_url: AnyHttpUrl = Field(validation_alias="QDRANT_URL")
-    ai_timeout_sec: int = Field(default=12, gt=0, le=300)
 
     def require_trader_runtime(self) -> OkxRuntimeSecrets:
         return OkxRuntimeSecrets(
@@ -126,9 +117,6 @@ class Settings(_XuanshuBaseSettings):
             api_secret=self.okx_api_secret,
             passphrase=self.okx_api_passphrase,
         )
-
-    def require_governor_runtime(self) -> OpenAiRuntimeSecrets:
-        return OpenAiRuntimeSecrets(api_key=self.openai_api_key)
 
     def require_notifier_runtime(self) -> TelegramRuntimeSecrets:
         return TelegramRuntimeSecrets(
@@ -151,28 +139,6 @@ class TraderRuntimeSettings(_XuanshuBaseSettings):
     okx_api_key: SecretStr = Field(validation_alias="OKX_API_KEY")
     okx_api_secret: SecretStr = Field(validation_alias="OKX_API_SECRET")
     okx_api_passphrase: SecretStr = Field(validation_alias="OKX_API_PASSPHRASE")
-
-
-class GovernorRuntimeSettings(_XuanshuBaseSettings):
-    okx_symbols: tuple[str, ...] = Field(default=("BTC-USDT-SWAP", "ETH-USDT-SWAP"), min_length=1)
-    redis_url: RedisDsn = Field(default="redis://redis:6379/0", validation_alias="REDIS_URL")
-    postgres_dsn: PostgresDsn = Field(
-        default="postgresql+psycopg://xuanshu:xuanshu@postgres:5432/xuanshu",
-        validation_alias="POSTGRES_DSN",
-    )
-    qdrant_url: AnyHttpUrl = Field(default="http://qdrant:6333", validation_alias="QDRANT_URL")
-    openai_api_key: SecretStr | None = Field(default=None, validation_alias="OPENAI_API_KEY")
-    research_provider: ResearchProviderName = Field(default=ResearchProviderName.API)
-    ai_timeout_sec: int = Field(default=12, gt=0, le=300)
-    governor_interval_sec: int = Field(default=86_400, gt=0, le=604_800)
-    research_history_days: int = Field(default=180, gt=0, le=365)
-    research_bar: str = Field(default="1H", min_length=1)
-
-    @model_validator(mode="after")
-    def validate_provider_requirements(self) -> "GovernorRuntimeSettings":
-        if self.research_provider == ResearchProviderName.API and self.openai_api_key is None:
-            raise ValueError("openai_api_key is required for api research provider")
-        return self
 
 
 class NotifierRuntimeSettings(_XuanshuBaseSettings):

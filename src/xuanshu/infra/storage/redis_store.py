@@ -44,28 +44,8 @@ class RedisKeys:
         return "xuanshu:runtime:fault_flags"
 
     @staticmethod
-    def governor_health_summary() -> str:
-        return "xuanshu:runtime:governor_health"
-
-    @staticmethod
     def manual_release_target() -> str:
         return "xuanshu:runtime:manual_release_target"
-
-    @staticmethod
-    def strategy_search_mode() -> str:
-        return "xuanshu:runtime:strategy_search_mode"
-
-    @staticmethod
-    def pending_approval_summary() -> str:
-        return "xuanshu:runtime:pending_approval_summary"
-
-    @staticmethod
-    def latest_approved_package_summary() -> str:
-        return "xuanshu:runtime:latest_approved_package_summary"
-
-    @staticmethod
-    def backtest_health_summary() -> str:
-        return "xuanshu:runtime:backtest_health_summary"
 
 
 class SnapshotStore(Protocol):
@@ -101,30 +81,6 @@ class RuntimeStateStore(Protocol):
     def get_budget_pool_summary(self) -> dict[str, object] | None:
         ...
 
-    def set_governor_health_summary(self, summary: dict[str, object]) -> None:
-        ...
-
-    def get_governor_health_summary(self) -> dict[str, object] | None:
-        ...
-
-    def set_pending_approval_summary(self, summary: dict[str, object]) -> None:
-        ...
-
-    def get_pending_approval_summary(self) -> dict[str, object] | None:
-        ...
-
-    def set_latest_approved_package_summary(self, summary: dict[str, object]) -> None:
-        ...
-
-    def get_latest_approved_package_summary(self) -> dict[str, object] | None:
-        ...
-
-    def set_backtest_health_summary(self, summary: dict[str, object]) -> None:
-        ...
-
-    def get_backtest_health_summary(self) -> dict[str, object] | None:
-        ...
-
     def set_manual_release_target(self, mode: str) -> None:
         ...
 
@@ -132,12 +88,6 @@ class RuntimeStateStore(Protocol):
         ...
 
     def clear_manual_release_target(self) -> None:
-        ...
-
-    def set_strategy_search_mode(self, mode: str) -> None:
-        ...
-
-    def get_strategy_search_mode(self) -> str | None:
         ...
 
 
@@ -192,10 +142,8 @@ class RedisRuntimeStateStore:
         self._redis = redis_client or Redis.from_url(redis_url)
         self._key = RedisKeys.run_mode()
         self._manual_release_key = RedisKeys.manual_release_target()
-        self._strategy_search_mode_key = RedisKeys.strategy_search_mode()
         self._latest_mode: RunMode | None = None
         self._latest_manual_release_target: str | None = None
-        self._latest_strategy_search_mode: str | None = None
 
     def set_run_mode(self, mode: RunMode) -> None:
         self._latest_mode = mode
@@ -303,119 +251,6 @@ class RedisRuntimeStateStore:
             return None
         return summary if isinstance(summary, dict) else None
 
-    def set_governor_health_summary(self, summary: dict[str, object]) -> None:
-        try:
-            self._redis.set(RedisKeys.governor_health_summary(), json.dumps(summary, separators=(",", ":")))
-        except RedisError:
-            return
-
-    def get_governor_health_summary(self) -> dict[str, object] | None:
-        try:
-            payload = self._redis.get(RedisKeys.governor_health_summary())
-        except RedisError:
-            return None
-        if payload is None:
-            return None
-        if isinstance(payload, bytes):
-            try:
-                payload = payload.decode("utf-8")
-            except UnicodeDecodeError:
-                return None
-        if not isinstance(payload, str):
-            return None
-        try:
-            summary = json.loads(payload)
-        except (TypeError, ValueError):
-            return None
-        return summary if isinstance(summary, dict) else None
-
-    def set_pending_approval_summary(self, summary: dict[str, object]) -> None:
-        try:
-            self._redis.set(
-                RedisKeys.pending_approval_summary(),
-                json.dumps(summary, separators=(",", ":")),
-            )
-        except RedisError:
-            return
-
-    def get_pending_approval_summary(self) -> dict[str, object] | None:
-        try:
-            payload = self._redis.get(RedisKeys.pending_approval_summary())
-        except RedisError:
-            return None
-        if payload is None:
-            return None
-        if isinstance(payload, bytes):
-            try:
-                payload = payload.decode("utf-8")
-            except UnicodeDecodeError:
-                return None
-        if not isinstance(payload, str):
-            return None
-        try:
-            summary = json.loads(payload)
-        except (TypeError, ValueError):
-            return None
-        return summary if isinstance(summary, dict) else None
-
-    def set_latest_approved_package_summary(self, summary: dict[str, object]) -> None:
-        try:
-            self._redis.set(
-                RedisKeys.latest_approved_package_summary(),
-                json.dumps(summary, separators=(",", ":")),
-            )
-        except RedisError:
-            return
-
-    def get_latest_approved_package_summary(self) -> dict[str, object] | None:
-        try:
-            payload = self._redis.get(RedisKeys.latest_approved_package_summary())
-        except RedisError:
-            return None
-        if payload is None:
-            return None
-        if isinstance(payload, bytes):
-            try:
-                payload = payload.decode("utf-8")
-            except UnicodeDecodeError:
-                return None
-        if not isinstance(payload, str):
-            return None
-        try:
-            summary = json.loads(payload)
-        except (TypeError, ValueError):
-            return None
-        return summary if isinstance(summary, dict) else None
-
-    def set_backtest_health_summary(self, summary: dict[str, object]) -> None:
-        try:
-            self._redis.set(
-                RedisKeys.backtest_health_summary(),
-                json.dumps(summary, separators=(",", ":")),
-            )
-        except RedisError:
-            return
-
-    def get_backtest_health_summary(self) -> dict[str, object] | None:
-        try:
-            payload = self._redis.get(RedisKeys.backtest_health_summary())
-        except RedisError:
-            return None
-        if payload is None:
-            return None
-        if isinstance(payload, bytes):
-            try:
-                payload = payload.decode("utf-8")
-            except UnicodeDecodeError:
-                return None
-        if not isinstance(payload, str):
-            return None
-        try:
-            summary = json.loads(payload)
-        except (TypeError, ValueError):
-            return None
-        return summary if isinstance(summary, dict) else None
-
     def set_manual_release_target(self, mode: str) -> None:
         normalized = str(mode).strip()
         self._latest_manual_release_target = normalized or None
@@ -451,32 +286,3 @@ class RedisRuntimeStateStore:
             self._redis.delete(self._manual_release_key)
         except RedisError:
             return
-
-    def set_strategy_search_mode(self, mode: str) -> None:
-        normalized = str(mode).strip()
-        self._latest_strategy_search_mode = normalized or None
-        try:
-            if self._latest_strategy_search_mode is None:
-                self._redis.delete(self._strategy_search_mode_key)
-            else:
-                self._redis.set(self._strategy_search_mode_key, self._latest_strategy_search_mode)
-        except RedisError:
-            return
-
-    def get_strategy_search_mode(self) -> str | None:
-        try:
-            payload = self._redis.get(self._strategy_search_mode_key)
-        except RedisError:
-            return self._latest_strategy_search_mode
-        if payload is None:
-            return self._latest_strategy_search_mode
-        if isinstance(payload, bytes):
-            try:
-                payload = payload.decode("utf-8")
-            except UnicodeDecodeError:
-                return self._latest_strategy_search_mode
-        if not isinstance(payload, str):
-            return self._latest_strategy_search_mode
-        normalized = payload.strip()
-        self._latest_strategy_search_mode = normalized or None
-        return self._latest_strategy_search_mode
