@@ -65,6 +65,11 @@ def _snapshot() -> MarketStateSnapshot:
     )
 
 
+def _trend_snapshot() -> MarketStateSnapshot:
+    snapshot = _snapshot()
+    return snapshot.model_copy(update={"regime": MarketRegime.TREND})
+
+
 def test_feature_computation_and_rule_evaluation_returns_true_when_close_greater_than_sma_3() -> None:
     definition = _sample_strategy_definition(
         directionality="long_only",
@@ -106,6 +111,58 @@ def test_long_only_definition_produces_buy_signal() -> None:
     assert signals[0].strategy_id == StrategyId.BREAKOUT
 
 
+def test_empty_dsl_definition_list_falls_back_to_legacy_behavior() -> None:
+    signals = build_candidate_signals(
+        _trend_snapshot(),
+        dsl_strategy_definitions=[],
+        historical_rows_by_strategy_def_id={},
+    )
+
+    assert len(signals) == 1
+    assert signals[0].strategy_id == StrategyId.BREAKOUT
+    assert signals[0].side == OrderSide.BUY
+
+
+def test_missing_rows_for_one_dsl_definition_skips_only_that_definition() -> None:
+    match_definition = _sample_strategy_definition(
+        directionality="long_only",
+        strategy_family="breakout",
+        entry_rule={"all": [{"op": "greater_than", "left": "close", "right": "sma_3"}]},
+    )
+    missing_definition = _sample_strategy_definition(
+        directionality="short_only",
+        strategy_family="mean_reversion",
+        entry_rule={"all": [{"op": "less_than", "left": "close", "right": "sma_3"}]},
+    )
+
+    signals = build_candidate_signals(
+        _snapshot(),
+        dsl_strategy_definitions=[match_definition, missing_definition],
+        historical_rows_by_strategy_def_id={
+            match_definition.strategy_def_id: _rows([10.0, 11.0, 12.0, 13.0]),
+        },
+    )
+
+    assert len(signals) == 1
+    assert signals[0].strategy_id == StrategyId.BREAKOUT
+
+
+def test_missing_rows_for_all_dsl_definitions_return_no_signal() -> None:
+    definition = _sample_strategy_definition(
+        directionality="long_only",
+        strategy_family="breakout",
+        entry_rule={"all": [{"op": "greater_than", "left": "close", "right": "sma_3"}]},
+    )
+
+    signals = build_candidate_signals(
+        _trend_snapshot(),
+        dsl_strategy_definitions=[definition],
+        historical_rows_by_strategy_def_id={},
+    )
+
+    assert signals == []
+
+
 def test_short_only_definition_produces_sell_signal() -> None:
     definition = _sample_strategy_definition(
         directionality="short_only",
@@ -132,3 +189,27 @@ def test_feature_context_raises_value_error_when_rows_are_insufficient() -> None
 
     with pytest.raises(ValueError, match="historical_rows must contain at least"):
         build_feature_context(definition, _rows([10.0, 11.0]))
+
+
+def test_rule_evaluator_rejects_extra_keys_in_combinator_node() -> None:
+    definition = _sample_strategy_definition(
+        directionality="long_only",
+        strategy_family="breakout",
+        entry_rule={"all": [{"op": "greater_than", "left": "close", "right": "sma_3"}]},
+    )
+    context = build_feature_context(definition, _rows([10.0, 11.0, 12.0, 13.0]))
+
+    with pytest.raises(ValueError, match="combinator nodes must contain exactly one of all or any"):
+        evaluate_rule_tree({"all": definition.entry_rules["all"], "op": "greater_than"}, context)
+
+
+def test_rule_evaluator_rejects_extra_keys_in_operator_node() -> None:
+    definition = _sample_strategy_definition(
+        directionality="long_only",
+        strategy_family="breakout",
+        entry_rule={"all": [{"op": "greater_than", "left": "close", "right": "sma_3"}]},
+    )
+    context = build_feature_context(definition, _rows([10.0, 11.0, 12.0, 13.0]))
+
+    with pytest.raises(ValueError, match="comparison nodes must contain exactly op, left, and right"):
+        evaluate_rule_tree({"op": "greater_than", "left": "close", "right": "sma_3", "extra": True}, context)

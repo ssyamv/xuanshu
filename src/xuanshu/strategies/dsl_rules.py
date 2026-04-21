@@ -3,21 +3,17 @@ from __future__ import annotations
 from collections.abc import Mapping
 from numbers import Real
 
+from xuanshu.contracts.strategy_definition import StrategyDefinition
 from xuanshu.strategies.dsl_features import FeatureContext
 
 
 def evaluate_rule_tree(rule_tree: Mapping[str, object], context: FeatureContext) -> bool:
-    if not isinstance(rule_tree, Mapping):
-        raise ValueError("rule node must be a mapping")
+    StrategyDefinition._validate_rule_tree(rule_tree)
     if "all" in rule_tree:
         children = rule_tree["all"]
-        if not isinstance(children, list) or not children:
-            raise ValueError("all must contain rule nodes")
         return all(evaluate_rule_tree(child, context) for child in children)
     if "any" in rule_tree:
         children = rule_tree["any"]
-        if not isinstance(children, list) or not children:
-            raise ValueError("any must contain rule nodes")
         return any(evaluate_rule_tree(child, context) for child in children)
 
     op = _normalize_op(rule_tree)

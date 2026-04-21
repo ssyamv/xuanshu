@@ -19,19 +19,25 @@ def build_candidate_signals(
         dsl_strategy_definitions = getattr(snapshot, "dsl_strategy_definitions", None)
     if historical_rows_by_strategy_def_id is None:
         historical_rows_by_strategy_def_id = getattr(snapshot, "dsl_historical_rows_by_strategy_def_id", None)
-    if dsl_strategy_definitions is not None:
-        if historical_rows_by_strategy_def_id is None:
-            raise ValueError("historical_rows_by_strategy_def_id is required for DSL strategy evaluation")
-        return [
-            signal
-            for definition in dsl_strategy_definitions
-            if (signal := build_dsl_candidate_signal(
-                definition,
-                historical_rows_by_strategy_def_id.get(definition.strategy_def_id, []),
-            ))
-            is not None
-        ]
+    if dsl_strategy_definitions:
+        rows_by_strategy_def_id = historical_rows_by_strategy_def_id or {}
+        signals: list[CandidateSignal] = []
+        for definition in dsl_strategy_definitions:
+            rows = rows_by_strategy_def_id.get(definition.strategy_def_id)
+            if not rows:
+                continue
+            try:
+                signal = build_dsl_candidate_signal(definition, rows)
+            except ValueError:
+                continue
+            if signal is not None:
+                signals.append(signal)
+        return signals
 
+    return _build_legacy_candidate_signals(snapshot)
+
+
+def _build_legacy_candidate_signals(snapshot: MarketStateSnapshot) -> list[CandidateSignal]:
     if snapshot.regime == MarketRegime.TREND:
         return [
             CandidateSignal(
