@@ -110,6 +110,7 @@ class BacktestValidator:
                 normalized_rows=normalized_rows,
             ),
             strategy_package_id=package.strategy_package_id,
+            strategy_def_id=definition.strategy_def_id,
             symbol_scope=package.symbol_scope,
             dataset_range=BacktestDatasetRange(
                 start=timestamps[0].astimezone(UTC),
@@ -120,6 +121,7 @@ class BacktestValidator:
             trade_count=trade_count,
             trade_count_sufficiency=trade_count_sufficiency,
             net_pnl=net_pnl,
+            return_percent=round(net_pnl * 100, 6),
             max_drawdown=max_drawdown,
             win_rate=win_rate,
             profit_factor=profit_factor,

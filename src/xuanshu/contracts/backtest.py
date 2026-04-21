@@ -53,12 +53,14 @@ class BacktestReport(BaseModel):
 
     backtest_report_id: NormalizedStr
     strategy_package_id: NormalizedStr
+    strategy_def_id: NormalizedStr
     symbol_scope: list[NormalizedStr] = Field(min_length=1)
     dataset_range: BacktestDatasetRange
     sample_count: int = Field(ge=0)
     trade_count: int = Field(ge=0)
     trade_count_sufficiency: TradeCountSufficiency
     net_pnl: float
+    return_percent: float
     max_drawdown: float = Field(ge=0.0)
     win_rate: float = Field(ge=0.0, le=1.0)
     profit_factor: float = Field(ge=0.0)
@@ -70,6 +72,7 @@ class BacktestReport(BaseModel):
 
     @field_validator(
         "net_pnl",
+        "return_percent",
         "max_drawdown",
         "win_rate",
         "profit_factor",

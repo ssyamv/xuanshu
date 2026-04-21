@@ -1016,6 +1016,7 @@ def test_governor_cycle_selects_highest_net_pnl_candidate_above_threshold(monkey
             return BacktestReport(
                 backtest_report_id=f"{package.strategy_package_id}-report",
                 strategy_package_id=package.strategy_package_id,
+                strategy_def_id=package.strategy_definition.strategy_def_id,
                 symbol_scope=package.symbol_scope,
                 dataset_range=BacktestDatasetRange(
                     start=historical_rows[0]["timestamp"],
@@ -1026,6 +1027,7 @@ def test_governor_cycle_selects_highest_net_pnl_candidate_above_threshold(monkey
                 trade_count=120,
                 trade_count_sufficiency=TradeCountSufficiency.SUFFICIENT,
                 net_pnl=net_pnl,
+                return_percent=net_pnl * 100,
                 max_drawdown=0.1,
                 win_rate=0.5,
                 profit_factor=1.3,
@@ -1108,6 +1110,7 @@ def test_governor_cycle_rejects_all_candidates_below_required_net_pnl(monkeypatc
             return BacktestReport(
                 backtest_report_id=f"{package.strategy_package_id}-report",
                 strategy_package_id=package.strategy_package_id,
+                strategy_def_id=package.strategy_definition.strategy_def_id,
                 symbol_scope=package.symbol_scope,
                 dataset_range=BacktestDatasetRange(
                     start=historical_rows[0]["timestamp"],
@@ -1118,6 +1121,7 @@ def test_governor_cycle_rejects_all_candidates_below_required_net_pnl(monkeypatc
                 trade_count=120,
                 trade_count_sufficiency=TradeCountSufficiency.SUFFICIENT,
                 net_pnl=0.31,
+                return_percent=31.0,
                 max_drawdown=0.1,
                 win_rate=0.5,
                 profit_factor=1.1,
@@ -1246,6 +1250,7 @@ def test_governor_cycle_skips_invalid_candidates_and_keeps_evaluating_remaining_
             return BacktestReport(
                 backtest_report_id=f"{package.strategy_package_id}-report",
                 strategy_package_id=package.strategy_package_id,
+                strategy_def_id=package.strategy_definition.strategy_def_id,
                 symbol_scope=package.symbol_scope,
                 dataset_range=BacktestDatasetRange(
                     start=historical_rows[0]["timestamp"],
@@ -1256,6 +1261,7 @@ def test_governor_cycle_skips_invalid_candidates_and_keeps_evaluating_remaining_
                 trade_count=120,
                 trade_count_sufficiency=TradeCountSufficiency.SUFFICIENT,
                 net_pnl=0.6,
+                return_percent=60.0,
                 max_drawdown=0.1,
                 win_rate=0.5,
                 profit_factor=1.4,
@@ -1384,6 +1390,7 @@ def test_governor_cycle_restarts_search_when_observing_strategy_is_invalidated(m
             return BacktestReport(
                 backtest_report_id=f"{package.strategy_package_id}-report",
                 strategy_package_id=package.strategy_package_id,
+                strategy_def_id=package.strategy_definition.strategy_def_id,
                 symbol_scope=package.symbol_scope,
                 dataset_range=BacktestDatasetRange(
                     start=historical_rows[0]["timestamp"],
@@ -1394,6 +1401,7 @@ def test_governor_cycle_restarts_search_when_observing_strategy_is_invalidated(m
                 trade_count=120,
                 trade_count_sufficiency=TradeCountSufficiency.SUFFICIENT,
                 net_pnl=0.31,
+                return_percent=31.0,
                 max_drawdown=0.1,
                 win_rate=0.5,
                 profit_factor=1.1,
@@ -1989,6 +1997,7 @@ def test_governor_cycle_drops_candidate_that_underperforms_current_strategy(monk
             payload = {
                 "backtest_report_id": report_id,
                 "strategy_package_id": package.strategy_package_id,
+                "strategy_def_id": package.strategy_definition.strategy_def_id,
                 "symbol_scope": package.symbol_scope,
                 "dataset_range": {
                     "start": historical_rows[0]["timestamp"],
@@ -1999,6 +2008,7 @@ def test_governor_cycle_drops_candidate_that_underperforms_current_strategy(monk
                 "trade_count": 1,
                 "trade_count_sufficiency": "insufficient",
                 "net_pnl": 2.0 if package.strategy_package_id == "pkg-current" else 1.0,
+                "return_percent": 200.0 if package.strategy_package_id == "pkg-current" else 100.0,
                 "max_drawdown": 0.0,
                 "win_rate": 1.0,
                 "profit_factor": 999.0,

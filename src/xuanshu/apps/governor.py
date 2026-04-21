@@ -797,6 +797,7 @@ def _build_baseline_backtest_report(
     if not _snapshot_has_tradable_strategy(runtime.last_snapshot):
         return _build_zero_trade_backtest_report(
             strategy_package_id=f"baseline-{runtime.last_snapshot.version_id}",
+            strategy_def_id=f"baseline-{runtime.last_snapshot.version_id}",
             symbol_scope=list(runtime.last_snapshot.symbol_whitelist),
             historical_rows=historical_rows,
         )
@@ -826,6 +827,7 @@ def _snapshot_has_tradable_strategy(snapshot: StrategyConfigSnapshot) -> bool:
 def _build_zero_trade_backtest_report(
     *,
     strategy_package_id: str,
+    strategy_def_id: str,
     symbol_scope: list[str],
     historical_rows: list[dict[str, object]],
 ) -> BacktestReport:
@@ -837,6 +839,7 @@ def _build_zero_trade_backtest_report(
     return BacktestReport(
         backtest_report_id=f"{strategy_package_id}-zero-baseline",
         strategy_package_id=strategy_package_id,
+        strategy_def_id=strategy_def_id,
         symbol_scope=symbol_scope,
         dataset_range={
             "start": timestamps[0],
@@ -847,6 +850,7 @@ def _build_zero_trade_backtest_report(
         trade_count=0,
         trade_count_sufficiency="insufficient",
         net_pnl=0.0,
+        return_percent=0.0,
         max_drawdown=0.0,
         win_rate=0.0,
         profit_factor=0.0,

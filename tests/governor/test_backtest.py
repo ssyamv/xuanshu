@@ -65,6 +65,7 @@ def test_backtest_report_requires_timezone_aware_generated_at() -> None:
         BacktestReport(
             backtest_report_id="bt-1",
             strategy_package_id="pkg-1",
+            strategy_def_id="strat-1",
             symbol_scope=["BTC-USDT-SWAP"],
             dataset_range=BacktestDatasetRange(
                 start=datetime(2026, 4, 1, 0, 0, tzinfo=UTC),
@@ -75,6 +76,7 @@ def test_backtest_report_requires_timezone_aware_generated_at() -> None:
             trade_count=4,
             trade_count_sufficiency=TradeCountSufficiency.SUFFICIENT,
             net_pnl=12.5,
+            return_percent=12.5,
             max_drawdown=3.2,
             win_rate=0.5,
             profit_factor=1.3,
@@ -84,6 +86,36 @@ def test_backtest_report_requires_timezone_aware_generated_at() -> None:
             invalidating_conditions=["spread expansion"],
             generated_at=datetime(2026, 4, 20, 12, 0, 0),
         )
+
+
+def test_backtest_report_includes_strategy_def_id_and_return_percent() -> None:
+    report = BacktestReport(
+        backtest_report_id="bt-1",
+        strategy_package_id="pkg-1",
+        strategy_def_id="strat-1",
+        symbol_scope=["BTC-USDT-SWAP"],
+        dataset_range=BacktestDatasetRange(
+            start=datetime(2026, 4, 1, 0, 0, tzinfo=UTC),
+            end=datetime(2026, 4, 2, 0, 0, tzinfo=UTC),
+            regime_fit=RegimeFit.ALIGNED,
+        ),
+        sample_count=10,
+        trade_count=4,
+        trade_count_sufficiency=TradeCountSufficiency.SUFFICIENT,
+        net_pnl=0.125,
+        return_percent=12.5,
+        max_drawdown=3.2,
+        win_rate=0.5,
+        profit_factor=1.3,
+        stability_score=0.7,
+        overfit_risk=OverfitRisk.LOW,
+        failure_modes=["late breakouts"],
+        invalidating_conditions=["spread expansion"],
+        generated_at=datetime(2026, 4, 20, 12, 0, tzinfo=UTC),
+    )
+
+    assert report.strategy_def_id == "strat-1"
+    assert report.return_percent == 12.5
 
 
 def test_approval_record_accepts_approved_with_guardrails() -> None:
@@ -121,6 +153,7 @@ def test_backtest_report_normalizes_timezone_aware_generated_at_to_utc() -> None
     report = BacktestReport(
         backtest_report_id="bt-2",
         strategy_package_id="pkg-1",
+        strategy_def_id="strat-1",
         symbol_scope=["BTC-USDT-SWAP"],
         dataset_range=BacktestDatasetRange(
             start=datetime(2026, 4, 1, 0, 0, tzinfo=UTC),
@@ -131,6 +164,7 @@ def test_backtest_report_normalizes_timezone_aware_generated_at_to_utc() -> None
         trade_count=4,
         trade_count_sufficiency=TradeCountSufficiency.SUFFICIENT,
         net_pnl=12.5,
+        return_percent=12.5,
         max_drawdown=3.2,
         win_rate=0.5,
         profit_factor=1.3,
@@ -224,6 +258,7 @@ def test_backtest_report_rejects_non_finite_float_metrics(field_name: str, bad_v
     payload = {
         "backtest_report_id": "bt-3",
         "strategy_package_id": "pkg-1",
+        "strategy_def_id": "strat-1",
         "symbol_scope": ["BTC-USDT-SWAP"],
         "dataset_range": BacktestDatasetRange(
             start=datetime(2026, 4, 1, 0, 0, tzinfo=UTC),
@@ -234,6 +269,7 @@ def test_backtest_report_rejects_non_finite_float_metrics(field_name: str, bad_v
         "trade_count": 4,
         "trade_count_sufficiency": TradeCountSufficiency.SUFFICIENT,
         "net_pnl": 12.5,
+        "return_percent": 12.5,
         "max_drawdown": 3.2,
         "win_rate": 0.5,
         "profit_factor": 1.3,
@@ -254,6 +290,7 @@ def test_backtest_report_rejects_invalid_dataset_range_shape() -> None:
         BacktestReport(
             backtest_report_id="bt-4",
             strategy_package_id="pkg-1",
+            strategy_def_id="strat-1",
             symbol_scope=["BTC-USDT-SWAP"],
             dataset_range={
                 "start": datetime(2026, 4, 1, 0, 0, tzinfo=UTC),
@@ -265,6 +302,7 @@ def test_backtest_report_rejects_invalid_dataset_range_shape() -> None:
             trade_count=4,
             trade_count_sufficiency=TradeCountSufficiency.SUFFICIENT,
             net_pnl=12.5,
+            return_percent=12.5,
             max_drawdown=3.2,
             win_rate=0.5,
             profit_factor=1.3,
@@ -354,10 +392,12 @@ def test_backtest_validator_builds_strategy_aware_report() -> None:
 
     assert report.backtest_report_id.startswith("pkg-1-report-")
     assert report.strategy_package_id == "pkg-1"
+    assert report.strategy_def_id == "strat-backtest-001"
     assert report.sample_count == 5
     assert report.trade_count == 2
     assert report.trade_count_sufficiency == TradeCountSufficiency.SUFFICIENT
     assert report.net_pnl == pytest.approx(0.01960972796308757)
+    assert report.return_percent == pytest.approx(1.960972796308757)
     assert report.win_rate == 1.0
     assert report.profit_factor == 999.0
     assert report.generated_at == datetime(2026, 4, 19, 0, 4, tzinfo=UTC)
@@ -437,6 +477,7 @@ def test_backtest_validator_normalizes_row_order_before_simulation() -> None:
     )
     assert report.trade_count == 2
     assert report.net_pnl == pytest.approx(0.01960972796308757)
+    assert report.return_percent == pytest.approx(1.960972796308757)
 
 
 def test_backtest_validator_does_not_reenter_on_the_same_bar_as_an_exit() -> None:
@@ -448,6 +489,7 @@ def test_backtest_validator_does_not_reenter_on_the_same_bar_as_an_exit() -> Non
     assert report.trade_count == 1
     assert report.trade_count_sufficiency == TradeCountSufficiency.INSUFFICIENT
     assert report.net_pnl == pytest.approx((102.0 - 101.0) / 101.0)
+    assert report.return_percent == pytest.approx(((102.0 - 101.0) / 101.0) * 100)
 
 
 def test_strategy_family_changes_behavior_on_same_rows() -> None:
@@ -514,6 +556,7 @@ def test_take_profit_exit_path_is_exercised() -> None:
 
     assert report.trade_count == 1
     assert report.net_pnl == pytest.approx((102.0 - 101.0) / 101.0)
+    assert report.return_percent == pytest.approx(((102.0 - 101.0) / 101.0) * 100)
 
 
 def test_stop_loss_exit_path_is_exercised() -> None:
@@ -524,6 +567,7 @@ def test_stop_loss_exit_path_is_exercised() -> None:
 
     assert report.trade_count == 1
     assert report.net_pnl == pytest.approx((100.0 - 101.0) / 101.0)
+    assert report.return_percent == pytest.approx(((100.0 - 101.0) / 101.0) * 100)
     assert report.win_rate == 0.0
 
 
@@ -535,6 +579,7 @@ def test_max_hold_exit_path_is_exercised() -> None:
 
     assert report.trade_count == 1
     assert report.net_pnl == pytest.approx((101.1 - 101.0) / 101.0)
+    assert report.return_percent == pytest.approx(round(((101.1 - 101.0) / 101.0) * 100, 6))
 
 
 def test_realized_trade_metrics_do_not_follow_raw_final_net_move() -> None:
@@ -545,7 +590,31 @@ def test_realized_trade_metrics_do_not_follow_raw_final_net_move() -> None:
 
     assert report.trade_count == 2
     assert report.net_pnl < 0
+    assert report.return_percent < 0
     assert report.win_rate == 0.0
+
+
+def test_backtest_validator_keeps_negative_return_percent_when_strategy_loses() -> None:
+    report = BacktestValidator().validate(
+        package=_make_package(directionality="long_only"),
+        historical_rows=_build_rows([100.0, 101.0, 100.4]),
+    )
+
+    assert report.trade_count == 1
+    assert report.net_pnl < 0
+    assert report.return_percent == pytest.approx(report.net_pnl * 100)
+    assert report.return_percent < 0
+
+
+def test_backtest_validator_can_retain_high_return_percent_above_fifty() -> None:
+    report = BacktestValidator().validate(
+        package=_make_package(directionality="long_only", take_profit_bps=5000, stop_loss_bps=5000),
+        historical_rows=_build_rows([100.0, 101.0, 160.0]),
+    )
+
+    assert report.trade_count == 1
+    assert report.net_pnl > 0.5
+    assert report.return_percent > 50
 
 
 def test_trade_count_sufficiency_reflects_realized_trade_boundary() -> None:
