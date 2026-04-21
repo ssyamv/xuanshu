@@ -10,6 +10,13 @@ from xuanshu.contracts.events import (
 )
 from xuanshu.state.engine import StateEngine
 
+_STRATEGY_HANDOVER_EVENT_ORDER = (
+    "cancel_open_orders",
+    "flatten_position",
+    "mark_replaced",
+    "activate_new_strategy",
+)
+
 
 def dispatch_event(engine: StateEngine, event: object) -> None:
     if isinstance(event, OrderbookTopEvent):
@@ -31,3 +38,7 @@ def dispatch_event(engine: StateEngine, event: object) -> None:
         engine.on_fault(event)
         return
     raise ValueError(f"unsupported event type: {type(event).__name__}")
+
+
+def build_strategy_handover_event_order() -> tuple[str, ...]:
+    return _STRATEGY_HANDOVER_EVENT_ORDER

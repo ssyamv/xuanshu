@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 
 from xuanshu.checkpoints.service import CheckpointService
@@ -22,7 +22,7 @@ from xuanshu.contracts.events import (
     OrderbookTopEvent,
     PositionUpdateEvent,
 )
-from xuanshu.contracts.strategy import StrategyConfigSnapshot
+from xuanshu.contracts.strategy import ApprovedStrategyBinding, StrategyConfigSnapshot
 from xuanshu.contracts.risk import CandidateSignal
 from xuanshu.execution.coordinator import ExecutionCoordinator
 from xuanshu.execution.engine import build_client_order_id
@@ -40,8 +40,9 @@ from xuanshu.risk.kernel import RiskKernel
 from xuanshu.state.engine import StateEngine
 from xuanshu.strategies.signals import build_candidate_signals
 from xuanshu.ops.runtime_logging import configure_runtime_logger
-from xuanshu.trader.dispatcher import dispatch_event
+from xuanshu.trader.dispatcher import build_strategy_handover_event_order, dispatch_event
 from xuanshu.trader.recovery import RecoverySupervisor
+from xuanshu.risk.kernel import is_stronger_strategy_replacement
 
 _OKX_REST_BASE_URL = "https://www.okx.com"
 _OKX_PUBLIC_WS_URL = "wss://ws.okx.com:8443/ws/v5/public"
@@ -83,6 +84,8 @@ class TraderRuntime:
     starting_nav: float
     startup_snapshot: StrategyConfigSnapshot
     startup_checkpoint: ExecutionCheckpoint
+    active_symbol_strategies: dict[str, ApprovedStrategyBinding] = field(default_factory=dict)
+    symbol_handover_state: dict[str, dict[str, object]] = field(default_factory=dict)
     current_mode: RunMode = RunMode.NORMAL
     opening_allowed: bool = True
     execution_sequence: int = 0
@@ -196,6 +199,7 @@ def build_trader_runtime() -> TraderRuntime:
         starting_nav=settings.trader_starting_nav,
         startup_snapshot=startup_snapshot,
         startup_checkpoint=_build_startup_checkpoint(startup_snapshot, initial_mode),
+        active_symbol_strategies=dict(startup_snapshot.symbol_strategy_bindings),
         current_mode=initial_mode,
     )
 
@@ -329,6 +333,33 @@ def _build_strategy_logic(signal: CandidateSignal) -> str:
     if signal.strategy_id == StrategyId.MEAN_REVERSION:
         return "均值回归，价格偏离后尝试反向回补。"
     return "风险暂停信号，当前不执行新开仓。"
+
+
+def _is_stronger_replacement(
+    current: ApprovedStrategyBinding | None,
+    candidate: ApprovedStrategyBinding,
+) -> bool:
+    return is_stronger_strategy_replacement(current, candidate)
+
+
+def _build_strategy_handover_events(
+    symbol: str,
+    current_strategy: ApprovedStrategyBinding | None,
+    candidate_strategy: ApprovedStrategyBinding,
+) -> list[dict[str, object]]:
+    current_strategy_def_id = getattr(current_strategy, "strategy_def_id", None)
+    current_strategy_package_id = getattr(current_strategy, "strategy_package_id", None)
+    return [
+        {
+            "event_type": event_type,
+            "symbol": symbol,
+            "current_strategy_def_id": current_strategy_def_id,
+            "current_strategy_package_id": current_strategy_package_id,
+            "next_strategy_def_id": candidate_strategy.strategy_def_id,
+            "next_strategy_package_id": candidate_strategy.strategy_package_id,
+        }
+        for event_type in build_strategy_handover_event_order()
+    ]
 
 
 def _can_relax_to_snapshot_mode(runtime: TraderRuntime, snapshot: StrategyConfigSnapshot) -> bool:

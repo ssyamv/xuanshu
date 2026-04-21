@@ -183,6 +183,12 @@ async def test_recovery_supervisor_allows_matching_checkpoint_and_exchange_state
     assert result["run_mode"] == "normal"
     assert result["needs_reconcile"] is False
     assert result["reason"] == "checkpoint_matches_exchange"
+    assert result["symbol"] == "BTC-USDT-SWAP"
+    assert result["active_snapshot_version"] == "snap-1"
+    assert result["active_strategy_context"] == {
+        "symbol": "BTC-USDT-SWAP",
+        "active_snapshot_version": "snap-1",
+    }
     assert rest_client.account_summary_calls == []
 
 

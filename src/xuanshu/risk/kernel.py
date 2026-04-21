@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import math
 from datetime import UTC, datetime
 from uuid import uuid4
 
 from xuanshu.contracts.risk import CandidateSignal, RiskDecision
-from xuanshu.contracts.strategy import StrategyConfigSnapshot
+from xuanshu.contracts.strategy import ApprovedStrategyBinding, StrategyConfigSnapshot
 from xuanshu.core.enums import ApprovalState, OrderSide, RunMode, StrategyId
 
 
@@ -52,3 +53,43 @@ class RiskKernel:
             risk_mode=snapshot.market_mode,
             reason_codes=reason_codes,
         )
+
+
+def is_stronger_strategy_replacement(
+    current: ApprovedStrategyBinding | None,
+    candidate: ApprovedStrategyBinding,
+) -> bool:
+    if current is None:
+        return True
+
+    current_score = _coerce_strategy_score(current.score)
+    candidate_score = _coerce_strategy_score(candidate.score)
+    if current_score is None or candidate_score is None:
+        return False
+
+    current_basis = _normalize_score_basis(current.score_basis)
+    candidate_basis = _normalize_score_basis(candidate.score_basis)
+    if current_basis is None or candidate_basis is None:
+        return False
+    if current_basis != candidate_basis:
+        return False
+
+    return candidate_score + 1e-12 >= current_score * 1.10
+
+
+def _normalize_score_basis(score_basis: object) -> str | None:
+    if not isinstance(score_basis, str):
+        return None
+    normalized = score_basis.strip().lower()
+    return normalized or None
+
+
+def _coerce_strategy_score(score: object) -> float | None:
+    if isinstance(score, bool):
+        return None
+    if not isinstance(score, (int, float)):
+        return None
+    numeric_score = float(score)
+    if not math.isfinite(numeric_score):
+        return None
+    return numeric_score

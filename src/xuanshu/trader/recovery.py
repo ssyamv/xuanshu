@@ -45,6 +45,10 @@ class RecoverySupervisor:
         checkpoint: ExecutionCheckpoint,
         timestamp: str,
     ) -> dict[str, object]:
+        active_strategy_context = {
+            "symbol": symbol,
+            "active_snapshot_version": checkpoint.active_snapshot_version,
+        }
         try:
             open_orders, positions = await asyncio.gather(
                 self.rest_client.fetch_open_orders(symbol, timestamp),
@@ -80,6 +84,9 @@ class RecoverySupervisor:
             "run_mode": checkpoint.current_mode.value,
             "needs_reconcile": False,
             "reason": "checkpoint_matches_exchange",
+            "symbol": symbol,
+            "active_snapshot_version": checkpoint.active_snapshot_version,
+            "active_strategy_context": active_strategy_context,
         }
 
 
