@@ -142,6 +142,7 @@ class TraderRuntimeSettings(_XuanshuBaseSettings):
     trader_starting_nav: float = Field(default=250_000.0, gt=0.0)
     default_run_mode: RunMode = Field(default=RunMode.NORMAL)
     okx_account_mode: OkxAccountMode = Field(default=OkxAccountMode.LIVE)
+    fixed_strategy_snapshot_path: str | None = Field(default=None)
     redis_url: RedisDsn = Field(default="redis://redis:6379/0", validation_alias="REDIS_URL")
     postgres_dsn: PostgresDsn = Field(
         default="postgresql+psycopg://xuanshu:xuanshu@postgres:5432/xuanshu",

@@ -4,6 +4,7 @@ import asyncio
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 from xuanshu.checkpoints.service import CheckpointService
 from xuanshu.config.settings import TraderRuntimeSettings
@@ -110,6 +111,17 @@ def _build_startup_snapshot(settings: TraderRuntimeSettings) -> StrategyConfigSn
     )
 
 
+def _load_fixed_strategy_snapshot(path: str | None) -> StrategyConfigSnapshot | None:
+    if path is None or not path.strip():
+        return None
+    snapshot_path = Path(path)
+    try:
+        payload = snapshot_path.read_text(encoding="utf-8")
+        return StrategyConfigSnapshot.model_validate_json(payload)
+    except Exception as exc:
+        raise ValueError(f"invalid fixed strategy snapshot: {snapshot_path}") from exc
+
+
 def _build_startup_checkpoint(startup_snapshot: StrategyConfigSnapshot, current_mode: RunMode) -> ExecutionCheckpoint:
     return ExecutionCheckpoint(
         checkpoint_id="startup",
@@ -177,16 +189,27 @@ def build_trader_runtime() -> TraderRuntime:
     components = build_trader_components(settings)
     snapshot_store = build_snapshot_store(settings)
     startup_snapshot = _build_startup_snapshot(settings)
-    latest_snapshot = snapshot_store.get_latest_snapshot()
-    if latest_snapshot is not None:
-        startup_snapshot = latest_snapshot.model_copy(
+    fixed_snapshot = _load_fixed_strategy_snapshot(settings.fixed_strategy_snapshot_path)
+    if fixed_snapshot is not None:
+        startup_snapshot = fixed_snapshot.model_copy(
             update={
                 "market_mode": _more_restrictive_mode(
                     settings.default_run_mode,
-                    latest_snapshot.market_mode,
+                    fixed_snapshot.market_mode,
                 )
             }
         )
+    else:
+        latest_snapshot = snapshot_store.get_latest_snapshot()
+        if latest_snapshot is not None:
+            startup_snapshot = latest_snapshot.model_copy(
+                update={
+                    "market_mode": _more_restrictive_mode(
+                        settings.default_run_mode,
+                        latest_snapshot.market_mode,
+                    )
+                }
+            )
     initial_mode = startup_snapshot.market_mode
     return TraderRuntime(
         settings=settings,

@@ -161,6 +161,45 @@ def test_trader_entrypoint_threads_demo_account_mode_into_okx_clients(monkeypatc
     assert seen_runtime.components.okx_private_stream.url == "wss://wspap.okx.com:8443/ws/v5/private"
 
 
+def test_trader_runtime_loads_fixed_strategy_snapshot_before_redis(monkeypatch, tmp_path) -> None:
+    _set_required_settings_env(monkeypatch)
+    fixed_path = tmp_path / "active_strategy.json"
+    generated_at = datetime(2026, 1, 1, tzinfo=UTC)
+    snapshot = trader_app.StrategyConfigSnapshot(
+        version_id="fixed-momentum-test",
+        generated_at=generated_at,
+        effective_from=generated_at,
+        expires_at=generated_at + trader_app.timedelta(days=3650),
+        symbol_whitelist=["BTC-USDT-SWAP"],
+        strategy_enable_flags={"momentum": True},
+        risk_multiplier=0.5,
+        per_symbol_max_position=0.12,
+        max_leverage=3,
+        market_mode=RunMode.HALTED,
+        approval_state=ApprovalState.APPROVED,
+        source_reason="fixed momentum backtest",
+        ttl_sec=315360000,
+    )
+    fixed_path.write_text(snapshot.model_dump_json(), encoding="utf-8")
+    monkeypatch.setenv("XUANSHU_FIXED_STRATEGY_SNAPSHOT_PATH", str(fixed_path))
+
+    runtime = trader_app.build_trader_runtime()
+
+    assert runtime.startup_snapshot.version_id == "fixed-momentum-test"
+    assert runtime.current_mode == RunMode.HALTED
+    assert runtime.startup_snapshot.strategy_enable_flags == {"momentum": True}
+
+
+def test_trader_runtime_rejects_malformed_fixed_strategy_snapshot(monkeypatch, tmp_path) -> None:
+    _set_required_settings_env(monkeypatch)
+    fixed_path = tmp_path / "active_strategy.json"
+    fixed_path.write_text("{bad json", encoding="utf-8")
+    monkeypatch.setenv("XUANSHU_FIXED_STRATEGY_SNAPSHOT_PATH", str(fixed_path))
+
+    with pytest.raises(ValueError, match="fixed strategy snapshot"):
+        trader_app.build_trader_runtime()
+
+
 def test_trader_entrypoint_loads_runtime_from_temp_dotenv(monkeypatch, tmp_path) -> None:
     _clear_runtime_env(monkeypatch)
     monkeypatch.chdir(tmp_path)
@@ -204,6 +243,16 @@ def test_trader_runtime_contract_lists_account_mode() -> None:
     assert "XUANSHU_OKX_ACCOUNT_MODE=" in env_example
     assert "XUANSHU_OKX_ACCOUNT_MODE=" in prod_env_example
     assert "XUANSHU_OKX_ACCOUNT_MODE:" in compose
+
+
+def test_deployment_contract_lists_fixed_strategy_snapshot_path() -> None:
+    env_example = Path(".env.example").read_text(encoding="utf-8")
+    prod_env_example = Path(".env.prod.example").read_text(encoding="utf-8")
+    compose = Path("docker-compose.yml").read_text(encoding="utf-8")
+
+    assert "XUANSHU_FIXED_STRATEGY_SNAPSHOT_PATH=" in env_example
+    assert "XUANSHU_FIXED_STRATEGY_SNAPSHOT_PATH=" in prod_env_example
+    assert "XUANSHU_FIXED_STRATEGY_SNAPSHOT_PATH:" in compose
 
 
 def test_single_host_deploy_contract_lists_prod_env_template() -> None:
