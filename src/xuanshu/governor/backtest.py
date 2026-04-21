@@ -49,8 +49,8 @@ class BacktestValidator:
             parameter_set=definition.parameter_set,
             lookback=lookback,
         )
-        stop_loss_bps = self._extract_exit_rule_float(definition.exit_rules, "stop_loss_bps", default=50.0)
-        take_profit_bps = self._extract_exit_rule_float(definition.exit_rules, "take_profit_bps", default=100.0)
+        stop_loss_bps = self._extract_exit_rule_float(definition.exit_rules, "stop_loss_bps")
+        take_profit_bps = self._extract_exit_rule_float(definition.exit_rules, "take_profit_bps")
         risk_fraction = self._extract_positive_float(
             package.position_sizing_rules,
             "risk_fraction",
@@ -60,7 +60,6 @@ class BacktestValidator:
         max_hold_minutes = self._extract_exit_rule_int(
             definition.exit_rules,
             "time_stop_minutes",
-            default=self._extract_positive_int(package.risk_constraints, "max_hold_minutes", default=60),
         )
         if entry_signal == "range_retest" and lookback < 2:
             raise ValueError("range_retest requires lookback >= 2")
@@ -281,12 +280,10 @@ class BacktestValidator:
         cls,
         exit_rules: object,
         key: str,
-        *,
-        default: float,
     ) -> float:
         value = cls._find_exit_rule_value(exit_rules, key)
         if value is None:
-            return default
+            raise ValueError(f"{key} must be present in exit_rules")
         if isinstance(value, bool) or not isinstance(value, Real | Decimal):
             raise ValueError(f"{key} must be numeric")
         try:
@@ -302,12 +299,10 @@ class BacktestValidator:
         cls,
         exit_rules: object,
         key: str,
-        *,
-        default: int,
     ) -> int:
         value = cls._find_exit_rule_value(exit_rules, key)
         if value is None:
-            return default
+            raise ValueError(f"{key} must be present in exit_rules")
         if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
             raise ValueError(f"{key} must be a positive integer")
         return value

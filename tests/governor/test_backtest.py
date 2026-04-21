@@ -188,7 +188,7 @@ def test_strategy_package_requires_timezone_aware_generated_at() -> None:
 
 
 def test_strategy_package_normalizes_timezone_aware_generated_at_to_utc() -> None:
-    definition = _sample_strategy_definition(directionality="long_only")
+    definition = _sample_strategy_definition(directionality="long_only", lookback=1)
     package = StrategyPackage(
         strategy_package_id="pkg-1",
         generated_at=datetime(2026, 4, 20, 20, 0, 0, tzinfo=timezone(timedelta(hours=8))),
@@ -401,7 +401,21 @@ def test_backtest_validator_rejects_fractional_time_stop_minutes() -> None:
         BacktestValidator._extract_exit_rule_int(
             {"any": [{"op": "time_stop_minutes", "value": 12.5}]},
             "time_stop_minutes",
-            default=60,
+        )
+
+
+def test_backtest_validator_rejects_missing_required_exit_primitives() -> None:
+    definition = _sample_strategy_definition(directionality="long_only", lookback=1)
+    definition["exit_rules"] = {"any": [{"op": "crosses_below", "left": "close", "right": "sma_20"}]}
+    package_payload = _make_package().model_dump()
+    package_payload["exit_rules"] = definition["exit_rules"]
+    package_payload["strategy_definition"] = definition
+    package = StrategyPackage.model_validate(package_payload)
+
+    with pytest.raises(ValueError, match="stop_loss_bps must be present in exit_rules"):
+        BacktestValidator().validate(
+            package=package,
+            historical_rows=_build_rows([100.0, 101.0, 102.0]),
         )
 
 
