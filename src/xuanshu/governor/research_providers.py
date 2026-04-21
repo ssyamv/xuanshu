@@ -10,6 +10,7 @@ from typing import Protocol
 import httpx
 from pydantic import BaseModel, ConfigDict, Field, SecretStr
 
+from xuanshu.contracts.strategy_definition import StrategyDefinition
 from xuanshu.infra.ai.governor_client import _extract_json_object, _extract_response_text
 
 _DEFAULT_RESEARCH_MODEL = "gpt-4.1-mini"
@@ -20,7 +21,9 @@ _RESEARCH_PROVIDER_INSTRUCTIONS = (
     '{"thesis": string, "strategy_family": string, "entry_signal": string, '
     '"exit_stop_loss_bps": integer, "exit_take_profit_bps": integer, '
     '"risk_fraction": number, "max_hold_minutes": integer, '
+    '"strategy_definition"?: object, '
     '"failure_modes": string[], "invalidating_conditions": string[]}. '
+    "If strategy_definition is present, it must be a valid StrategyDefinition JSON object. "
     "Do not return keys outside this schema. "
     "Do not suggest executable trading actions. Return JSON only."
 )
@@ -31,7 +34,9 @@ _CODEX_CLI_RESEARCH_PROVIDER_INSTRUCTIONS = (
     '{"thesis": string, "strategy_family": string, "entry_signal": string, '
     '"exit_stop_loss_bps": integer, "exit_take_profit_bps": integer, '
     '"risk_fraction": number, "max_hold_minutes": integer, '
+    '"strategy_definition"?: object, '
     '"failure_modes": string[], "invalidating_conditions": string[]}. '
+    "If strategy_definition is present, it must be a valid StrategyDefinition JSON object. "
     "Diversify across strategy families, market environments, stop/take-profit distances, hold times, and risk fractions. "
     "Do not suggest executable trading actions. Return JSON only."
 )
@@ -52,6 +57,7 @@ class ResearchProviderSuggestion(BaseModel):
     exit_take_profit_bps: int = Field(gt=0)
     risk_fraction: float = Field(gt=0.0)
     max_hold_minutes: int = Field(gt=0)
+    strategy_definition: StrategyDefinition | None = None
     failure_modes: list[str] = Field(default_factory=list)
     invalidating_conditions: list[str] = Field(default_factory=list)
 

@@ -83,14 +83,29 @@ class StrategyResearchEngine:
         packages: list[StrategyPackage] = []
         for suggestion in suggestions:
             provider_reason = f"{research_reason} | {self._normalize_text(suggestion.thesis, 'thesis')}"
-            normalized_strategy_family = self._normalize_provider_strategy_family(
-                suggestion.strategy_family,
-                market_environment=market_environment,
+            base_strategy_definition = (
+                StrategyDefinition.model_validate(suggestion.strategy_definition)
+                if suggestion.strategy_definition is not None
+                else None
             )
-            normalized_entry_signal = self._normalize_provider_entry_signal(
-                suggestion.entry_signal,
-                strategy_family=normalized_strategy_family,
-            )
+            if base_strategy_definition is not None:
+                normalized_strategy_family = self._normalize_text(
+                    base_strategy_definition.strategy_family,
+                    "strategy_family",
+                )
+                normalized_entry_signal = self._normalize_provider_entry_signal(
+                    suggestion.entry_signal,
+                    strategy_family=normalized_strategy_family,
+                )
+            else:
+                normalized_strategy_family = self._normalize_provider_strategy_family(
+                    suggestion.strategy_family,
+                    market_environment=market_environment,
+                )
+                normalized_entry_signal = self._normalize_provider_entry_signal(
+                    suggestion.entry_signal,
+                    strategy_family=normalized_strategy_family,
+                )
             packages.extend(
                 self._build_candidate_variants(
                     trigger=trigger,
@@ -106,6 +121,7 @@ class StrategyResearchEngine:
                     max_hold_minutes=suggestion.max_hold_minutes,
                     failure_modes=suggestion.failure_modes,
                     invalidating_conditions=suggestion.invalidating_conditions,
+                    strategy_definition=base_strategy_definition,
                 )
             )
         return packages
@@ -126,6 +142,7 @@ class StrategyResearchEngine:
         max_hold_minutes: int,
         failure_modes: list[str],
         invalidating_conditions: list[str],
+        strategy_definition: StrategyDefinition | None,
     ) -> list[StrategyPackage]:
         lookbacks = self._candidate_lookbacks(strategy_family=strategy_family, entry_signal=entry_signal)
         parameter_profiles = self._candidate_parameter_profiles(
@@ -134,7 +151,13 @@ class StrategyResearchEngine:
             max_hold_minutes=max_hold_minutes,
         )
         risk_fractions = self._candidate_risk_fractions(risk_fraction)
-        directionalities = self._candidate_directionalities(strategy_family=strategy_family, market_environment=market_environment)
+        if strategy_definition is None:
+            directionalities = self._candidate_directionalities(
+                strategy_family=strategy_family,
+                market_environment=market_environment,
+            )
+        else:
+            directionalities = [strategy_definition.directionality]
 
         variants: list[StrategyPackage] = []
         seen: set[str] = set()
@@ -158,36 +181,58 @@ class StrategyResearchEngine:
                 "risk_fraction": risk_fraction_value,
                 "max_hold_minutes": hold_minutes_value,
             }
-            package = self._build_candidate_package(
+            variant_definition = self._build_variant_strategy_definition(
+                strategy_package_id="",
+                symbol=symbol_scope[0],
+                strategy_family=strategy_family,
+                directionality=directionality,
+                parameter_set=parameter_set,
+                stop_loss_bps=stop_loss,
+                take_profit_bps=take_profit,
+                risk_fraction=risk_fraction_value,
+                max_hold_minutes=hold_minutes_value,
+                score=max(self._safe_ratio(closes[-1] - closes[0], closes[0]) * 100, 0.0),
+                base_definition=strategy_definition,
+            )
+            strategy_package_id = self._build_package_id(
                 trigger=trigger,
                 symbol_scope=symbol_scope,
                 market_environment=market_environment,
-                historical_rows=historical_rows,
+                historical_rows=normalized_rows,
                 research_reason=research_reason,
-                directionality=directionality,
                 strategy_family=strategy_family,
                 entry_signal=entry_signal,
                 stop_loss_bps=stop_loss,
                 take_profit_bps=take_profit,
                 risk_fraction=risk_fraction_value,
                 max_hold_minutes=hold_minutes_value,
+                lookback=lookback,
+                directionality=directionality,
+                strategy_definition=variant_definition,
+            )
+            variant_definition = self._build_variant_strategy_definition(
+                strategy_package_id=strategy_package_id,
+                symbol=symbol_scope[0],
+                strategy_family=strategy_family,
+                directionality=directionality,
+                parameter_set=parameter_set,
+                stop_loss_bps=stop_loss,
+                take_profit_bps=take_profit,
+                risk_fraction=risk_fraction_value,
+                max_hold_minutes=hold_minutes_value,
+                score=max(self._safe_ratio(closes[-1] - closes[0], closes[0]) * 100, 0.0),
+                base_definition=strategy_definition,
+            )
+            package = self._build_candidate_package(
+                trigger=trigger,
+                symbol_scope=symbol_scope,
+                market_environment=market_environment,
+                historical_rows=historical_rows,
+                research_reason=research_reason,
                 failure_modes=failure_modes,
                 invalidating_conditions=invalidating_conditions,
-                strategy_package_id=self._build_package_id(
-                    trigger=trigger,
-                    symbol_scope=symbol_scope,
-                    market_environment=market_environment,
-                    historical_rows=normalized_rows,
-                    research_reason=research_reason,
-                    strategy_family=strategy_family,
-                    entry_signal=entry_signal,
-                    stop_loss_bps=stop_loss,
-                    take_profit_bps=take_profit,
-                    risk_fraction=risk_fraction_value,
-                    max_hold_minutes=hold_minutes_value,
-                    lookback=lookback,
-                    directionality=directionality,
-                ),
+                strategy_definition=variant_definition,
+                strategy_package_id=strategy_package_id,
                 parameter_set=parameter_set,
             )
             if package.strategy_package_id in seen:
@@ -215,6 +260,7 @@ class StrategyResearchEngine:
         invalidating_conditions: list[str] | None = None,
         strategy_package_id: str | None = None,
         parameter_set: dict[str, object] | None = None,
+        strategy_definition: StrategyDefinition | None = None,
     ) -> StrategyPackage:
         normalized_market_environment = self._normalize_text(market_environment, "market_environment")
         normalized_research_reason = self._normalize_text(research_reason, "research_reason")
@@ -242,68 +288,99 @@ class StrategyResearchEngine:
         performance_summary = {
             "return_percent": round(change_ratio * 100, 6),
         }
-        strategy_family_value = self._normalize_text(
-            strategy_family or self._select_strategy_family(normalized_market_environment),
-            "strategy_family",
-        )
-        entry_signal_value = self._normalize_text(
-            entry_signal or self._select_entry_signal(normalized_market_environment),
-            "entry_signal",
-        )
-        if parameter_set is None:
-            parameter_set = {
-                "row_count": len(historical_rows),
-                "start_close": start_close,
-                "end_close": end_close,
-                "lookback": self._default_lookback_for_entry_signal(
+        score = max(performance_summary["return_percent"], 0.0)
+        if strategy_definition is None:
+            strategy_family_value = self._normalize_text(
+                strategy_family or self._select_strategy_family(normalized_market_environment),
+                "strategy_family",
+            )
+            entry_signal_value = self._normalize_text(
+                entry_signal or self._select_entry_signal(normalized_market_environment),
+                "entry_signal",
+            )
+            if parameter_set is None:
+                parameter_set = {
+                    "row_count": len(historical_rows),
+                    "start_close": start_close,
+                    "end_close": end_close,
+                    "lookback": self._default_lookback_for_entry_signal(
+                        strategy_family=strategy_family_value,
+                        entry_signal=entry_signal_value,
+                    ),
+                    "signal_mode": entry_signal_value,
+                    "stop_loss_bps": stop_loss_bps,
+                    "take_profit_bps": take_profit_bps,
+                    "risk_fraction": risk_fraction,
+                    "max_hold_minutes": max_hold_minutes,
+                }
+            else:
+                parameter_set = {
+                    **parameter_set,
+                    "signal_mode": entry_signal_value,
+                    "stop_loss_bps": stop_loss_bps,
+                    "take_profit_bps": take_profit_bps,
+                    "risk_fraction": risk_fraction,
+                    "max_hold_minutes": max_hold_minutes,
+                }
+            if strategy_package_id is None:
+                strategy_package_id = self._build_package_id(
+                    trigger=trigger,
+                    symbol_scope=normalized_symbol_scope,
+                    market_environment=normalized_market_environment,
+                    historical_rows=normalized_rows,
+                    research_reason=normalized_research_reason,
                     strategy_family=strategy_family_value,
                     entry_signal=entry_signal_value,
-                ),
-                "signal_mode": entry_signal_value,
-                "stop_loss_bps": stop_loss_bps,
-                "take_profit_bps": take_profit_bps,
-                "risk_fraction": risk_fraction,
-                "max_hold_minutes": max_hold_minutes,
-            }
-        else:
-            parameter_set = {
-                **parameter_set,
-                "signal_mode": entry_signal_value,
-                "stop_loss_bps": stop_loss_bps,
-                "take_profit_bps": take_profit_bps,
-                "risk_fraction": risk_fraction,
-                "max_hold_minutes": max_hold_minutes,
-            }
-        if strategy_package_id is None:
-            strategy_package_id = self._build_package_id(
-                trigger=trigger,
-                symbol_scope=normalized_symbol_scope,
-                market_environment=normalized_market_environment,
-                historical_rows=normalized_rows,
-                research_reason=normalized_research_reason,
+                    stop_loss_bps=stop_loss_bps,
+                    take_profit_bps=take_profit_bps,
+                    risk_fraction=risk_fraction,
+                    max_hold_minutes=max_hold_minutes,
+                    lookback=parameter_set["lookback"],
+                    directionality=directionality,
+                    strategy_definition=None,
+                )
+            strategy_definition = self._build_strategy_definition(
+                strategy_package_id=strategy_package_id,
+                symbol=normalized_symbol_scope[0],
                 strategy_family=strategy_family_value,
-                entry_signal=entry_signal_value,
+                directionality=directionality,
+                parameter_set=parameter_set,
                 stop_loss_bps=stop_loss_bps,
                 take_profit_bps=take_profit_bps,
                 risk_fraction=risk_fraction,
                 max_hold_minutes=max_hold_minutes,
-                lookback=parameter_set["lookback"],
-                directionality=directionality,
+                score=score,
             )
-        score = max(performance_summary["return_percent"], 0.0)
-
-        strategy_definition = self._build_strategy_definition(
-            strategy_package_id=strategy_package_id,
-            symbol=normalized_symbol_scope[0],
-            strategy_family=strategy_family_value,
-            directionality=directionality,
-            parameter_set=parameter_set,
-            stop_loss_bps=stop_loss_bps,
-            take_profit_bps=take_profit_bps,
-            risk_fraction=risk_fraction,
-            max_hold_minutes=max_hold_minutes,
-            score=score,
-        )
+        else:
+            if strategy_package_id is None:
+                strategy_package_id = self._build_package_id(
+                    trigger=trigger,
+                    symbol_scope=normalized_symbol_scope,
+                    market_environment=normalized_market_environment,
+                    historical_rows=normalized_rows,
+                    research_reason=normalized_research_reason,
+                    strategy_family=strategy_family_value,
+                    entry_signal=entry_signal or self._select_entry_signal(normalized_market_environment),
+                    stop_loss_bps=stop_loss_bps,
+                    take_profit_bps=take_profit_bps,
+                    risk_fraction=risk_fraction,
+                    max_hold_minutes=max_hold_minutes,
+                    lookback=parameter_set.get("lookback", 0),
+                    directionality=directionality,
+                    strategy_definition=strategy_definition,
+                )
+            strategy_definition = self._normalize_candidate_strategy_definition(
+                strategy_definition=strategy_definition,
+                strategy_package_id=strategy_package_id,
+                symbol=normalized_symbol_scope[0],
+                score=score,
+                stop_loss_bps=stop_loss_bps,
+                take_profit_bps=take_profit_bps,
+                max_hold_minutes=max_hold_minutes,
+            )
+            strategy_family_value = strategy_definition.strategy_family
+            directionality = strategy_definition.directionality
+            parameter_set = dict(strategy_definition.parameter_set)
 
         return StrategyPackage(
             strategy_package_id=strategy_package_id,
@@ -367,6 +444,7 @@ class StrategyResearchEngine:
         max_hold_minutes: int,
         lookback: int,
         directionality: str,
+        strategy_definition: StrategyDefinition | None = None,
     ) -> str:
         fingerprint = {
             "trigger": trigger.value,
@@ -382,6 +460,11 @@ class StrategyResearchEngine:
             "max_hold_minutes": max_hold_minutes,
             "lookback": lookback,
             "directionality": directionality,
+            "strategy_definition": (
+                strategy_definition.model_dump(exclude={"strategy_def_id"})
+                if strategy_definition is not None
+                else None
+            ),
         }
         digest = sha256(json.dumps(fingerprint, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
         return f"pkg-{digest[:12]}"
@@ -540,6 +623,132 @@ class StrategyResearchEngine:
             score=score,
             score_basis="backtest_return_percent",
         )
+
+    @staticmethod
+    def _build_variant_strategy_definition(
+        *,
+        strategy_package_id: str,
+        symbol: str,
+        strategy_family: str,
+        directionality: str,
+        parameter_set: dict[str, object],
+        stop_loss_bps: int,
+        take_profit_bps: int,
+        risk_fraction: float,
+        max_hold_minutes: int,
+        score: float,
+        base_definition: StrategyDefinition | None,
+    ) -> StrategyDefinition:
+        if base_definition is None:
+            return StrategyResearchEngine._build_strategy_definition(
+                strategy_package_id=strategy_package_id,
+                symbol=symbol,
+                strategy_family=strategy_family,
+                directionality=directionality,
+                parameter_set=parameter_set,
+                stop_loss_bps=stop_loss_bps,
+                take_profit_bps=take_profit_bps,
+                risk_fraction=risk_fraction,
+                max_hold_minutes=max_hold_minutes,
+                score=score,
+            )
+        exit_rules = StrategyResearchEngine._ensure_required_exit_rules(
+            base_definition.exit_rules,
+            stop_loss_bps=stop_loss_bps,
+            take_profit_bps=take_profit_bps,
+            max_hold_minutes=max_hold_minutes,
+        )
+        updated_parameter_set = {**base_definition.parameter_set, **parameter_set}
+        updated_position_sizing_rules = {
+            **base_definition.position_sizing_rules,
+            "risk_fraction": risk_fraction,
+        }
+        updated_risk_constraints = {
+            **base_definition.risk_constraints,
+            "max_hold_minutes": max_hold_minutes,
+        }
+        return base_definition.model_copy(
+            update={
+                "strategy_def_id": f"{strategy_package_id}-def",
+                "symbol": symbol,
+                "strategy_family": strategy_family,
+                "directionality": directionality,
+                "exit_rules": exit_rules,
+                "position_sizing_rules": updated_position_sizing_rules,
+                "risk_constraints": updated_risk_constraints,
+                "parameter_set": updated_parameter_set,
+                "score": score,
+                "score_basis": "backtest_return_percent",
+            }
+        )
+
+    @staticmethod
+    def _normalize_candidate_strategy_definition(
+        *,
+        strategy_definition: StrategyDefinition,
+        strategy_package_id: str | None,
+        symbol: str,
+        score: float,
+        stop_loss_bps: int,
+        take_profit_bps: int,
+        max_hold_minutes: int,
+    ) -> StrategyDefinition:
+        exit_rules = StrategyResearchEngine._ensure_required_exit_rules(
+            strategy_definition.exit_rules,
+            stop_loss_bps=stop_loss_bps,
+            take_profit_bps=take_profit_bps,
+            max_hold_minutes=max_hold_minutes,
+        )
+        update: dict[str, object] = {
+            "strategy_def_id": f"{strategy_package_id}-def" if strategy_package_id is not None else strategy_definition.strategy_def_id,
+            "symbol": symbol,
+            "exit_rules": exit_rules,
+            "score": score,
+            "score_basis": "backtest_return_percent",
+        }
+        if strategy_package_id is not None:
+            update["strategy_def_id"] = f"{strategy_package_id}-def"
+        return strategy_definition.model_copy(update=update)
+
+    @staticmethod
+    def _ensure_required_exit_rules(
+        exit_rules: dict[str, object],
+        *,
+        stop_loss_bps: int,
+        take_profit_bps: int,
+        max_hold_minutes: int,
+    ) -> dict[str, object]:
+        required_nodes = [
+            {"op": "stop_loss_bps", "value": stop_loss_bps},
+            {"op": "take_profit_bps", "value": take_profit_bps},
+            {"op": "time_stop_minutes", "value": max_hold_minutes},
+        ]
+        if all(
+            StrategyResearchEngine._rule_tree_contains_op(exit_rules, node["op"])
+            for node in required_nodes
+        ):
+            return exit_rules
+        if isinstance(exit_rules, dict) and set(exit_rules.keys()) == {"any"} and isinstance(exit_rules["any"], list):
+            normalized = {"any": list(exit_rules["any"])}
+        else:
+            normalized = {"any": [exit_rules]}
+        for node in required_nodes:
+            if not StrategyResearchEngine._rule_tree_contains_op(normalized, node["op"]):
+                normalized["any"].append(node)
+        return normalized
+
+    @classmethod
+    def _rule_tree_contains_op(cls, node: object, op: str) -> bool:
+        if isinstance(node, dict):
+            if node.get("op") == op:
+                return True
+            for key in ("all", "any"):
+                child_nodes = node.get(key)
+                if isinstance(child_nodes, list) and any(cls._rule_tree_contains_op(child, op) for child in child_nodes):
+                    return True
+        elif isinstance(node, list):
+            return any(cls._rule_tree_contains_op(child, op) for child in node)
+        return False
 
     @staticmethod
     def _default_lookback_for_entry_signal(*, strategy_family: str, entry_signal: str) -> int:
