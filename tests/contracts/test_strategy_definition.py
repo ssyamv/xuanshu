@@ -62,7 +62,7 @@ def test_strategy_definition_rejects_unsupported_operator() -> None:
     [
         ("feature_spec", {"indicators": [{"name": "vwap", "source": "close", "window": 20}]}, "unsupported indicator"),
         ("feature_spec", {"indicators": [{"name": "sma", "source": "bid", "window": 20}]}, "unsupported source"),
-        ("directionality", "both", "unsupported directionality"),
+        ("directionality", "long_short", "unsupported directionality"),
         ("score_basis", "sharpe_ratio", "unsupported score basis"),
     ],
 )

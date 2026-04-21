@@ -154,7 +154,7 @@ def test_strategy_package_requires_timezone_aware_generated_at() -> None:
             failure_modes=["late breakouts"],
             invalidating_conditions=["spread expansion"],
             research_reason="manual study",
-            strategy_definition=_sample_strategy_definition(directionality="long_short"),
+            strategy_definition=_sample_strategy_definition(directionality="long_only"),
             score=67.5,
             score_basis="backtest_return_percent",
         )
@@ -168,7 +168,7 @@ def test_strategy_package_normalizes_timezone_aware_generated_at_to_utc() -> Non
         symbol_scope=["BTC-USDT-SWAP"],
         market_environment_scope=["trend"],
         strategy_family="breakout",
-        directionality="long_short",
+        directionality="long_only",
         entry_rules={},
         exit_rules={},
         position_sizing_rules={},
@@ -179,7 +179,7 @@ def test_strategy_package_normalizes_timezone_aware_generated_at_to_utc() -> Non
             failure_modes=["late breakouts"],
             invalidating_conditions=["spread expansion"],
             research_reason="manual study",
-            strategy_definition=_sample_strategy_definition(directionality="long_short"),
+            strategy_definition=_sample_strategy_definition(directionality="long_only"),
             score=67.5,
             score_basis="backtest_return_percent",
         )
@@ -362,13 +362,13 @@ def test_strategy_family_changes_behavior_on_same_rows() -> None:
     rows = _build_rows([100.0, 101.0, 99.0])
 
     breakout_report = BacktestValidator().validate(
-        package=_make_package(strategy_family="breakout", directionality="long_short"),
+        package=_make_package(strategy_family="breakout", directionality="long_only"),
         historical_rows=rows,
     )
     mean_reversion_report = BacktestValidator().validate(
         package=_make_package(
             strategy_family="mean_reversion",
-            directionality="long_short",
+            directionality="short_only",
             signal="mean_reversion_signal",
         ),
         historical_rows=rows,
@@ -387,7 +387,7 @@ def test_directionality_blocks_disallowed_trade_direction() -> None:
         historical_rows=rows,
     )
     allowed_report = BacktestValidator().validate(
-        package=_make_package(directionality="long_short"),
+        package=_make_package(directionality="short_only"),
         historical_rows=rows,
     )
 
@@ -447,7 +447,7 @@ def test_max_hold_exit_path_is_exercised() -> None:
 
 def test_realized_trade_metrics_do_not_follow_raw_final_net_move() -> None:
     report = BacktestValidator().validate(
-        package=_make_package(directionality="long_short", stop_loss_bps=50, take_profit_bps=500),
+        package=_make_package(directionality="long_only", stop_loss_bps=50, take_profit_bps=500),
         historical_rows=_build_rows([100.0, 103.0, 100.0, 105.0, 104.0]),
     )
 

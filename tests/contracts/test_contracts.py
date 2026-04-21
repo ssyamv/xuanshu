@@ -18,7 +18,7 @@ def _sample_strategy_definition() -> dict[str, object]:
         "strategy_def_id": "strat-contract-001",
         "symbol": "BTC-USDT-SWAP",
         "strategy_family": "breakout",
-        "directionality": "long_short",
+        "directionality": "long_only",
         "feature_spec": {"indicators": [{"name": "sma", "source": "close", "window": 20}]},
         "entry_rules": {"all": [{"op": "crosses_above", "left": "close", "right": "sma_20"}]},
         "exit_rules": {"any": [{"op": "crosses_below", "left": "close", "right": "sma_20"}]},
@@ -70,7 +70,7 @@ def test_strategy_package_contract_is_typed() -> None:
         symbol_scope=["BTC-USDT-SWAP", "ETH-USDT-SWAP"],
         market_environment_scope=["trend"],
         strategy_family="breakout",
-        directionality="long_short",
+        directionality="long_only",
         entry_rules={"signal": "breakout_confirmed"},
         exit_rules={"stop_loss_bps": 50, "take_profit_bps": 120},
         position_sizing_rules={"risk_fraction": 0.0025},
@@ -86,7 +86,7 @@ def test_strategy_package_contract_is_typed() -> None:
         score_basis="backtest_return_percent",
     )
 
-    assert package.directionality == "long_short"
+    assert package.directionality == "long_only"
 
 
 def test_strategy_package_rejects_unknown_trigger_value() -> None:
@@ -97,7 +97,7 @@ def test_strategy_package_rejects_unknown_trigger_value() -> None:
         "symbol_scope": ["BTC-USDT-SWAP", "ETH-USDT-SWAP"],
         "market_environment_scope": ["trend"],
         "strategy_family": "breakout",
-        "directionality": "long_short",
+        "directionality": "long_only",
         "entry_rules": {"signal": "breakout_confirmed"},
         "exit_rules": {"stop_loss_bps": 50, "take_profit_bps": 120},
         "position_sizing_rules": {"risk_fraction": 0.0025},
@@ -129,7 +129,7 @@ def test_strategy_package_rejects_blank_entries(field_name: str) -> None:
         "symbol_scope": ["BTC-USDT-SWAP"],
         "market_environment_scope": ["trend"],
         "strategy_family": "breakout",
-        "directionality": "long_short",
+        "directionality": "long_only",
         "entry_rules": {"signal": "breakout_confirmed"},
         "exit_rules": {"stop_loss_bps": 50, "take_profit_bps": 120},
         "position_sizing_rules": {"risk_fraction": 0.0025},
@@ -158,7 +158,7 @@ def test_strategy_package_rejects_naive_generated_at() -> None:
         "symbol_scope": ["BTC-USDT-SWAP", "ETH-USDT-SWAP"],
         "market_environment_scope": ["trend"],
         "strategy_family": "breakout",
-        "directionality": "long_short",
+        "directionality": "long_only",
         "entry_rules": {"signal": "breakout_confirmed"},
         "exit_rules": {"stop_loss_bps": 50, "take_profit_bps": 120},
         "position_sizing_rules": {"risk_fraction": 0.0025},
@@ -186,7 +186,7 @@ def test_strategy_package_normalizes_generated_at_to_utc() -> None:
         symbol_scope=["BTC-USDT-SWAP", "ETH-USDT-SWAP"],
         market_environment_scope=["trend"],
         strategy_family="breakout",
-        directionality="long_short",
+        directionality="long_only",
         entry_rules={"signal": "breakout_confirmed"},
         exit_rules={"stop_loss_bps": 50, "take_profit_bps": 120},
         position_sizing_rules={"risk_fraction": 0.0025},

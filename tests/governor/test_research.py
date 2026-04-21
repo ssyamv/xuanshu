@@ -136,7 +136,7 @@ async def test_strategy_research_engine_builds_multiple_candidate_packages_from_
     assert any(package.research_reason.endswith("second thesis") for package in packages)
     assert any(package.strategy_family == "mean_reversion" for package in packages)
     assert max(package.position_sizing_rules["risk_fraction"] for package in packages) >= 0.1
-    assert {"long_short", "long_only", "short_only"} & {package.directionality for package in packages}
+    assert {package.directionality for package in packages} <= {"long_only", "short_only"}
 
 
 @pytest.mark.asyncio

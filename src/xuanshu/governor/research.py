@@ -455,10 +455,10 @@ class StrategyResearchEngine:
     @staticmethod
     def _candidate_directionalities(*, strategy_family: str, market_environment: str) -> list[str]:
         if strategy_family == "breakout" and market_environment == "trend":
-            return ["long_only", "long_short"]
+            return ["long_only"]
         if strategy_family == "mean_reversion":
-            return ["long_short", "short_only", "long_only"]
-        return ["long_short"]
+            return ["short_only", "long_only"]
+        return ["long_only"]
 
     @staticmethod
     def _build_strategy_definition(
