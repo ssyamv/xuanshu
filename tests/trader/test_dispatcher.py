@@ -164,6 +164,35 @@ def test_state_engine_removes_terminal_orders_and_keeps_latest_private_marker() 
     assert engine.open_orders_by_symbol["BTC-USDT-SWAP"] == {}
 
 
+def test_state_engine_clears_staged_close_orders_when_position_is_flat() -> None:
+    engine = StateEngine()
+    engine.stage_order_submission(
+        "BTC-USDT-SWAP",
+        client_order_id="BTCUSDTSWAPshortmomentum000001",
+        side="sell",
+        size=3.5,
+        intent="close",
+        strategy_id="short_momentum",
+        strategy_logic="空头优先信号触发，先平多头，等待仓位归零后再开空。",
+    )
+
+    engine.on_position_update(
+        PositionUpdateEvent(
+            event_type=TraderEventType.POSITION_UPDATE,
+            symbol="BTC-USDT-SWAP",
+            exchange="okx",
+            generated_at=datetime.now(UTC),
+            private_sequence="pri-flat",
+            net_quantity=0.0,
+            average_price=0.0,
+            mark_price=0.0,
+            unrealized_pnl=0.0,
+        )
+    )
+
+    assert engine.open_orders_by_symbol["BTC-USDT-SWAP"] == {}
+
+
 def test_dispatcher_routes_market_trade_and_account_snapshot_into_state() -> None:
     engine = StateEngine()
 

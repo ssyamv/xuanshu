@@ -63,6 +63,56 @@ class ExecutionCoordinator:
         except asyncio.CancelledError:
             raise
 
+    async def submit_market_close(
+        self,
+        symbol: str,
+        side: str,
+        size: float,
+        client_order_id: str,
+        decision: RiskDecision,
+        timestamp: str,
+        *,
+        position_side: str,
+    ) -> list[dict[str, object]] | None:
+        payload = build_market_order_payload(
+            symbol,
+            side,
+            size,
+            client_order_id,
+            position_side=position_side,
+            reduce_only=True,
+        )
+        if client_order_id in self.inflight_by_client_order_id:
+            entry = self.inflight_by_client_order_id[client_order_id]
+            if entry.get("payload") != payload:
+                raise ValueError(
+                    f"client_order_id {client_order_id!r} collides with original order parameters"
+                )
+            task = entry.get("task")
+            if task is not None:
+                return await asyncio.shield(task)
+            return entry["response"]
+        if not decision.allow_close:
+            return None
+        task = asyncio.create_task(self.rest_client.place_order(payload, timestamp))
+        entry = {
+            "symbol": symbol,
+            "payload": payload,
+            "task": task,
+        }
+        self.inflight_by_client_order_id[client_order_id] = entry
+        task.add_done_callback(
+            lambda completed_task: self._finalize_inflight_entry(
+                client_order_id,
+                entry,
+                completed_task,
+            )
+        )
+        try:
+            return await asyncio.shield(task)
+        except asyncio.CancelledError:
+            raise
+
     def _finalize_inflight_entry(
         self,
         client_order_id: str,

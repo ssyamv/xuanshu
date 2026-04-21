@@ -11,7 +11,7 @@ import httpx
 _SUPPORTED_ORDER_TYPES = frozenset({"market", "limit"})
 _SUPPORTED_ORDER_SIDES = frozenset({"buy", "sell"})
 _PLACE_ORDER_REQUIRED_FIELDS = frozenset({"instId", "tdMode", "side", "posSide", "ordType", "sz", "clOrdId"})
-_PLACE_ORDER_OPTIONAL_FIELDS = frozenset({"px"})
+_PLACE_ORDER_OPTIONAL_FIELDS = frozenset({"px", "reduceOnly"})
 _PLACE_ORDER_ALLOWED_FIELDS = _PLACE_ORDER_REQUIRED_FIELDS | _PLACE_ORDER_OPTIONAL_FIELDS
 
 
@@ -269,6 +269,8 @@ class OkxRestClient:
         )
         if "px" in payload:
             self._validate_non_blank_fields({"price": payload["px"]})
+        if "reduceOnly" in payload and payload["reduceOnly"] not in {"true", "false"}:
+            raise ValueError(f"unsupported reduceOnly: {payload['reduceOnly']}")
 
     def _validate_non_blank_fields(self, fields: dict[str, str]) -> None:
         for field_name, value in fields.items():

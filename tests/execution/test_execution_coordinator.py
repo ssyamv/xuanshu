@@ -76,12 +76,70 @@ def test_build_market_order_payload_rejects_non_string_side() -> None:
         build_market_order_payload("BTC-USDT-SWAP", ["buy"], 1.0, "btc-breakout-000001")
 
 
+def test_build_market_order_payload_rejects_invalid_position_side() -> None:
+    with pytest.raises(ValueError, match=r"invalid position_side"):
+        build_market_order_payload(
+            "BTC-USDT-SWAP",
+            "sell",
+            1.0,
+            "btc-breakout-000001",
+            position_side="flat",
+        )
+
+
 def test_build_market_order_payload_sets_pos_side_for_long_short_mode() -> None:
     buy_payload = build_market_order_payload("BTC-USDT-SWAP", "buy", 1.0, "btc-breakout-000001")
     sell_payload = build_market_order_payload("BTC-USDT-SWAP", "sell", 1.0, "btc-breakout-000002")
 
     assert buy_payload["posSide"] == "long"
     assert sell_payload["posSide"] == "short"
+
+
+def test_build_market_order_payload_supports_reduce_only_long_close() -> None:
+    payload = build_market_order_payload(
+        "BTC-USDT-SWAP",
+        "sell",
+        1.0,
+        "btc-close-000001",
+        position_side="long",
+        reduce_only=True,
+    )
+
+    assert payload["side"] == "sell"
+    assert payload["posSide"] == "long"
+    assert payload["reduceOnly"] == "true"
+
+
+@pytest.mark.asyncio
+async def test_execution_coordinator_submits_reduce_only_market_close() -> None:
+    rest = _FakeRestClient()
+    coordinator = ExecutionCoordinator(rest_client=rest)
+    decision = RiskDecision(
+        decision_id="dec-1",
+        generated_at=datetime.now(UTC),
+        symbol="BTC-USDT-SWAP",
+        allow_open=False,
+        allow_close=True,
+        max_position=100.0,
+        max_order_size=1.0,
+        risk_mode=RunMode.NORMAL,
+        reason_codes=[],
+    )
+
+    response = await coordinator.submit_market_close(
+        symbol="BTC-USDT-SWAP",
+        side="sell",
+        size=3.5,
+        client_order_id="btc-close-000001",
+        decision=decision,
+        timestamp="2026-04-19T00:00:00.000Z",
+        position_side="long",
+    )
+
+    assert response == [{"ordId": "1", "clOrdId": "btc-close-000001", "sCode": "0"}]
+    assert rest.calls[0][0]["side"] == "sell"
+    assert rest.calls[0][0]["posSide"] == "long"
+    assert rest.calls[0][0]["reduceOnly"] == "true"
 
 
 class _BlockingRestClient:

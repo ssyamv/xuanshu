@@ -220,6 +220,7 @@ class OkxPrivateStream:
             exchange="okx",
             generated_at=self._parse_timestamp(item["uTime"]),
             private_sequence=sequence,
+            position_side=self._optional_str(item.get("posSide"), default="long"),
             net_quantity=net_quantity,
             average_price=average_price,
             mark_price=mark_price,

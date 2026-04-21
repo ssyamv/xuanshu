@@ -374,6 +374,17 @@ def _next_client_order_id(runtime: TraderRuntime, signal: CandidateSignal) -> st
     )
 
 
+def _is_short_priority_long_close(signal: CandidateSignal, position: object | None) -> bool:
+    position_quantity = getattr(position, "net_quantity", 0.0) if position is not None else 0.0
+    position_side = getattr(position, "position_side", "long") if position is not None else "long"
+    return (
+        signal.strategy_id == StrategyId.SHORT_MOMENTUM
+        and signal.side == OrderSide.SELL
+        and position_quantity > 0.0
+        and position_side == "long"
+    )
+
+
 def _build_strategy_logic(signal: CandidateSignal, snapshot: StrategyConfigSnapshot) -> str:
     if signal.strategy_id == StrategyId.VOL_BREAKOUT:
         binding = snapshot.strategy_binding_for(signal.symbol, signal.strategy_id.value)
@@ -557,10 +568,88 @@ async def _evaluate_symbol(runtime: TraderRuntime, symbol: str) -> None:
     signals = build_candidate_signals(snapshot)
     open_orders = runtime.components.state_engine.open_orders_by_symbol.get(symbol, {})
     position = runtime.components.state_engine.positions_by_symbol.get(symbol)
-    has_exposure = bool(open_orders) or (position is not None and position.net_quantity != 0.0)
+    position_quantity = position.net_quantity if position is not None else 0.0
+    has_open_orders = bool(open_orders)
+    has_exposure = has_open_orders or position_quantity != 0.0
     for signal in signals:
         decision = runtime.components.risk_kernel.evaluate(signal, runtime.startup_snapshot)
         if signal.entry_type != EntryType.MARKET or signal.side not in {OrderSide.BUY, OrderSide.SELL}:
+            continue
+        if has_open_orders:
+            continue
+        if _is_short_priority_long_close(signal, position):
+            if not runtime.startup_snapshot.is_strategy_enabled(signal.strategy_id.value):
+                runtime.history_store.append_risk_event(
+                    {
+                        "event_type": "signal_blocked",
+                        "symbol": signal.symbol,
+                        "detail": "strategy_disabled",
+                    }
+                )
+                continue
+            try:
+                response = await runtime.execution_coordinator.submit_market_close(
+                    symbol=signal.symbol,
+                    side=OrderSide.SELL.value,
+                    size=abs(position_quantity),
+                    client_order_id=_next_client_order_id(runtime, signal),
+                    decision=decision,
+                    timestamp=_now_timestamp(),
+                    position_side="long",
+                )
+            except Exception as exc:
+                runtime.history_store.append_risk_event(
+                    {
+                        "event_type": "execution_submission_failed",
+                        "symbol": signal.symbol,
+                        "detail": str(exc),
+                    }
+                )
+                continue
+            if response is None:
+                runtime.history_store.append_risk_event(
+                    {
+                        "event_type": "signal_blocked",
+                        "symbol": signal.symbol,
+                        "detail": ",".join(decision.reason_codes),
+                    }
+                )
+                continue
+            strategy_logic = "空头优先信号触发，先平多头，等待仓位归零后再开空。"
+            for row in response:
+                runtime.history_store.append_order_fact(
+                    {
+                        "symbol": signal.symbol,
+                        "side": OrderSide.SELL.value,
+                        "status": "submitted",
+                        "client_order_id": str(row.get("clOrdId") or ""),
+                        "order_id": str(row.get("ordId") or ""),
+                        "intent": "close",
+                        "strategy_id": signal.strategy_id.value,
+                        "strategy_logic": strategy_logic,
+                    }
+                )
+            runtime.components.state_engine.stage_order_submission(
+                signal.symbol,
+                client_order_id=str(response[0].get("clOrdId") or ""),
+                side=OrderSide.SELL.value,
+                size=abs(position_quantity),
+                intent="close",
+                strategy_id=signal.strategy_id.value,
+                strategy_logic=strategy_logic,
+            )
+            _LOGGER.info(
+                "order_submitted",
+                extra={
+                    "service": "trader",
+                    "symbol": signal.symbol,
+                    "strategy_id": signal.strategy_id.value,
+                    "side": OrderSide.SELL.value,
+                    "client_order_id": response[0].get("clOrdId") or "",
+                    "run_mode": runtime.current_mode.value,
+                },
+            )
+            has_exposure = True
             continue
         if has_exposure:
             continue
@@ -698,6 +787,7 @@ async def _dispatch_runtime_event(runtime: TraderRuntime, event: object) -> None
             {
                 "symbol": event.symbol,
                 "net_quantity": event.net_quantity,
+                "position_side": event.position_side,
                 "average_price": event.average_price,
                 "mark_price": event.mark_price,
                 "unrealized_pnl": event.unrealized_pnl,

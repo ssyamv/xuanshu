@@ -72,6 +72,7 @@ class PositionUpdateEvent(_TraderEvent):
     event_type: Literal[TraderEventType.POSITION_UPDATE]
     symbol: NormalizedStr
     private_sequence: SequenceId
+    position_side: Literal["long", "short"] = "long"
     net_quantity: float = Field(allow_inf_nan=False)
     average_price: float = Field(ge=0.0, allow_inf_nan=False)
     mark_price: float = Field(ge=0.0, allow_inf_nan=False)

@@ -86,6 +86,7 @@ def test_trader_event_contracts_are_stable_and_typed() -> None:
     assert trade.side == "buy"
     assert order.status == "live"
     assert position.net_quantity == 1.0
+    assert position.position_side == "long"
     assert account.available_balance == 800.0
     assert fault.code == "public_ws_disconnected"
 

@@ -44,6 +44,7 @@ class OrderState:
 @dataclass
 class PositionState:
     net_quantity: float = 0.0
+    position_side: str = "long"
     average_price: float = 0.0
     mark_price: float = 0.0
     unrealized_pnl: float = 0.0
@@ -164,10 +165,20 @@ class StateEngine:
         self.last_private_stream_marker = event.private_sequence
         self.positions_by_symbol[event.symbol] = PositionState(
             net_quantity=event.net_quantity,
+            position_side=event.position_side,
             average_price=event.average_price,
             mark_price=event.mark_price,
             unrealized_pnl=event.unrealized_pnl,
         )
+        if event.net_quantity == 0.0:
+            symbol_orders = self.open_orders_by_symbol.setdefault(event.symbol, {})
+            close_order_ids = [
+                order_id
+                for order_id, order in symbol_orders.items()
+                if order.intent == "close"
+            ]
+            for order_id in close_order_ids:
+                symbol_orders.pop(order_id, None)
 
     def on_account_snapshot(self, event: AccountSnapshotEvent) -> None:
         self.last_private_stream_marker = event.private_sequence
@@ -194,6 +205,7 @@ class StateEngine:
             "spread": snapshot.spread,
             "regime": snapshot.regime.value,
             "net_quantity": position.net_quantity,
+            "position_side": position.position_side,
             "open_order_count": len(open_orders),
             "fault_count": len(self.fault_flags),
         }
