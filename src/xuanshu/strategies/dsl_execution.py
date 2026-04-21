@@ -63,7 +63,8 @@ def _extract_max_hold_ms(strategy_definition: StrategyDefinition) -> int:
 
 def _find_exit_rule_value(node: object, key: str) -> object | None:
     if isinstance(node, dict):
-        if node.get("op") == key:
+        op = node.get("op")
+        if isinstance(op, str) and op.strip().lower() == key:
             return node.get("value")
         for child_key in ("all", "any"):
             children = node.get(child_key)

@@ -140,6 +140,27 @@ def test_definition_without_time_stop_uses_risk_constraints_for_max_hold() -> No
     assert signal.risk_tag == "dsl:breakout:breakout-001"
 
 
+def test_time_stop_exit_rule_lookup_normalizes_operator_text() -> None:
+    definition = _sample_strategy_definition(
+        directionality="long_only",
+        strategy_family="breakout",
+        include_time_stop=False,
+        entry_rule={"all": [{"op": "greater_than", "left": "close", "right": "sma_3"}]},
+        risk_constraints={"max_hold_minutes": 7},
+    )
+    exit_rules = definition.exit_rules.model_copy() if hasattr(definition.exit_rules, "model_copy") else dict(definition.exit_rules)
+    exit_rules["any"] = [
+        *exit_rules["any"],
+        {"op": " Time_Stop_Minutes ", "value": 3},
+    ]
+    definition = definition.model_copy(update={"exit_rules": exit_rules})
+
+    signal = build_candidate_signal(definition, _rows([10.0, 11.0, 12.0, 13.0]))
+
+    assert signal is not None
+    assert signal.max_hold_ms == 3 * 60_000
+
+
 def test_empty_dsl_definition_list_falls_back_to_legacy_behavior() -> None:
     signals = build_candidate_signals(
         _trend_snapshot(),
