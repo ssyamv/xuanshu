@@ -44,6 +44,37 @@ def test_strategy_snapshot_contract_is_typed_and_active_when_approved() -> None:
     assert snapshot.is_strategy_enabled("vol_breakout")
 
 
+def test_strategy_snapshot_supports_symbol_and_strategy_specific_bindings() -> None:
+    now = datetime.now(UTC)
+    short_binding = ApprovedStrategyBinding(
+        strategy_def_id="short-momentum-btc-4h",
+        strategy_package_id="fixed-short-momentum-btc-4h",
+        backtest_report_id="bt-short-momentum-btc-4h",
+        score=75.62,
+        score_basis="backtest_return_percent",
+        approval_record_id="fixed-short-momentum-btc-4h",
+        activated_at=now,
+    )
+    snapshot = StrategyConfigSnapshot(
+        version_id="snap-001",
+        generated_at=now,
+        effective_from=now,
+        expires_at=now + timedelta(minutes=5),
+        symbol_whitelist=["BTC-USDT-SWAP"],
+        strategy_enable_flags={"vol_breakout": True, "short_momentum": True},
+        risk_multiplier=0.8,
+        per_symbol_max_position=0.12,
+        max_leverage=3,
+        market_mode=RunMode.NORMAL,
+        approval_state=ApprovalState.APPROVED,
+        source_reason="fixed strategy",
+        ttl_sec=300,
+        strategy_bindings={"BTC-USDT-SWAP:short_momentum": short_binding},
+    )
+
+    assert snapshot.strategy_binding_for("BTC-USDT-SWAP", "short_momentum") == short_binding
+
+
 @pytest.mark.parametrize("field_name", ["generated_at", "effective_from", "expires_at"])
 def test_strategy_snapshot_rejects_naive_datetimes(field_name: str) -> None:
     payload = {

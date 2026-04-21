@@ -189,6 +189,15 @@ def _uses_fixed_strategy_snapshot(runtime: TraderRuntime) -> bool:
     return path is not None and bool(path.strip())
 
 
+def _snapshot_strategy_bindings(snapshot: StrategyConfigSnapshot) -> dict[str, ApprovedStrategyBinding]:
+    bindings = {
+        symbol: binding
+        for symbol, binding in snapshot.symbol_strategy_bindings.items()
+    }
+    bindings.update(snapshot.strategy_bindings)
+    return bindings
+
+
 def build_trader_runtime() -> TraderRuntime:
     settings = TraderRuntimeSettings()
     components = build_trader_components(settings)
@@ -227,7 +236,7 @@ def build_trader_runtime() -> TraderRuntime:
         starting_nav=settings.trader_starting_nav,
         startup_snapshot=startup_snapshot,
         startup_checkpoint=_build_startup_checkpoint(startup_snapshot, initial_mode),
-        active_symbol_strategies=dict(startup_snapshot.symbol_strategy_bindings),
+        active_symbol_strategies=_snapshot_strategy_bindings(startup_snapshot),
         current_mode=initial_mode,
     )
 
@@ -367,9 +376,11 @@ def _next_client_order_id(runtime: TraderRuntime, signal: CandidateSignal) -> st
 
 def _build_strategy_logic(signal: CandidateSignal, snapshot: StrategyConfigSnapshot) -> str:
     if signal.strategy_id == StrategyId.VOL_BREAKOUT:
-        binding = snapshot.symbol_strategy_bindings.get(signal.symbol)
+        binding = snapshot.strategy_binding_for(signal.symbol, signal.strategy_id.value)
         bar = _extract_vol_breakout_bar(getattr(binding, "strategy_def_id", ""))
         return f"{signal.symbol} {bar} 波动率突破，价格突破 ATR 阈值后顺势开多。"
+    if signal.strategy_id == StrategyId.SHORT_MOMENTUM:
+        return f"{signal.symbol} 4H 空头动量破位，价格跌破回看阈值后顺势开空。"
     if signal.strategy_id == StrategyId.BREAKOUT:
         return "趋势突破，最近成交偏买方，准备顺势开多。"
     if signal.strategy_id == StrategyId.MEAN_REVERSION:
@@ -414,20 +425,21 @@ def _build_strategy_handover_events(
 
 
 def _apply_symbol_strategy_bindings(runtime: TraderRuntime, snapshot: StrategyConfigSnapshot) -> None:
-    for symbol, candidate_strategy in snapshot.symbol_strategy_bindings.items():
-        current_strategy = runtime.active_symbol_strategies.get(symbol)
+    for binding_key, candidate_strategy in _snapshot_strategy_bindings(snapshot).items():
+        symbol = binding_key.split(":", 1)[0]
+        current_strategy = runtime.active_symbol_strategies.get(binding_key)
         if (
             current_strategy is not None
             and current_strategy.strategy_def_id == candidate_strategy.strategy_def_id
             and current_strategy.strategy_package_id == candidate_strategy.strategy_package_id
         ):
-            runtime.active_symbol_strategies[symbol] = candidate_strategy
+            runtime.active_symbol_strategies[binding_key] = candidate_strategy
             continue
         if not _is_stronger_replacement(current_strategy, candidate_strategy):
             continue
 
         events = _build_strategy_handover_events(symbol, current_strategy, candidate_strategy)
-        runtime.symbol_handover_state[symbol] = {
+        runtime.symbol_handover_state[binding_key] = {
             "status": "handover_pending",
             "events": events,
             "next_strategy_def_id": candidate_strategy.strategy_def_id,
@@ -446,7 +458,7 @@ def _apply_symbol_strategy_bindings(runtime: TraderRuntime, snapshot: StrategyCo
                     "score_basis": candidate_strategy.score_basis,
                 }
             )
-        runtime.active_symbol_strategies[symbol] = candidate_strategy
+        runtime.active_symbol_strategies[binding_key] = candidate_strategy
 
 
 def _can_relax_to_snapshot_mode(runtime: TraderRuntime, snapshot: StrategyConfigSnapshot) -> bool:

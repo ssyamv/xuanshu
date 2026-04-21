@@ -34,6 +34,22 @@ def test_trader_generates_vol_breakout_signal_for_trend_expansion() -> None:
     assert signals[0].entry_type == EntryType.MARKET
 
 
+def test_trader_generates_short_momentum_signal_for_bearish_trend_expansion() -> None:
+    engine = StateEngine()
+    engine.on_bbo("BTC-USDT-SWAP", bid=100.0, ask=100.2)
+    engine.on_trade("BTC-USDT-SWAP", price=99.9, size=5.0, side="sell")
+    engine.on_trade("BTC-USDT-SWAP", price=99.8, size=4.0, side="sell")
+
+    snapshot = engine.snapshot("BTC-USDT-SWAP")
+    signals = build_candidate_signals(snapshot)
+
+    assert snapshot.volatility_state == VolatilityState.HOT
+    assert snapshot.regime == MarketRegime.TREND
+    assert signals[0].strategy_id == StrategyId.SHORT_MOMENTUM
+    assert signals[0].side == OrderSide.SELL
+    assert signals[0].entry_type == EntryType.MARKET
+
+
 def test_trader_pause_signal_is_explicitly_non_executable() -> None:
     engine = StateEngine()
     engine.on_bbo("BTC-USDT-SWAP", bid=100.0, ask=100.9)
@@ -250,3 +266,25 @@ def test_trader_keeps_current_binding_when_candidate_is_not_ten_percent_stronger
 
     assert runtime.active_symbol_strategies["BTC-USDT-SWAP"].strategy_def_id == "strat-old"
     assert runtime.symbol_handover_state == {}
+
+
+def test_trader_applies_strategy_specific_bindings_without_replacing_long_binding(monkeypatch) -> None:
+    monkeypatch.setenv("XUANSHU_OKX_SYMBOLS", "BTC-USDT-SWAP")
+    monkeypatch.setenv("XUANSHU_TRADER_STARTING_NAV", "250000")
+    monkeypatch.setenv("OKX_API_KEY", "api-key")
+    monkeypatch.setenv("OKX_API_SECRET", "api-secret")
+    monkeypatch.setenv("OKX_API_PASSPHRASE", "api-passphrase")
+    runtime = trader_app.build_trader_runtime()
+    long_binding = _build_binding(strategy_def_id="long-strat", strategy_package_id="long-pkg", score=52.0)
+    short_binding = _build_binding(strategy_def_id="short-strat", strategy_package_id="short-pkg", score=75.0)
+    snapshot = _build_strategy_snapshot(long_binding).model_copy(
+        update={
+            "strategy_enable_flags": {"vol_breakout": True, "short_momentum": True, "risk_pause": True},
+            "strategy_bindings": {"BTC-USDT-SWAP:short_momentum": short_binding},
+        }
+    )
+
+    trader_app._apply_symbol_strategy_bindings(runtime, snapshot)
+
+    assert runtime.active_symbol_strategies["BTC-USDT-SWAP"].strategy_def_id == "long-strat"
+    assert runtime.active_symbol_strategies["BTC-USDT-SWAP:short_momentum"].strategy_def_id == "short-strat"

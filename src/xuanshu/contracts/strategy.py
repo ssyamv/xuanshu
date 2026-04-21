@@ -58,6 +58,7 @@ class StrategyConfigSnapshot(BaseModel):
     source_reason: str = Field(min_length=1)
     ttl_sec: int = Field(gt=0)
     symbol_strategy_bindings: dict[str, ApprovedStrategyBinding] = Field(default_factory=dict)
+    strategy_bindings: dict[str, ApprovedStrategyBinding] = Field(default_factory=dict)
 
     def is_effective(self, reference_time: datetime) -> bool:
         reference_time = self._normalize_reference_time(reference_time)
@@ -81,6 +82,13 @@ class StrategyConfigSnapshot(BaseModel):
     def is_strategy_enabled(self, strategy_id: str) -> bool:
         return self.strategy_enable_flags.get(strategy_id, False)
 
+    def strategy_binding_for(self, symbol: str, strategy_id: str) -> ApprovedStrategyBinding | None:
+        normalized_symbol = symbol.strip()
+        normalized_strategy = strategy_id.strip()
+        return self.strategy_bindings.get(
+            f"{normalized_symbol}:{normalized_strategy}"
+        ) or self.symbol_strategy_bindings.get(normalized_symbol)
+
     @model_validator(mode="after")
     def validate_temporal_window(self) -> "StrategyConfigSnapshot":
         if self.expires_at <= self.effective_from:
@@ -94,6 +102,16 @@ class StrategyConfigSnapshot(BaseModel):
                 raise ValueError("symbol_strategy_bindings keys must not contain surrounding whitespace")
             if normalized_symbol not in whitelist:
                 raise ValueError("symbol_strategy_bindings keys must be listed in symbol_whitelist")
+        for binding_key in self.strategy_bindings:
+            symbol, separator, strategy_id = binding_key.partition(":")
+            if separator != ":" or not symbol.strip() or not strategy_id.strip():
+                raise ValueError("strategy_bindings keys must use SYMBOL:strategy_id")
+            if symbol != symbol.strip() or strategy_id != strategy_id.strip():
+                raise ValueError("strategy_bindings keys must not contain surrounding whitespace")
+            if symbol not in whitelist:
+                raise ValueError("strategy_bindings symbols must be listed in symbol_whitelist")
+            if not self.strategy_enable_flags.get(strategy_id, False):
+                raise ValueError("strategy_bindings strategy_id must be enabled")
         return self
 
     @field_validator("generated_at", "effective_from", "expires_at")

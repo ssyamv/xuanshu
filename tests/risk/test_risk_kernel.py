@@ -46,6 +46,7 @@ def _build_snapshot(
         strategy_enable_flags=strategy_enable_flags
         or {
             StrategyId.VOL_BREAKOUT.value: True,
+            StrategyId.SHORT_MOMENTUM.value: True,
             StrategyId.RISK_PAUSE.value: True,
         },
         risk_multiplier=0.8,
@@ -99,3 +100,13 @@ def test_risk_kernel_blocks_open_when_governance_snapshot_disallows_it(
     assert decision.allow_open is False
     assert expected_reason in decision.reason_codes
     assert decision.allow_close is True
+
+
+def test_risk_kernel_allows_enabled_short_momentum_sell_signal() -> None:
+    decision = RiskKernel(nav=100_000.0).evaluate(
+        _build_signal(strategy_id=StrategyId.SHORT_MOMENTUM, side=OrderSide.SELL),
+        _build_snapshot(),
+    )
+
+    assert decision.allow_open is True
+    assert decision.reason_codes == []

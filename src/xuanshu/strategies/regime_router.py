@@ -5,7 +5,7 @@ from xuanshu.core.enums import MarketRegime, VolatilityState
 
 
 def classify_regime(snapshot: MarketStateSnapshot) -> MarketRegime:
-    if snapshot.recent_trade_bias > 0.6 and snapshot.volatility_state == VolatilityState.HOT:
+    if abs(snapshot.recent_trade_bias) > 0.6 and snapshot.volatility_state == VolatilityState.HOT:
         return MarketRegime.TREND
     if abs(snapshot.recent_trade_bias) < 0.2 and snapshot.volatility_state == VolatilityState.NORMAL:
         return MarketRegime.MEAN_REVERSION

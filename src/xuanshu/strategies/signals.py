@@ -7,6 +7,20 @@ from xuanshu.core.enums import EntryType, MarketRegime, OrderSide, SignalUrgency
 
 def build_candidate_signals(snapshot: MarketStateSnapshot) -> list[CandidateSignal]:
     if snapshot.regime == MarketRegime.TREND:
+        if snapshot.recent_trade_bias < -0.6:
+            return [
+                CandidateSignal(
+                    symbol=snapshot.symbol,
+                    strategy_id=StrategyId.SHORT_MOMENTUM,
+                    side=OrderSide.SELL,
+                    entry_type=EntryType.MARKET,
+                    urgency=SignalUrgency.HIGH,
+                    confidence=0.7,
+                    max_hold_ms=3000,
+                    cancel_after_ms=750,
+                    risk_tag="short_momentum",
+                )
+            ]
         return [
             CandidateSignal(
                 symbol=snapshot.symbol,
