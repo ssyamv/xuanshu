@@ -1,10 +1,19 @@
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
 import xuanshu.apps.trader as trader_app
-from xuanshu.contracts.strategy import ApprovedStrategyBinding
-from xuanshu.core.enums import EntryType, MarketRegime, OrderSide, SignalUrgency, StrategyId, VolatilityState
+from xuanshu.contracts.strategy import ApprovedStrategyBinding, StrategyConfigSnapshot
+from xuanshu.core.enums import (
+    ApprovalState,
+    EntryType,
+    MarketRegime,
+    OrderSide,
+    RunMode,
+    SignalUrgency,
+    StrategyId,
+    VolatilityState,
+)
 from xuanshu.state.engine import StateEngine
 from xuanshu.strategies.signals import build_candidate_signals
 
@@ -99,13 +108,15 @@ def test_trader_rejects_unsupported_trade_side() -> None:
 
 def _build_binding(
     *,
+    strategy_def_id: str = "strat-1",
+    strategy_package_id: str = "pkg-1",
     score: float = 100.0,
     score_basis: str = "backtest_return_percent",
 ) -> ApprovedStrategyBinding:
     now = datetime.now(UTC)
     return ApprovedStrategyBinding(
-        strategy_def_id="strat-1",
-        strategy_package_id="pkg-1",
+        strategy_def_id=strategy_def_id,
+        strategy_package_id=strategy_package_id,
         backtest_report_id="bt-1",
         score=score,
         score_basis=score_basis,
@@ -178,4 +189,64 @@ def test_trader_runtime_defaults_track_active_symbol_strategies_and_handover_sta
     runtime = trader_app.build_trader_runtime()
 
     assert runtime.active_symbol_strategies == {}
+    assert runtime.symbol_handover_state == {}
+
+
+def _build_strategy_snapshot(binding: ApprovedStrategyBinding) -> StrategyConfigSnapshot:
+    now = datetime.now(UTC)
+    return StrategyConfigSnapshot(
+        version_id=f"snap-{binding.strategy_def_id}",
+        generated_at=now,
+        effective_from=now,
+        expires_at=now + timedelta(minutes=5),
+        symbol_whitelist=["BTC-USDT-SWAP"],
+        strategy_enable_flags={"breakout": True, "mean_reversion": False, "risk_pause": True},
+        risk_multiplier=0.5,
+        per_symbol_max_position=0.12,
+        max_leverage=3,
+        market_mode=RunMode.NORMAL,
+        approval_state=ApprovalState.APPROVED,
+        source_reason="test",
+        ttl_sec=300,
+        symbol_strategy_bindings={"BTC-USDT-SWAP": binding},
+    )
+
+
+def test_trader_applies_stronger_snapshot_binding_and_records_handover(monkeypatch) -> None:
+    monkeypatch.setenv("XUANSHU_OKX_SYMBOLS", "BTC-USDT-SWAP")
+    monkeypatch.setenv("XUANSHU_TRADER_STARTING_NAV", "250000")
+    monkeypatch.setenv("OKX_API_KEY", "api-key")
+    monkeypatch.setenv("OKX_API_SECRET", "api-secret")
+    monkeypatch.setenv("OKX_API_PASSPHRASE", "api-passphrase")
+    runtime = trader_app.build_trader_runtime()
+    current = _build_binding(strategy_def_id="strat-old", strategy_package_id="pkg-old", score=60.0)
+    candidate = _build_binding(strategy_def_id="strat-new", strategy_package_id="pkg-new", score=66.0)
+    runtime.active_symbol_strategies["BTC-USDT-SWAP"] = current
+
+    trader_app._apply_symbol_strategy_bindings(runtime, _build_strategy_snapshot(candidate))
+
+    assert runtime.active_symbol_strategies["BTC-USDT-SWAP"].strategy_def_id == "strat-new"
+    assert [event["event_type"] for event in runtime.symbol_handover_state["BTC-USDT-SWAP"]["events"]] == [
+        "cancel_open_orders",
+        "flatten_position",
+        "mark_replaced_by_stronger_strategy",
+        "activate_new_strategy",
+    ]
+    assert runtime.history_store.written_rows["strategy_replacements"][-1]["current_strategy_def_id"] == "strat-old"
+
+
+def test_trader_keeps_current_binding_when_candidate_is_not_ten_percent_stronger(monkeypatch) -> None:
+    monkeypatch.setenv("XUANSHU_OKX_SYMBOLS", "BTC-USDT-SWAP")
+    monkeypatch.setenv("XUANSHU_TRADER_STARTING_NAV", "250000")
+    monkeypatch.setenv("OKX_API_KEY", "api-key")
+    monkeypatch.setenv("OKX_API_SECRET", "api-secret")
+    monkeypatch.setenv("OKX_API_PASSPHRASE", "api-passphrase")
+    runtime = trader_app.build_trader_runtime()
+    current = _build_binding(strategy_def_id="strat-old", strategy_package_id="pkg-old", score=60.0)
+    candidate = _build_binding(strategy_def_id="strat-new", strategy_package_id="pkg-new", score=65.999999999)
+    runtime.active_symbol_strategies["BTC-USDT-SWAP"] = current
+
+    trader_app._apply_symbol_strategy_bindings(runtime, _build_strategy_snapshot(candidate))
+
+    assert runtime.active_symbol_strategies["BTC-USDT-SWAP"].strategy_def_id == "strat-old"
     assert runtime.symbol_handover_state == {}

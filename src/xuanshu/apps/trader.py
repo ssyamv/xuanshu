@@ -362,6 +362,42 @@ def _build_strategy_handover_events(
     ]
 
 
+def _apply_symbol_strategy_bindings(runtime: TraderRuntime, snapshot: StrategyConfigSnapshot) -> None:
+    for symbol, candidate_strategy in snapshot.symbol_strategy_bindings.items():
+        current_strategy = runtime.active_symbol_strategies.get(symbol)
+        if (
+            current_strategy is not None
+            and current_strategy.strategy_def_id == candidate_strategy.strategy_def_id
+            and current_strategy.strategy_package_id == candidate_strategy.strategy_package_id
+        ):
+            runtime.active_symbol_strategies[symbol] = candidate_strategy
+            continue
+        if not _is_stronger_replacement(current_strategy, candidate_strategy):
+            continue
+
+        events = _build_strategy_handover_events(symbol, current_strategy, candidate_strategy)
+        runtime.symbol_handover_state[symbol] = {
+            "status": "handover_pending",
+            "events": events,
+            "next_strategy_def_id": candidate_strategy.strategy_def_id,
+            "next_strategy_package_id": candidate_strategy.strategy_package_id,
+        }
+        if current_strategy is not None:
+            runtime.history_store.append_strategy_replacement(
+                {
+                    "symbol": symbol,
+                    "current_strategy_def_id": current_strategy.strategy_def_id,
+                    "current_strategy_package_id": current_strategy.strategy_package_id,
+                    "next_strategy_def_id": candidate_strategy.strategy_def_id,
+                    "next_strategy_package_id": candidate_strategy.strategy_package_id,
+                    "current_score": current_strategy.score,
+                    "next_score": candidate_strategy.score,
+                    "score_basis": candidate_strategy.score_basis,
+                }
+            )
+        runtime.active_symbol_strategies[symbol] = candidate_strategy
+
+
 def _can_relax_to_snapshot_mode(runtime: TraderRuntime, snapshot: StrategyConfigSnapshot) -> bool:
     return (
         _RUN_MODE_PRIORITY[runtime.current_mode] > _RUN_MODE_PRIORITY[snapshot.market_mode]
@@ -376,6 +412,7 @@ async def _evaluate_symbol(runtime: TraderRuntime, symbol: str) -> None:
     latest_snapshot = runtime.snapshot_store.get_latest_snapshot()
     if latest_snapshot is not None:
         runtime.startup_snapshot = latest_snapshot
+        _apply_symbol_strategy_bindings(runtime, latest_snapshot)
         if _can_relax_to_snapshot_mode(runtime, latest_snapshot):
             runtime.current_mode = latest_snapshot.market_mode
             runtime.components.state_engine.set_run_mode(runtime.current_mode)
@@ -558,6 +595,7 @@ async def _run_trader(runtime: TraderRuntime) -> None:
     latest_snapshot = runtime.snapshot_store.get_latest_snapshot()
     if latest_snapshot is not None:
         runtime.startup_snapshot = latest_snapshot
+        _apply_symbol_strategy_bindings(runtime, latest_snapshot)
     runtime.startup_checkpoint = _load_latest_checkpoint(runtime)
     runtime.startup_checkpoint.active_snapshot_version = runtime.startup_snapshot.version_id
     if runtime.startup_checkpoint.checkpoint_id != "startup":
