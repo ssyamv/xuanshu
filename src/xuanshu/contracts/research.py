@@ -38,7 +38,7 @@ class StrategyPackage(BaseModel):
     failure_modes: list[NormalizedStr]
     invalidating_conditions: list[NormalizedStr]
     research_reason: NormalizedStr
-    score: float
+    score: float = Field(ge=0.0)
     score_basis: NormalizedStr
 
 

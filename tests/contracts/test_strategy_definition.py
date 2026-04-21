@@ -130,6 +130,34 @@ def test_strategy_package_rejects_missing_strategy_definition() -> None:
         StrategyPackage.model_validate(payload)
 
 
+def test_strategy_package_rejects_negative_score() -> None:
+    payload = {
+        "strategy_package_id": "pkg-1",
+        "generated_at": datetime.now(UTC),
+        "trigger": "schedule",
+        "symbol_scope": ["BTC-USDT-SWAP"],
+        "market_environment_scope": ["trend"],
+        "strategy_family": "volatility_break_retest",
+        "directionality": "long_only",
+        "entry_rules": {"signal": "dsl"},
+        "exit_rules": {"mode": "dsl"},
+        "position_sizing_rules": {"risk_fraction": 0.01},
+        "risk_constraints": {"max_hold_minutes": 240},
+        "parameter_set": {"fast_window": 20},
+        "backtest_summary": {"row_count": 100},
+        "performance_summary": {"return_percent": 67.5},
+        "failure_modes": ["late_reversal"],
+        "invalidating_conditions": ["gap_down"],
+        "research_reason": "ai candidate",
+        "strategy_definition": _sample_strategy_definition(),
+        "score": -1.0,
+        "score_basis": "backtest_return_percent",
+    }
+
+    with pytest.raises(ValidationError):
+        StrategyPackage.model_validate(payload)
+
+
 def test_strategy_snapshot_accepts_symbol_strategy_bindings() -> None:
     snapshot = StrategyConfigSnapshot.model_validate(
         {
