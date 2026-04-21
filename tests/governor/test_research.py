@@ -42,6 +42,10 @@ def test_strategy_research_engine_builds_candidate_package_from_history() -> Non
     assert package.performance_summary == {"return_percent": 3.0}
     assert package.score == 3.0
     assert package.strategy_definition.score == 3.0
+    assert any(
+        rule.get("op") == "time_stop_minutes" and rule.get("value") == 60
+        for rule in package.strategy_definition.exit_rules["any"]
+    )
 
 
 def test_strategy_research_engine_clamps_negative_return_score_to_zero() -> None:

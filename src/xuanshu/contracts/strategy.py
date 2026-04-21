@@ -68,7 +68,7 @@ class StrategyConfigSnapshot(BaseModel):
         )
 
     def allows_symbol(self, symbol: str) -> bool:
-        return symbol in self.symbol_whitelist
+        return symbol.strip() in self.symbol_whitelist
 
     def is_strategy_enabled(self, strategy_id: str) -> bool:
         return self.strategy_enable_flags.get(strategy_id, False)
@@ -77,11 +77,12 @@ class StrategyConfigSnapshot(BaseModel):
     def validate_temporal_window(self) -> "StrategyConfigSnapshot":
         if self.expires_at <= self.effective_from:
             raise ValueError("expires_at must be after effective_from")
-        whitelist = {symbol.strip() for symbol in self.symbol_whitelist}
+        whitelist = set(self.symbol_whitelist)
         for symbol in self.symbol_strategy_bindings:
-            if not symbol.strip():
+            normalized_symbol = symbol.strip()
+            if not normalized_symbol:
                 raise ValueError("symbol_strategy_bindings keys must not be blank")
-            if symbol not in whitelist:
+            if normalized_symbol not in whitelist:
                 raise ValueError("symbol_strategy_bindings keys must be listed in symbol_whitelist")
         return self
 
@@ -97,7 +98,7 @@ class StrategyConfigSnapshot(BaseModel):
     def validate_symbol_whitelist(cls, value: list[str]) -> list[str]:
         if _has_blank_symbol_entries(value):
             raise ValueError("symbol_whitelist must not contain blank symbols")
-        return value
+        return [symbol.strip() for symbol in value]
 
     @staticmethod
     def _normalize_reference_time(reference_time: datetime) -> datetime:

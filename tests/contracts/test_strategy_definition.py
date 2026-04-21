@@ -98,7 +98,16 @@ def test_strategy_definition_rejects_non_positive_exit_values(op: str, value: in
     payload = _sample_strategy_definition()
     payload["exit_rules"] = {"any": [{"op": op, "value": value}]}
 
-    with pytest.raises(ValidationError, match="must be positive"):
+    expected_message = "must be a positive integer" if op == "time_stop_minutes" else "must be positive"
+    with pytest.raises(ValidationError, match=expected_message):
+        StrategyDefinition.model_validate(payload)
+
+
+def test_strategy_definition_rejects_fractional_time_stop_minutes() -> None:
+    payload = _sample_strategy_definition()
+    payload["exit_rules"] = {"any": [{"op": "time_stop_minutes", "value": 12.5}]}
+
+    with pytest.raises(ValidationError, match="must be a positive integer"):
         StrategyDefinition.model_validate(payload)
 
 
@@ -249,6 +258,30 @@ def test_strategy_snapshot_accepts_symbol_strategy_bindings() -> None:
     )
 
     assert snapshot.symbol_strategy_bindings["BTC-USDT-SWAP"].score == 67.5
+
+
+def test_strategy_snapshot_strips_symbol_whitelist_entries() -> None:
+    snapshot = StrategyConfigSnapshot.model_validate(
+        {
+            "version_id": "snap-1",
+            "generated_at": "2026-04-21T00:00:00Z",
+            "effective_from": "2026-04-21T00:00:00Z",
+            "expires_at": "2026-04-21T00:05:00Z",
+            "symbol_whitelist": [" BTC-USDT-SWAP ", " ETH-USDT-SWAP "],
+            "strategy_enable_flags": {"risk_pause": True},
+            "risk_multiplier": 0.5,
+            "per_symbol_max_position": 0.12,
+            "max_leverage": 3,
+            "market_mode": "normal",
+            "approval_state": "approved",
+            "source_reason": "approved research package",
+            "ttl_sec": 300,
+        }
+    )
+
+    assert snapshot.symbol_whitelist == ["BTC-USDT-SWAP", "ETH-USDT-SWAP"]
+    assert snapshot.allows_symbol(" BTC-USDT-SWAP ")
+    assert snapshot.allows_symbol("ETH-USDT-SWAP")
 
 
 def test_strategy_package_rejects_entry_rule_mismatch() -> None:

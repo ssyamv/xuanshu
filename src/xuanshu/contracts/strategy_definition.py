@@ -148,5 +148,9 @@ class StrategyDefinition(BaseModel):
         if set(node.keys()) != {"op", "value"}:
             raise ValueError("exit primitive nodes must contain exactly op and value")
         value = node.get("value")
+        if op == "time_stop_minutes":
+            if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+                raise ValueError(f"{op} value must be a positive integer")
+            return
         if not isinstance(value, Real) or isinstance(value, bool) or value <= 0:
             raise ValueError(f"{op} value must be positive")

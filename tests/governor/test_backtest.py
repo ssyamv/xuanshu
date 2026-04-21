@@ -396,6 +396,15 @@ def test_backtest_validator_uses_exit_rules_not_parameter_set_for_exit_threshold
     assert baseline_report == drifted_report
 
 
+def test_backtest_validator_rejects_fractional_time_stop_minutes() -> None:
+    with pytest.raises(ValueError, match="time_stop_minutes must be a positive integer"):
+        BacktestValidator._extract_exit_rule_int(
+            {"any": [{"op": "time_stop_minutes", "value": 12.5}]},
+            "time_stop_minutes",
+            default=60,
+        )
+
+
 def test_backtest_validator_normalizes_row_order_before_simulation() -> None:
     rows = [
         {"timestamp": datetime(2026, 4, 19, 0, 4, tzinfo=UTC), "close": 104.0},

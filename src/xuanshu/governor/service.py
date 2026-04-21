@@ -608,8 +608,9 @@ class GovernorService:
 
         strategy_enable_flags = self._normalize_strategy_flags(candidate.strategy_enable_flags)
 
-        return candidate.model_copy(
-            update={
+        payload = candidate.model_dump(mode="python")
+        payload.update(
+            {
                 "market_mode": market_mode,
                 "risk_multiplier": risk_multiplier,
                 "per_symbol_max_position": per_symbol_max_position,
@@ -619,6 +620,14 @@ class GovernorService:
                 "source_reason": updated_reason,
             }
         )
+        if payload["symbol_whitelist"] != candidate.symbol_whitelist:
+            whitelist = set(payload["symbol_whitelist"])
+            payload["symbol_strategy_bindings"] = {
+                symbol: binding
+                for symbol, binding in payload["symbol_strategy_bindings"].items()
+                if symbol in whitelist
+            }
+        return StrategyConfigSnapshot.model_validate(payload)
 
     def build_health_summary(
         self,
@@ -656,7 +665,7 @@ class GovernorService:
         guardrail_symbols = guardrails.get("symbol_whitelist")
         if isinstance(guardrail_symbols, list):
             normalized_symbols = [
-                symbol
+                symbol.strip()
                 for symbol in guardrail_symbols
                 if isinstance(symbol, str) and symbol.strip()
             ]
@@ -676,7 +685,16 @@ class GovernorService:
 
         if not updates:
             return candidate
-        return candidate.model_copy(update=updates)
+        payload = candidate.model_dump(mode="python")
+        payload.update(updates)
+        if "symbol_whitelist" in updates:
+            whitelist = set(updates["symbol_whitelist"])
+            payload["symbol_strategy_bindings"] = {
+                symbol: binding
+                for symbol, binding in payload["symbol_strategy_bindings"].items()
+                if symbol in whitelist
+            }
+        return StrategyConfigSnapshot.model_validate(payload)
 
     def determine_trigger_reason(
         self,

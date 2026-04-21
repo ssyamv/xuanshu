@@ -502,6 +502,7 @@ class StrategyResearchEngine:
                     {"op": "crosses_above", "left": "close", "right": "sma_20"},
                     {"op": "take_profit_bps", "value": take_profit_bps},
                     {"op": "stop_loss_bps", "value": stop_loss_bps},
+                    {"op": "time_stop_minutes", "value": max_hold_minutes},
                 ]
             }
         else:
@@ -516,6 +517,7 @@ class StrategyResearchEngine:
                     {"op": "crosses_below", "left": "close", "right": "sma_20"},
                     {"op": "take_profit_bps", "value": take_profit_bps},
                     {"op": "stop_loss_bps", "value": stop_loss_bps},
+                    {"op": "time_stop_minutes", "value": max_hold_minutes},
                 ]
             }
 

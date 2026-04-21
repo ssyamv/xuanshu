@@ -308,15 +308,9 @@ class BacktestValidator:
         value = cls._find_exit_rule_value(exit_rules, key)
         if value is None:
             return default
-        if isinstance(value, bool) or not isinstance(value, Real | Decimal):
-            raise ValueError(f"{key} must be numeric")
-        try:
-            normalized_value = float(value)
-        except OverflowError as exc:
-            raise ValueError(f"{key} must be finite") from exc
-        if not math.isfinite(normalized_value) or normalized_value <= 0.0:
-            raise ValueError(f"{key} must be > 0")
-        return int(normalized_value)
+        if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+            raise ValueError(f"{key} must be a positive integer")
+        return value
 
     @classmethod
     def _find_exit_rule_value(cls, node: object, key: str) -> object | None:
