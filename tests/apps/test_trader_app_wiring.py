@@ -261,8 +261,10 @@ def test_single_host_deploy_contract_lists_prod_env_template() -> None:
     assert "XUANSHU_ENV=prod" in prod_env
     assert "XUANSHU_DEFAULT_RUN_MODE=halted" in prod_env
     assert "OKX_API_KEY=" in prod_env
-    assert "OPENAI_API_KEY=" in prod_env
     assert "TELEGRAM_BOT_TOKEN=" in prod_env
+    assert "OPENAI_API_KEY=" not in prod_env
+    assert "QDRANT_URL=" not in prod_env
+    assert "XUANSHU_RESEARCH_PROVIDER=" not in prod_env
 
 
 def test_single_host_deploy_doc_pins_compose_entrypoint() -> None:
@@ -273,31 +275,37 @@ def test_single_host_deploy_doc_pins_compose_entrypoint() -> None:
     assert "docker compose --env-file .env.prod up -d --build" in deploy_doc
     assert "restart: unless-stopped" in compose
     assert "XUANSHU_DEFAULT_RUN_MODE:" in compose
-    assert "XUANSHU_RESEARCH_PROVIDER:" in compose
-    assert "/dev/tcp/127.0.0.1/6333" in compose
-    assert "wget -q -O-" not in compose
-    assert "XUANSHU_CODEX_AUTH_DIR" in compose
-    assert ":/root/.codex" in compose
-    assert ":/root/.codex:ro" not in compose
+    assert "trader:" in compose
+    assert "notifier:" in compose
+    assert "redis:" in compose
+    assert "postgres:" in compose
+    assert "governor:" not in compose
+    assert "qdrant:" not in compose
+    assert "XUANSHU_RESEARCH_PROVIDER:" not in compose
+    assert "OPENAI_API_KEY:" not in compose
+    assert "QDRANT_URL:" not in compose
+    assert "XUANSHU_CODEX_AUTH_DIR" not in compose
     assert "apt-get update" in dockerfile
     assert "nodejs npm" in dockerfile
     assert "@openai/codex@0.121.0" in dockerfile
 
 
-def test_single_host_operations_docs_cover_research_triggering_and_approval() -> None:
+def test_single_host_operations_docs_describe_fixed_strategy_runtime() -> None:
     alerts = Path("docs/operations/alerts.md").read_text(encoding="utf-8")
     runbook = Path("docs/operations/runbook.md").read_text(encoding="utf-8")
+    logging = Path("docs/operations/logging.md").read_text(encoding="utf-8")
 
-    assert "manual research" in runbook
-    assert "schedule-driven research" in runbook
-    assert "event-triggered research" in runbook
-    assert "committee approval" in runbook
-    assert "XUANSHU_RESEARCH_PROVIDER=api|codex_cli" in runbook
-    assert "codex login" in runbook
-    assert "no automatic fallback" in runbook
-    assert "committee approval" in alerts
-    assert "research provider failure" in alerts
-    assert "codex login" in alerts
+    assert "fixed strategy snapshot" in runbook
+    assert "XUANSHU_FIXED_STRATEGY_SNAPSHOT_PATH" in runbook
+    assert "research" not in runbook.lower()
+    assert "committee" not in runbook.lower()
+    assert "codex" not in runbook.lower()
+    assert "governor" not in runbook.lower()
+    assert "qdrant" not in alerts.lower()
+    assert "research" not in alerts.lower()
+    assert "committee" not in alerts.lower()
+    assert "governor" not in logging.lower()
+    assert "docker compose logs -f trader notifier" in logging
 
 
 def test_trader_runtime_loads_starting_nav_from_settings(monkeypatch) -> None:

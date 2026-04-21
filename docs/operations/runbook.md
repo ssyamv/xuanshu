@@ -17,19 +17,15 @@ env $(grep -v '^#' .env.prod | xargs) uv run python -m xuanshu.ops.preflight
 - Keep `XUANSHU_DEFAULT_RUN_MODE=halted`.
 - Verify dependencies and logs.
 - Verify notifier command surface and recent checkpoint state.
+- Verify the fixed strategy snapshot path with `XUANSHU_FIXED_STRATEGY_SNAPSHOT_PATH` before release.
 - Only then allow trading mode release.
 
-## Governor Research
+## Fixed Strategy
 
-- Research is a Governor responsibility, not a Trader responsibility.
-- manual research is operator-led.
-- schedule-driven research runs on the planned cadence.
-- event-triggered research runs when a qualifying market or system event occurs.
-- Only research with committee approval may influence execution snapshots.
-- Configure the provider explicitly with `XUANSHU_RESEARCH_PROVIDER=api|codex_cli`.
-- Research provider selection has no automatic fallback; operators must switch it deliberately.
-- `codex_cli` requires a valid server-side `codex login` session before research runs.
-- Provider failures only fail the current research attempt; they must not be treated as Trader hot-path failures.
+- Generate or copy a reviewed fixed strategy snapshot onto the server.
+- Set `XUANSHU_FIXED_STRATEGY_SNAPSHOT_PATH` to that file.
+- Keep the snapshot `market_mode=halted` until logs and checkpoint state are understood.
+- Use the trader runtime as the only strategy execution path.
 
 ## Recovery
 
