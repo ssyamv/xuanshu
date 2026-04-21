@@ -74,7 +74,7 @@ def is_stronger_strategy_replacement(
     if current_basis != candidate_basis:
         return False
 
-    return candidate_score + 1e-12 >= current_score * 1.10
+    return candidate_score >= current_score * 1.10
 
 
 def _normalize_score_basis(score_basis: object) -> str | None:

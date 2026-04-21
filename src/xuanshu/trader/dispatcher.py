@@ -13,7 +13,7 @@ from xuanshu.state.engine import StateEngine
 _STRATEGY_HANDOVER_EVENT_ORDER = (
     "cancel_open_orders",
     "flatten_position",
-    "mark_replaced",
+    "mark_replaced_by_stronger_strategy",
     "activate_new_strategy",
 )
 

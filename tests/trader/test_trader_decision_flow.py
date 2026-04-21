@@ -115,12 +115,12 @@ def _build_binding(
 
 
 def test_trader_replacement_helper_requires_at_least_ten_percent_improvement() -> None:
-    current = _build_binding(score=100.0)
-    candidate = _build_binding(score=110.0)
-    near_miss = _build_binding(score=109.99)
+    current = _build_binding(score=60.0)
+    near_miss = _build_binding(score=65.999999999)
+    candidate = _build_binding(score=66.0)
 
-    assert trader_app._is_stronger_replacement(current, candidate) is True
     assert trader_app._is_stronger_replacement(current, near_miss) is False
+    assert trader_app._is_stronger_replacement(current, candidate) is True
 
 
 def test_trader_replacement_helper_accepts_candidate_when_current_is_missing() -> None:
@@ -163,7 +163,7 @@ def test_trader_build_strategy_handover_events_respects_required_order() -> None
     assert [event["event_type"] for event in events] == [
         "cancel_open_orders",
         "flatten_position",
-        "mark_replaced",
+        "mark_replaced_by_stronger_strategy",
         "activate_new_strategy",
     ]
 
