@@ -4,7 +4,7 @@ from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Annotated
 
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints, field_validator
 
 from xuanshu.contracts.strategy_definition import StrategyDefinition
 
@@ -27,7 +27,7 @@ class StrategyPackage(BaseModel):
     market_environment_scope: list[NormalizedStr] = Field(min_length=1)
     strategy_family: NormalizedStr
     directionality: NormalizedStr
-    strategy_definition: StrategyDefinition | None = None
+    strategy_definition: StrategyDefinition
     entry_rules: dict[str, object]
     exit_rules: dict[str, object]
     position_sizing_rules: dict[str, object]
@@ -41,17 +41,6 @@ class StrategyPackage(BaseModel):
     score: float = Field(default=0.0, ge=0.0)
     score_basis: NormalizedStr = "backtest_return_percent"
 
-    @model_validator(mode="after")
-    def validate_embedded_strategy_definition(self) -> "StrategyPackage":
-        if self.strategy_definition is None and (
-            self._uses_strategy_dsl(self.entry_rules) or self._uses_strategy_dsl(self.exit_rules)
-        ):
-            raise ValueError("strategy_definition is required")
-        return self
-
-    @staticmethod
-    def _uses_strategy_dsl(rules: dict[str, object]) -> bool:
-        return "all" in rules or "any" in rules
 
     @field_validator("generated_at")
     @classmethod
