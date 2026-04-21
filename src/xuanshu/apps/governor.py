@@ -33,6 +33,10 @@ from xuanshu.ops.runtime_logging import configure_runtime_logger
 
 _LOGGER = configure_runtime_logger("xuanshu.governor")
 _OKX_REST_BASE_URL = "https://www.okx.com"
+_MIN_RESEARCH_NET_PNL = 0.5
+_SEARCH_MODE_ACTIVE = "search_until_qualified"
+_SEARCH_MODE_OBSERVE = "observe_until_invalidated"
+_SEARCH_RETRY_DELAY_SEC = 5
 
 
 @dataclass(slots=True)
@@ -57,6 +61,10 @@ class ResearchCandidateBuildResult:
     status: str
     historical_rows: list[dict[str, object]] = field(default_factory=list)
     candidates: list[StrategyPackage] = field(default_factory=list)
+    candidate_historical_rows: dict[str, list[dict[str, object]]] = field(default_factory=dict)
+
+
+_RESEARCH_MARKET_ENVIRONMENTS = ("trend", "range", "mean_reversion")
 
 
 def build_governor_service() -> GovernorService:
@@ -136,32 +144,36 @@ async def _prepare_research_candidates(
     if not symbol_scope:
         return ResearchCandidateBuildResult(status="missing_symbol_summaries")
 
-    selected_symbol_scope: list[str] | None = None
-    historical_rows: list[dict[str, object]] = []
+    all_candidates: list[StrategyPackage] = []
+    candidate_historical_rows: dict[str, list[dict[str, object]]] = {}
+    first_historical_rows: list[dict[str, object]] = []
     for symbol in symbol_scope:
         candidate_scope = [symbol]
         candidate_rows = await _load_research_historical_rows(runtime, candidate_scope)
         if not candidate_rows:
             continue
-        selected_symbol_scope = candidate_scope
-        historical_rows = candidate_rows
-        break
+        if not first_historical_rows:
+            first_historical_rows = candidate_rows
+        for market_environment in _RESEARCH_MARKET_ENVIRONMENTS:
+            candidate_packages = await runtime.research_engine.build_candidate_packages_from_provider(
+                trigger=ResearchTrigger.SCHEDULE,
+                symbol_scope=candidate_scope,
+                market_environment=market_environment,
+                historical_rows=candidate_rows,
+                research_reason="governor strategy research",
+            )
+            for candidate in candidate_packages:
+                all_candidates.append(candidate)
+                candidate_historical_rows[candidate.strategy_package_id] = candidate_rows
 
-    if selected_symbol_scope is None:
+    if not all_candidates:
         return ResearchCandidateBuildResult(status="insufficient_history")
 
     return ResearchCandidateBuildResult(
         status="candidate_built",
-        historical_rows=historical_rows,
-        candidates=[
-            await runtime.research_engine.build_candidate_package_from_provider(
-                trigger=ResearchTrigger.SCHEDULE,
-                symbol_scope=selected_symbol_scope,
-                market_environment="trend",
-                historical_rows=historical_rows,
-                research_reason="governor strategy research",
-            )
-        ],
+        historical_rows=first_historical_rows,
+        candidates=all_candidates,
+        candidate_historical_rows=candidate_historical_rows,
     )
 
 
@@ -348,6 +360,7 @@ async def _wait_for_next_cycle(delay_sec: int) -> None:
 
 
 async def _run_governor_cycle(runtime: GovernorRuntime) -> None:
+    current_search_mode = _get_strategy_search_mode(runtime)
     state_summary = runtime.service.build_state_summary(
         runtime_store=runtime.runtime_store,
         snapshot_store=runtime.snapshot_store,
@@ -370,6 +383,7 @@ async def _run_governor_cycle(runtime: GovernorRuntime) -> None:
         **state_summary,
         "trigger_reason": trigger_reason,
         "governance_cases": governance_cases,
+        "strategy_search_mode": current_search_mode,
     }
     for opinion in state_summary.get("expert_opinions", []):
         if isinstance(opinion, dict):
@@ -388,11 +402,13 @@ async def _run_governor_cycle(runtime: GovernorRuntime) -> None:
     approval_record_id: str | None = None
     research_candidates: list[StrategyPackage] = []
     historical_rows: list[dict[str, object]] = []
+    candidate_historical_rows: dict[str, list[dict[str, object]]] = {}
     try:
         research_result = await _prepare_research_candidates(runtime, state_summary)
         research_status = research_result.status
         historical_rows = research_result.historical_rows
         research_candidates = research_result.candidates
+        candidate_historical_rows = research_result.candidate_historical_rows
         if research_candidates:
             research_provider_success = True
     except Exception as exc:
@@ -403,78 +419,133 @@ async def _run_governor_cycle(runtime: GovernorRuntime) -> None:
         historical_rows = []
 
     approved_research_candidates: list[StrategyPackage] = []
+    if current_search_mode == _SEARCH_MODE_OBSERVE and trigger_reason == "schedule":
+        runtime.runtime_store.set_strategy_search_mode(_SEARCH_MODE_OBSERVE)
+        runtime.history_store.append_governor_run(
+            {
+                "version_id": runtime.last_snapshot.version_id,
+                "status": "observing",
+                "error": None,
+                "research_provider": research_provider,
+                "research_status": "idle",
+                "research_provider_success": None,
+                "research_error": None,
+                "research_candidate_count": 0,
+                "approved_research_candidate_ids": [],
+                "validation_status": "not_requested",
+                "validation_error": None,
+                "approval_status": "not_requested",
+                "approval_error": None,
+                "backtest_report_id": None,
+                "approval_record_id": None,
+            }
+        )
+        runtime.runtime_store.set_governor_health_summary(
+            runtime.service.build_health_summary(
+                snapshot=runtime.last_snapshot,
+                trigger_reason=trigger_reason,
+                status="observing",
+                consecutive_failures=runtime.consecutive_failures,
+            )
+        )
+        _LOGGER.info(
+            "cycle_completed",
+            extra={
+                "service": "governor",
+                "trigger_reason": trigger_reason,
+                "status": "observing",
+                "error": None,
+                "snapshot_version": runtime.last_snapshot.version_id,
+                "market_mode": runtime.last_snapshot.market_mode.value,
+                "research_status": "idle",
+                "research_candidate_count": 0,
+                "approved_research_candidate_count": 0,
+                "consecutive_failures": runtime.consecutive_failures,
+            },
+        )
+        return
+    if current_search_mode == _SEARCH_MODE_OBSERVE and trigger_reason != "schedule":
+        current_search_mode = _SEARCH_MODE_ACTIVE
+        runtime.runtime_store.set_strategy_search_mode(current_search_mode)
     if research_candidates:
-        expert_opinions = runtime.service.build_expert_opinions(
-            state_summary,
-            now=datetime.now(UTC),
-        )
-        committee_summary = runtime.service.build_committee_summary(
-            expert_opinions,
-            research_candidates=research_candidates,
-        )
-        state_summary = {
-            **state_summary,
-            "committee_summary": committee_summary,
-        }
-
-        candidate = research_candidates[0]
-        if not runtime.history_store.has_strategy_package(
-            strategy_package_id=candidate.strategy_package_id,
-        ):
-            runtime.history_store.append_strategy_package(candidate.model_dump(mode="json"))
-        try:
-            backtest_report = runtime.backtest_validator.validate(
-                package=candidate,
-                historical_rows=historical_rows,
-            )
-        except Exception as exc:
-            validation_status = "failed"
-            validation_error = str(exc)
-            approval_status = "validation_failed"
-            runtime.runtime_store.set_pending_approval_summary(
-                {
-                    "pending_count": 0,
-                    "latest_strategy_package_id": candidate.strategy_package_id,
-                    "approval_status": approval_status,
-                }
-            )
-            state_summary["validation_status"] = validation_status
-            state_summary["validation_error"] = validation_error
-        else:
-            validation_status = "succeeded"
-            backtest_report_id = backtest_report.backtest_report_id
+        validated_candidates: list[tuple[StrategyPackage, BacktestReport]] = []
+        best_report_under_threshold: tuple[StrategyPackage, BacktestReport] | None = None
+        candidate_validation_errors: list[str] = []
+        for candidate in research_candidates:
+            if not runtime.history_store.has_strategy_package(
+                strategy_package_id=candidate.strategy_package_id,
+            ):
+                runtime.history_store.append_strategy_package(candidate.model_dump(mode="json"))
+            try:
+                backtest_report = runtime.backtest_validator.validate(
+                    package=candidate,
+                    historical_rows=candidate_historical_rows.get(candidate.strategy_package_id, historical_rows),
+                )
+            except Exception as exc:
+                candidate_validation_errors.append(str(exc))
+                continue
             if not runtime.history_store.has_backtest_report(
                 backtest_report_id=backtest_report.backtest_report_id,
             ):
                 runtime.history_store.append_backtest_report(backtest_report.model_dump(mode="json"))
-            if backtest_report.net_pnl <= 0.0:
+            if backtest_report.net_pnl >= _MIN_RESEARCH_NET_PNL:
+                validated_candidates.append((candidate, backtest_report))
+            elif (
+                best_report_under_threshold is None
+                or backtest_report.net_pnl > best_report_under_threshold[1].net_pnl
+            ):
+                best_report_under_threshold = (candidate, backtest_report)
+
+        if validated_candidates or best_report_under_threshold is not None:
+            validated_candidates.sort(key=lambda item: item[1].net_pnl, reverse=True)
+            if not validated_candidates:
                 validation_status = "failed"
-                validation_error = (
-                    f"candidate net_pnl {backtest_report.net_pnl} "
-                    "did not exceed minimum quality threshold 0.0"
-                )
                 approval_status = "validation_failed"
-                runtime.runtime_store.set_pending_approval_summary(
-                    {
-                        "pending_count": 0,
-                        "latest_strategy_package_id": candidate.strategy_package_id,
-                        "approval_status": approval_status,
-                    }
-                )
+                if best_report_under_threshold is not None:
+                    candidate, backtest_report = best_report_under_threshold
+                    validation_error = (
+                        f"best candidate net_pnl {backtest_report.net_pnl} "
+                        f"did not exceed minimum quality threshold {_MIN_RESEARCH_NET_PNL}"
+                    )
+                    runtime.runtime_store.set_pending_approval_summary(
+                        {
+                            "pending_count": 0,
+                            "latest_strategy_package_id": candidate.strategy_package_id,
+                            "approval_status": approval_status,
+                        }
+                    )
+                    runtime.runtime_store.set_backtest_health_summary(
+                        {
+                            "status": "candidate_rejected_low_quality",
+                            "candidate_strategy_package_id": candidate.strategy_package_id,
+                            "candidate_backtest_report_id": backtest_report.backtest_report_id,
+                            "minimum_net_pnl": _MIN_RESEARCH_NET_PNL,
+                            "best_net_pnl": backtest_report.net_pnl,
+                        }
+                    )
                 state_summary["validation_status"] = validation_status
                 state_summary["validation_error"] = validation_error
-                runtime.runtime_store.set_backtest_health_summary(
-                    {
-                        "status": "candidate_rejected_low_quality",
-                        "candidate_strategy_package_id": candidate.strategy_package_id,
-                        "candidate_backtest_report_id": backtest_report.backtest_report_id,
-                    }
-                )
-                backtest_report_id = None
             else:
+                research_candidates = [candidate for candidate, _report in validated_candidates]
+                expert_opinions = runtime.service.build_expert_opinions(
+                    state_summary,
+                    now=datetime.now(UTC),
+                )
+                committee_summary = runtime.service.build_committee_summary(
+                    expert_opinions,
+                    research_candidates=research_candidates,
+                )
+                state_summary = {
+                    **state_summary,
+                    "committee_summary": committee_summary,
+                }
+
+                candidate, backtest_report = validated_candidates[0]
+                validation_status = "succeeded"
+                backtest_report_id = backtest_report.backtest_report_id
                 baseline_report = _build_baseline_backtest_report(
                     runtime=runtime,
-                    historical_rows=historical_rows,
+                    historical_rows=candidate_historical_rows.get(candidate.strategy_package_id, historical_rows),
                 )
                 if baseline_report is not None and backtest_report.net_pnl <= baseline_report.net_pnl:
                     validation_status = "failed"
@@ -533,6 +604,7 @@ async def _run_governor_cycle(runtime: GovernorRuntime) -> None:
                         ApprovalDecision.APPROVED_WITH_GUARDRAILS,
                     }:
                         approved_research_candidates = [candidate]
+                        runtime.runtime_store.set_strategy_search_mode(_SEARCH_MODE_OBSERVE)
                         state_summary["research_candidates"] = [candidate.model_dump(mode="json")]
                         state_summary["approved_source_reason"] = _APPROVED_RESEARCH_SOURCE_REASON
                         runtime.runtime_store.set_latest_approved_package_summary(
@@ -545,8 +617,21 @@ async def _run_governor_cycle(runtime: GovernorRuntime) -> None:
                             }
                         )
 
-        state_summary["validation_status"] = validation_status
-        state_summary["validation_error"] = validation_error
+                state_summary["validation_status"] = validation_status
+                state_summary["validation_error"] = validation_error
+        elif candidate_validation_errors:
+            validation_status = "failed"
+            validation_error = candidate_validation_errors[0]
+            approval_status = "validation_failed"
+            runtime.runtime_store.set_pending_approval_summary(
+                {
+                    "pending_count": 0,
+                    "latest_strategy_package_id": research_candidates[-1].strategy_package_id,
+                    "approval_status": approval_status,
+                }
+            )
+            state_summary["validation_status"] = validation_status
+            state_summary["validation_error"] = validation_error
 
     published_snapshot: StrategyConfigSnapshot | None = None
     approved_research_candidate_ids = [
@@ -596,6 +681,8 @@ async def _run_governor_cycle(runtime: GovernorRuntime) -> None:
             trigger_reason=trigger_reason,
         )
     runtime.last_snapshot = published_snapshot or result.snapshot
+    if not approved_research_candidate_ids:
+        runtime.runtime_store.set_strategy_search_mode(_SEARCH_MODE_ACTIVE)
     runtime.history_store.append_governor_run(
         {
             "version_id": runtime.last_snapshot.version_id,
@@ -652,6 +739,7 @@ async def _run_governor_cycle(runtime: GovernorRuntime) -> None:
 async def _run_governor_loop(runtime: GovernorRuntime) -> None:
     while True:
         await _run_governor_cycle(runtime)
+        current_search_mode = _get_strategy_search_mode(runtime)
         state_summary = runtime.service.build_state_summary(
             runtime_store=runtime.runtime_store,
             snapshot_store=runtime.snapshot_store,
@@ -664,8 +752,41 @@ async def _run_governor_loop(runtime: GovernorRuntime) -> None:
             latest_snapshot=runtime.last_snapshot,
             now=datetime.now(UTC),
         )
-        delay_sec = 0 if trigger_reason != "schedule" else runtime.settings.governor_interval_sec
+        if current_search_mode == _SEARCH_MODE_ACTIVE:
+            delay_sec = 0 if trigger_reason != "schedule" else _SEARCH_RETRY_DELAY_SEC
+        else:
+            delay_sec = 0 if trigger_reason != "schedule" else runtime.settings.governor_interval_sec
         await _wait_for_next_cycle(delay_sec)
+
+
+def _get_strategy_search_mode(runtime: GovernorRuntime) -> str:
+    latest_runs = runtime.history_store.list_recent_rows("governor_runs", limit=1)
+    if latest_runs:
+        latest_run = latest_runs[0]
+        approved_ids = latest_run.get("approved_research_candidate_ids")
+        status = latest_run.get("status")
+        if isinstance(approved_ids, list) and approved_ids and status == "published":
+            runtime.runtime_store.set_strategy_search_mode(_SEARCH_MODE_OBSERVE)
+            return _SEARCH_MODE_OBSERVE
+        if status in {
+            "validation_failed",
+            "approval_rejected",
+            "approval_pending",
+            "approval_needs_revision",
+            "approval_invalid",
+            "frozen",
+        } and (not isinstance(approved_ids, list) or not approved_ids):
+            runtime.runtime_store.set_strategy_search_mode(_SEARCH_MODE_ACTIVE)
+            return _SEARCH_MODE_ACTIVE
+    current = runtime.runtime_store.get_strategy_search_mode()
+    if current in {_SEARCH_MODE_ACTIVE, _SEARCH_MODE_OBSERVE}:
+        return current
+    latest_approved = runtime.runtime_store.get_latest_approved_package_summary()
+    if isinstance(latest_approved, dict) and isinstance(latest_approved.get("latest_strategy_package_id"), str):
+        runtime.runtime_store.set_strategy_search_mode(_SEARCH_MODE_OBSERVE)
+        return _SEARCH_MODE_OBSERVE
+    runtime.runtime_store.set_strategy_search_mode(_SEARCH_MODE_ACTIVE)
+    return _SEARCH_MODE_ACTIVE
 
 
 def _build_baseline_backtest_report(

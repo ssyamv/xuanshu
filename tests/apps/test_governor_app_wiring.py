@@ -6,6 +6,13 @@ from pydantic import ValidationError
 
 import xuanshu.apps.governor as governor_app
 from xuanshu.contracts.approval import ApprovalDecision
+from xuanshu.contracts.backtest import (
+    BacktestDatasetRange,
+    BacktestReport,
+    OverfitRisk,
+    RegimeFit,
+    TradeCountSufficiency,
+)
 from xuanshu.contracts.research import ResearchTrigger, StrategyPackage
 from xuanshu.core.enums import ApprovalState, RunMode
 from xuanshu.governor.research import StrategyResearchEngine
@@ -284,15 +291,116 @@ def test_governor_research_bridge_builds_candidates_from_store_backed_position_r
         )
     )
 
-    assert len(candidates) == 1
-    assert candidates[0].symbol_scope == ["BTC-USDT-SWAP"]
-    assert candidates[0].backtest_summary == {
+    assert len(candidates) >= 3
+    first_candidate = candidates[0]
+    assert first_candidate.symbol_scope == ["BTC-USDT-SWAP"]
+    assert first_candidate.backtest_summary == {
         "row_count": 4,
         "start_close": 101.0,
         "end_close": 104.0,
         "close_change_bps": 297.029703,
     }
-    assert candidates[0].entry_rules["signal"]
+    assert {tuple(candidate.symbol_scope) for candidate in candidates} == {("BTC-USDT-SWAP",)}
+    assert {candidate.market_environment_scope[0] for candidate in candidates} >= {"trend", "range", "mean_reversion"}
+    assert first_candidate.entry_rules["signal"]
+
+
+def test_governor_research_bridge_builds_candidates_for_each_symbol_scope(monkeypatch) -> None:
+    _set_required_settings_env(monkeypatch)
+    _clear_unrelated_settings_env(monkeypatch)
+    btc_candles = _build_market_candles([100.0, 101.0, 102.0, 103.0, 104.0])
+    eth_candles = _build_market_candles([200.0, 201.0, 202.0, 203.0, 204.0])
+
+    class _MarketDataClient:
+        async def fetch_history_candles(self, symbol: str, **_: object) -> list[dict[str, object]]:
+            return btc_candles if symbol == "BTC-USDT-SWAP" else eth_candles
+
+    class _Provider:
+        provider_name = ResearchProviderName.CODEX_CLI
+
+        async def generate_analyses(self, *, symbol_scope, market_environment, historical_rows, research_reason):
+            return [
+                research_providers_module.ResearchProviderSuggestion(
+                    thesis=f"{symbol_scope[0]} {market_environment}",
+                    strategy_family="breakout",
+                    entry_signal="breakout_confirmed",
+                    exit_stop_loss_bps=50,
+                    exit_take_profit_bps=120,
+                    risk_fraction=0.0025,
+                    max_hold_minutes=60,
+                    failure_modes=[],
+                    invalidating_conditions=[],
+                )
+            ]
+
+    monkeypatch.setattr(governor_app, "build_market_data_client", lambda settings: _MarketDataClient())
+    monkeypatch.setattr(
+        governor_app,
+        "build_research_engine",
+        lambda settings: StrategyResearchEngine(provider=_Provider()),
+    )
+
+    runtime = governor_app.build_governor_runtime()
+    result = asyncio.run(
+        governor_app._prepare_research_candidates(
+            runtime,
+            {
+                "symbol_summaries": [
+                    {"symbol": "BTC-USDT-SWAP"},
+                    {"symbol": "ETH-USDT-SWAP"},
+                ]
+            },
+        )
+    )
+
+    assert result.status == "candidate_built"
+    assert {tuple(candidate.symbol_scope) for candidate in result.candidates} == {
+        ("BTC-USDT-SWAP",),
+        ("ETH-USDT-SWAP",),
+    }
+
+
+def test_governor_research_bridge_builds_candidates_across_market_environments(monkeypatch) -> None:
+    _set_required_settings_env(monkeypatch)
+    _clear_unrelated_settings_env(monkeypatch)
+    _stub_market_data_client(monkeypatch, _build_market_candles([100.0, 101.0, 102.0, 103.0, 104.0]))
+    calls: list[tuple[tuple[str, ...], str]] = []
+
+    class _Provider:
+        provider_name = ResearchProviderName.CODEX_CLI
+
+        async def generate_analyses(self, *, symbol_scope, market_environment, historical_rows, research_reason):
+            calls.append((tuple(symbol_scope), market_environment))
+            return [
+                research_providers_module.ResearchProviderSuggestion(
+                    thesis=f"{market_environment} thesis",
+                    strategy_family="breakout" if market_environment == "trend" else "mean_reversion",
+                    entry_signal="breakout_confirmed" if market_environment == "trend" else "range_retest",
+                    exit_stop_loss_bps=50,
+                    exit_take_profit_bps=120,
+                    risk_fraction=0.0025,
+                    max_hold_minutes=60,
+                    failure_modes=[],
+                    invalidating_conditions=[],
+                )
+            ]
+
+    monkeypatch.setattr(
+        governor_app,
+        "build_research_engine",
+        lambda settings: StrategyResearchEngine(provider=_Provider()),
+    )
+
+    runtime = governor_app.build_governor_runtime()
+    result = asyncio.run(
+        governor_app._prepare_research_candidates(
+            runtime,
+            {"symbol_summaries": [{"symbol": "BTC-USDT-SWAP"}]},
+        )
+    )
+
+    assert result.status == "candidate_built"
+    assert {market_environment for _scope, market_environment in calls} >= {"trend", "range", "mean_reversion"}
 
 
 def test_governor_runtime_runs_one_cycle_and_publishes_snapshot(monkeypatch) -> None:
@@ -460,6 +568,7 @@ def test_governor_runtime_publishes_snapshot_to_shared_redis_store(monkeypatch) 
 def test_governor_cycle_can_publish_snapshot_from_approved_research(monkeypatch) -> None:
     _set_required_settings_env(monkeypatch)
     _clear_unrelated_settings_env(monkeypatch)
+    monkeypatch.setattr(governor_app, "_MIN_RESEARCH_NET_PNL", 0.0)
     captured_state_summary = None
 
     research_package = StrategyPackage(
@@ -542,6 +651,7 @@ def test_governor_cycle_can_publish_snapshot_from_approved_research(monkeypatch)
 def test_governor_cycle_does_not_send_unapproved_research_downstream(monkeypatch) -> None:
     _set_required_settings_env(monkeypatch)
     _clear_unrelated_settings_env(monkeypatch)
+    monkeypatch.setattr(governor_app, "_MIN_RESEARCH_NET_PNL", 0.0)
     captured_state_summary = None
     history_store = PostgresRuntimeStore(dsn="postgresql://xuanshu:xuanshu@localhost:5432/xuanshu")
     fake_redis = _FakeRedis()
@@ -647,6 +757,7 @@ def test_governor_cycle_does_not_send_unapproved_research_downstream(monkeypatch
 def test_governor_cycle_auto_approves_research_after_validation_and_publishes(monkeypatch) -> None:
     _set_required_settings_env(monkeypatch)
     _clear_unrelated_settings_env(monkeypatch)
+    monkeypatch.setattr(governor_app, "_MIN_RESEARCH_NET_PNL", 0.0)
     _stub_market_data_client(monkeypatch, _build_market_candles([100.0, 101.0, 102.0, 103.0, 104.0]))
     history_store = PostgresRuntimeStore(dsn="postgresql://xuanshu:xuanshu@localhost:5432/xuanshu")
     fake_redis = _FakeRedis()
@@ -718,17 +829,20 @@ def test_governor_cycle_auto_approves_research_after_validation_and_publishes(mo
 
     assert len(runtime.published_snapshots) == 1
     assert runtime.last_snapshot.version_id.startswith("governor-")
-    assert len(history_store.written_rows["strategy_packages"]) == 1
-    assert len(history_store.written_rows["backtest_reports"]) == 1
+    assert len(history_store.written_rows["strategy_packages"]) >= 3
+    assert len(history_store.written_rows["backtest_reports"]) >= 3
     assert len(history_store.written_rows["approval_records"]) == 1
     assert history_store.written_rows["approval_records"][0]["decision"] == "approved"
     assert len(history_store.written_rows["strategy_snapshots"]) == 1
+    approved_package_id = history_store.written_rows["approval_records"][0]["strategy_package_id"]
+    approved_backtest_report_id = history_store.written_rows["approval_records"][0]["backtest_report_id"]
     assert runtime.runtime_store.get_pending_approval_summary() == {
         "pending_count": 0,
-        "latest_strategy_package_id": history_store.written_rows["strategy_packages"][0]["strategy_package_id"],
-        "latest_backtest_report_id": history_store.written_rows["backtest_reports"][0]["backtest_report_id"],
+        "latest_strategy_package_id": approved_package_id,
+        "latest_backtest_report_id": approved_backtest_report_id,
         "approval_status": "approved",
     }
+    expected_candidate_count = len(history_store.written_rows["strategy_packages"])
     assert history_store.written_rows["governor_runs"] == [
         {
             "version_id": runtime.last_snapshot.version_id,
@@ -738,22 +852,467 @@ def test_governor_cycle_auto_approves_research_after_validation_and_publishes(mo
             "research_status": "candidate_built",
             "research_provider_success": True,
             "research_error": None,
-            "research_candidate_count": 1,
-            "approved_research_candidate_ids": [history_store.written_rows["strategy_packages"][0]["strategy_package_id"]],
+            "research_candidate_count": expected_candidate_count,
+            "approved_research_candidate_ids": [approved_package_id],
             "validation_status": "succeeded",
             "validation_error": None,
             "approval_status": "approved",
             "approval_error": None,
-            "backtest_report_id": history_store.written_rows["backtest_reports"][0]["backtest_report_id"],
+            "backtest_report_id": approved_backtest_report_id,
             "approval_record_id": history_store.written_rows["approval_records"][0]["approval_record_id"],
         }
     ]
+
+
+def test_governor_cycle_selects_highest_net_pnl_candidate_above_threshold(monkeypatch) -> None:
+    _set_required_settings_env(monkeypatch)
+    _clear_unrelated_settings_env(monkeypatch)
+    history_store = PostgresRuntimeStore(dsn="postgresql://xuanshu:xuanshu@localhost:5432/xuanshu")
+    fake_redis = _FakeRedis()
+
+    class _Runner:
+        async def run(self, state_summary):
+            now = datetime.now(UTC)
+            return {
+                "version_id": "snap-auto-approved",
+                "generated_at": now.isoformat().replace("+00:00", "Z"),
+                "effective_from": now.isoformat().replace("+00:00", "Z"),
+                "expires_at": (now + timedelta(minutes=5)).isoformat().replace("+00:00", "Z"),
+                "symbol_whitelist": ["BTC-USDT-SWAP"],
+                "strategy_enable_flags": {"breakout": True, "mean_reversion": False, "risk_pause": True},
+                "risk_multiplier": 0.5,
+                "per_symbol_max_position": 0.12,
+                "max_leverage": 3,
+                "market_mode": RunMode.NORMAL,
+                "approval_state": ApprovalState.APPROVED,
+                "source_reason": "cycle",
+                "ttl_sec": 300,
+            }
+
+    low_candidate = StrategyPackage(
+        strategy_package_id="pkg-low",
+        generated_at=datetime.now(UTC),
+        trigger=ResearchTrigger.SCHEDULE,
+        symbol_scope=["BTC-USDT-SWAP"],
+        market_environment_scope=["trend"],
+        strategy_family="breakout",
+        directionality="long_short",
+        entry_rules={"signal": "breakout_confirmed"},
+        exit_rules={"stop_loss_bps": 50, "take_profit_bps": 120},
+        position_sizing_rules={"risk_fraction": 0.0025},
+        risk_constraints={"max_hold_minutes": 60},
+        parameter_set={"lookback": 20},
+        backtest_summary={"row_count": 10},
+        performance_summary={"return_percent": 0.2},
+        failure_modes=[],
+        invalidating_conditions=[],
+        research_reason="low candidate",
+    )
+    high_candidate = low_candidate.model_copy(
+        update={
+            "strategy_package_id": "pkg-high",
+            "exit_rules": {"stop_loss_bps": 35, "take_profit_bps": 180},
+            "position_sizing_rules": {"risk_fraction": 0.004},
+            "research_reason": "high candidate",
+        }
+    )
+    historical_rows = [
+        {"timestamp": datetime(2026, 4, 19, 0, 0, tzinfo=UTC), "close": 100.0},
+        {"timestamp": datetime(2026, 4, 19, 0, 5, tzinfo=UTC), "close": 101.0},
+        {"timestamp": datetime(2026, 4, 19, 0, 10, tzinfo=UTC), "close": 102.0},
+    ]
+
+    async def _candidate_result(*_args, **_kwargs):
+        return governor_app.ResearchCandidateBuildResult(
+            status="candidate_built",
+            historical_rows=historical_rows,
+            candidates=[low_candidate, high_candidate],
+        )
+
+    class _BacktestValidator:
+        def validate(self, *, package, historical_rows):
+            net_pnl = 0.55 if package.strategy_package_id == "pkg-low" else 0.82
+            return BacktestReport(
+                backtest_report_id=f"{package.strategy_package_id}-report",
+                strategy_package_id=package.strategy_package_id,
+                symbol_scope=package.symbol_scope,
+                dataset_range=BacktestDatasetRange(
+                    start=historical_rows[0]["timestamp"],
+                    end=historical_rows[-1]["timestamp"],
+                    regime_fit=RegimeFit.ALIGNED,
+                ),
+                sample_count=len(historical_rows),
+                trade_count=120,
+                trade_count_sufficiency=TradeCountSufficiency.SUFFICIENT,
+                net_pnl=net_pnl,
+                max_drawdown=0.1,
+                win_rate=0.5,
+                profit_factor=1.3,
+                stability_score=0.8,
+                overfit_risk=OverfitRisk.LOW,
+                failure_modes=[],
+                invalidating_conditions=[],
+                generated_at=historical_rows[-1]["timestamp"],
+            )
+
+    monkeypatch.setattr(governor_app, "_prepare_research_candidates", _candidate_result)
+    monkeypatch.setattr(governor_app, "build_governor_client", lambda settings: GovernorClient(_Runner()))
+    monkeypatch.setattr(governor_app, "build_history_store", lambda settings: history_store)
+    monkeypatch.setattr(
+        governor_app,
+        "build_runtime_state_store",
+        lambda settings: governor_app.RedisRuntimeStateStore(redis_client=fake_redis),
+    )
+
+    runtime = governor_app.build_governor_runtime()
+    runtime.backtest_validator = _BacktestValidator()
+
+    asyncio.run(governor_app._run_governor_cycle(runtime))
+
+    assert len(history_store.written_rows["strategy_packages"]) == 2
+    assert len(history_store.written_rows["backtest_reports"]) == 2
+    assert history_store.written_rows["approval_records"][0]["strategy_package_id"] == "pkg-high"
+    assert history_store.written_rows["governor_runs"][-1]["approved_research_candidate_ids"] == ["pkg-high"]
+    assert runtime.runtime_store.get_latest_approved_package_summary()["latest_strategy_package_id"] == "pkg-high"
+
+
+def test_governor_cycle_rejects_all_candidates_below_required_net_pnl(monkeypatch) -> None:
+    _set_required_settings_env(monkeypatch)
+    _clear_unrelated_settings_env(monkeypatch)
+    history_store = PostgresRuntimeStore(dsn="postgresql://xuanshu:xuanshu@localhost:5432/xuanshu")
+    fake_redis = _FakeRedis()
+
+    candidate = StrategyPackage(
+        strategy_package_id="pkg-low",
+        generated_at=datetime.now(UTC),
+        trigger=ResearchTrigger.SCHEDULE,
+        symbol_scope=["BTC-USDT-SWAP"],
+        market_environment_scope=["trend"],
+        strategy_family="breakout",
+        directionality="long_short",
+        entry_rules={"signal": "breakout_confirmed"},
+        exit_rules={"stop_loss_bps": 50, "take_profit_bps": 120},
+        position_sizing_rules={"risk_fraction": 0.0025},
+        risk_constraints={"max_hold_minutes": 60},
+        parameter_set={"lookback": 20},
+        backtest_summary={"row_count": 10},
+        performance_summary={"return_percent": 0.2},
+        failure_modes=[],
+        invalidating_conditions=[],
+        research_reason="low candidate",
+    )
+    historical_rows = [
+        {"timestamp": datetime(2026, 4, 19, 0, 0, tzinfo=UTC), "close": 100.0},
+        {"timestamp": datetime(2026, 4, 19, 0, 5, tzinfo=UTC), "close": 101.0},
+        {"timestamp": datetime(2026, 4, 19, 0, 10, tzinfo=UTC), "close": 102.0},
+    ]
+
+    async def _candidate_result(*_args, **_kwargs):
+        return governor_app.ResearchCandidateBuildResult(
+            status="candidate_built",
+            historical_rows=historical_rows,
+            candidates=[candidate],
+        )
+
+    class _BacktestValidator:
+        def validate(self, *, package, historical_rows):
+            return BacktestReport(
+                backtest_report_id=f"{package.strategy_package_id}-report",
+                strategy_package_id=package.strategy_package_id,
+                symbol_scope=package.symbol_scope,
+                dataset_range=BacktestDatasetRange(
+                    start=historical_rows[0]["timestamp"],
+                    end=historical_rows[-1]["timestamp"],
+                    regime_fit=RegimeFit.ALIGNED,
+                ),
+                sample_count=len(historical_rows),
+                trade_count=120,
+                trade_count_sufficiency=TradeCountSufficiency.SUFFICIENT,
+                net_pnl=0.31,
+                max_drawdown=0.1,
+                win_rate=0.5,
+                profit_factor=1.1,
+                stability_score=0.7,
+                overfit_risk=OverfitRisk.LOW,
+                failure_modes=[],
+                invalidating_conditions=[],
+                generated_at=historical_rows[-1]["timestamp"],
+            )
+
+    class _Runner:
+        async def run(self, state_summary):
+            raise AssertionError("governor client should not run when all research candidates fail net_pnl filter")
+
+    monkeypatch.setattr(governor_app, "_prepare_research_candidates", _candidate_result)
+    monkeypatch.setattr(governor_app, "build_governor_client", lambda settings: GovernorClient(_Runner()))
+    monkeypatch.setattr(governor_app, "build_history_store", lambda settings: history_store)
+    monkeypatch.setattr(
+        governor_app,
+        "build_runtime_state_store",
+        lambda settings: governor_app.RedisRuntimeStateStore(redis_client=fake_redis),
+    )
+
+    runtime = governor_app.build_governor_runtime()
+    runtime.backtest_validator = _BacktestValidator()
+
+    asyncio.run(governor_app._run_governor_cycle(runtime))
+
+    assert runtime.last_snapshot.version_id == "bootstrap"
+    assert history_store.written_rows["governor_runs"][-1]["status"] == "validation_failed"
+    assert "minimum quality threshold 0.5" in history_store.written_rows["governor_runs"][-1]["validation_error"]
+    assert runtime.runtime_store.get_pending_approval_summary() == {
+        "pending_count": 0,
+        "latest_strategy_package_id": "pkg-low",
+        "approval_status": "validation_failed",
+    }
+    assert runtime.runtime_store.get_backtest_health_summary()["status"] == "candidate_rejected_low_quality"
+
+
+def test_governor_cycle_skips_invalid_candidates_and_keeps_evaluating_remaining_candidates(monkeypatch) -> None:
+    _set_required_settings_env(monkeypatch)
+    _clear_unrelated_settings_env(monkeypatch)
+    history_store = PostgresRuntimeStore(dsn="postgresql://xuanshu:xuanshu@localhost:5432/xuanshu")
+    fake_redis = _FakeRedis()
+
+    invalid_candidate = StrategyPackage(
+        strategy_package_id="pkg-invalid",
+        generated_at=datetime.now(UTC),
+        trigger=ResearchTrigger.SCHEDULE,
+        symbol_scope=["BTC-USDT-SWAP"],
+        market_environment_scope=["range"],
+        strategy_family="mean_reversion",
+        directionality="long_short",
+        entry_rules={"signal": "range_retest"},
+        exit_rules={"stop_loss_bps": 50, "take_profit_bps": 120},
+        position_sizing_rules={"risk_fraction": 0.0025},
+        risk_constraints={"max_hold_minutes": 60},
+        parameter_set={"lookback": 1},
+        backtest_summary={"row_count": 10},
+        performance_summary={"return_percent": 0.2},
+        failure_modes=[],
+        invalidating_conditions=[],
+        research_reason="invalid candidate",
+    )
+    valid_candidate = invalid_candidate.model_copy(
+        update={
+            "strategy_package_id": "pkg-valid",
+            "market_environment_scope": ["trend"],
+            "strategy_family": "breakout",
+            "entry_rules": {"signal": "breakout_confirmed"},
+            "parameter_set": {"lookback": 2},
+            "research_reason": "valid candidate",
+        }
+    )
+    historical_rows = [
+        {"timestamp": datetime(2026, 4, 19, 0, 0, tzinfo=UTC), "close": 100.0},
+        {"timestamp": datetime(2026, 4, 19, 0, 5, tzinfo=UTC), "close": 101.0},
+        {"timestamp": datetime(2026, 4, 19, 0, 10, tzinfo=UTC), "close": 102.0},
+    ]
+
+    async def _candidate_result(*_args, **_kwargs):
+        return governor_app.ResearchCandidateBuildResult(
+            status="candidate_built",
+            historical_rows=historical_rows,
+            candidates=[invalid_candidate, valid_candidate],
+            candidate_historical_rows={
+                "pkg-invalid": historical_rows,
+                "pkg-valid": historical_rows,
+            },
+        )
+
+    class _BacktestValidator:
+        def validate(self, *, package, historical_rows):
+            if package.strategy_package_id == "pkg-invalid":
+                raise ValueError("range_retest requires lookback >= 2")
+            return BacktestReport(
+                backtest_report_id=f"{package.strategy_package_id}-report",
+                strategy_package_id=package.strategy_package_id,
+                symbol_scope=package.symbol_scope,
+                dataset_range=BacktestDatasetRange(
+                    start=historical_rows[0]["timestamp"],
+                    end=historical_rows[-1]["timestamp"],
+                    regime_fit=RegimeFit.ALIGNED,
+                ),
+                sample_count=len(historical_rows),
+                trade_count=120,
+                trade_count_sufficiency=TradeCountSufficiency.SUFFICIENT,
+                net_pnl=0.6,
+                max_drawdown=0.1,
+                win_rate=0.5,
+                profit_factor=1.4,
+                stability_score=0.8,
+                overfit_risk=OverfitRisk.LOW,
+                failure_modes=[],
+                invalidating_conditions=[],
+                generated_at=historical_rows[-1]["timestamp"],
+            )
+
+    class _Runner:
+        async def run(self, state_summary):
+            now = datetime.now(UTC)
+            return {
+                "version_id": "snap-valid",
+                "generated_at": now.isoformat().replace("+00:00", "Z"),
+                "effective_from": now.isoformat().replace("+00:00", "Z"),
+                "expires_at": (now + timedelta(minutes=5)).isoformat().replace("+00:00", "Z"),
+                "symbol_whitelist": ["BTC-USDT-SWAP"],
+                "strategy_enable_flags": {"breakout": True, "mean_reversion": False, "risk_pause": True},
+                "risk_multiplier": 0.5,
+                "per_symbol_max_position": 0.12,
+                "max_leverage": 3,
+                "market_mode": RunMode.NORMAL,
+                "approval_state": ApprovalState.APPROVED,
+                "source_reason": "cycle",
+                "ttl_sec": 300,
+            }
+
+    monkeypatch.setattr(governor_app, "_prepare_research_candidates", _candidate_result)
+    monkeypatch.setattr(governor_app, "build_governor_client", lambda settings: GovernorClient(_Runner()))
+    monkeypatch.setattr(governor_app, "build_history_store", lambda settings: history_store)
+    monkeypatch.setattr(
+        governor_app,
+        "build_runtime_state_store",
+        lambda settings: governor_app.RedisRuntimeStateStore(redis_client=fake_redis),
+    )
+
+    runtime = governor_app.build_governor_runtime()
+    runtime.backtest_validator = _BacktestValidator()
+
+    asyncio.run(governor_app._run_governor_cycle(runtime))
+
+    assert history_store.written_rows["governor_runs"][-1]["status"] == "published"
+    assert history_store.written_rows["approval_records"][0]["strategy_package_id"] == "pkg-valid"
+
+
+def test_governor_cycle_skips_schedule_search_while_observing_approved_strategy(monkeypatch) -> None:
+    _set_required_settings_env(monkeypatch)
+    _clear_unrelated_settings_env(monkeypatch)
+    history_store = PostgresRuntimeStore(dsn="postgresql://xuanshu:xuanshu@localhost:5432/xuanshu")
+    fake_redis = _FakeRedis()
+
+    class _Runner:
+        async def run(self, state_summary):
+            raise AssertionError("governor client should stay idle during observing schedule cycles")
+
+    async def _unexpected_candidates(*_args, **_kwargs):
+        raise AssertionError("research search should not run during observing schedule cycles")
+
+    monkeypatch.setattr(governor_app, "_prepare_research_candidates", _unexpected_candidates)
+    monkeypatch.setattr(governor_app, "build_governor_client", lambda settings: GovernorClient(_Runner()))
+    monkeypatch.setattr(governor_app, "build_history_store", lambda settings: history_store)
+    monkeypatch.setattr(
+        governor_app,
+        "build_runtime_state_store",
+        lambda settings: governor_app.RedisRuntimeStateStore(redis_client=fake_redis),
+    )
+
+    runtime = governor_app.build_governor_runtime()
+    runtime.runtime_store.set_strategy_search_mode("observe_until_invalidated")
+    runtime.runtime_store.set_latest_approved_package_summary(
+        {"latest_strategy_package_id": "pkg-approved", "approved_at": "2026-04-20T00:00:00Z"}
+    )
+
+    asyncio.run(governor_app._run_governor_cycle(runtime))
+
+    assert history_store.written_rows["governor_runs"][-1]["status"] == "observing"
+    assert runtime.runtime_store.get_strategy_search_mode() == "observe_until_invalidated"
+
+
+def test_governor_cycle_restarts_search_when_observing_strategy_is_invalidated(monkeypatch) -> None:
+    _set_required_settings_env(monkeypatch)
+    _clear_unrelated_settings_env(monkeypatch)
+    history_store = PostgresRuntimeStore(dsn="postgresql://xuanshu:xuanshu@localhost:5432/xuanshu")
+    fake_redis = _FakeRedis()
+
+    candidate = StrategyPackage(
+        strategy_package_id="pkg-low",
+        generated_at=datetime.now(UTC),
+        trigger=ResearchTrigger.SCHEDULE,
+        symbol_scope=["BTC-USDT-SWAP"],
+        market_environment_scope=["trend"],
+        strategy_family="breakout",
+        directionality="long_short",
+        entry_rules={"signal": "breakout_confirmed"},
+        exit_rules={"stop_loss_bps": 50, "take_profit_bps": 120},
+        position_sizing_rules={"risk_fraction": 0.0025},
+        risk_constraints={"max_hold_minutes": 60},
+        parameter_set={"lookback": 20},
+        backtest_summary={"row_count": 10},
+        performance_summary={"return_percent": 0.2},
+        failure_modes=[],
+        invalidating_conditions=[],
+        research_reason="low candidate",
+    )
+    historical_rows = [
+        {"timestamp": datetime(2026, 4, 19, 0, 0, tzinfo=UTC), "close": 100.0},
+        {"timestamp": datetime(2026, 4, 19, 0, 5, tzinfo=UTC), "close": 101.0},
+        {"timestamp": datetime(2026, 4, 19, 0, 10, tzinfo=UTC), "close": 102.0},
+    ]
+
+    async def _candidate_result(*_args, **_kwargs):
+        return governor_app.ResearchCandidateBuildResult(
+            status="candidate_built",
+            historical_rows=historical_rows,
+            candidates=[candidate],
+        )
+
+    class _BacktestValidator:
+        def validate(self, *, package, historical_rows):
+            return BacktestReport(
+                backtest_report_id=f"{package.strategy_package_id}-report",
+                strategy_package_id=package.strategy_package_id,
+                symbol_scope=package.symbol_scope,
+                dataset_range=BacktestDatasetRange(
+                    start=historical_rows[0]["timestamp"],
+                    end=historical_rows[-1]["timestamp"],
+                    regime_fit=RegimeFit.ALIGNED,
+                ),
+                sample_count=len(historical_rows),
+                trade_count=120,
+                trade_count_sufficiency=TradeCountSufficiency.SUFFICIENT,
+                net_pnl=0.31,
+                max_drawdown=0.1,
+                win_rate=0.5,
+                profit_factor=1.1,
+                stability_score=0.7,
+                overfit_risk=OverfitRisk.LOW,
+                failure_modes=[],
+                invalidating_conditions=[],
+                generated_at=historical_rows[-1]["timestamp"],
+            )
+
+    class _Runner:
+        async def run(self, state_summary):
+            raise AssertionError("governor client should not run when restarted search still fails threshold")
+
+    monkeypatch.setattr(governor_app, "_prepare_research_candidates", _candidate_result)
+    monkeypatch.setattr(governor_app, "build_governor_client", lambda settings: GovernorClient(_Runner()))
+    monkeypatch.setattr(governor_app, "build_history_store", lambda settings: history_store)
+    monkeypatch.setattr(
+        governor_app,
+        "build_runtime_state_store",
+        lambda settings: governor_app.RedisRuntimeStateStore(redis_client=fake_redis),
+    )
+
+    runtime = governor_app.build_governor_runtime()
+    runtime.backtest_validator = _BacktestValidator()
+    runtime.runtime_store.set_strategy_search_mode("observe_until_invalidated")
+    runtime.runtime_store.set_latest_approved_package_summary(
+        {"latest_strategy_package_id": "pkg-approved", "approved_at": "2026-04-20T00:00:00Z"}
+    )
+    runtime.runtime_store.set_run_mode(RunMode.DEGRADED)
+
+    asyncio.run(governor_app._run_governor_cycle(runtime))
+
+    assert history_store.written_rows["governor_runs"][-1]["status"] == "validation_failed"
+    assert runtime.runtime_store.get_strategy_search_mode() == "search_until_qualified"
 
 
 def test_governor_cycle_auto_approves_research_with_multi_symbol_runtime(monkeypatch) -> None:
     _set_required_settings_env(monkeypatch)
     _clear_unrelated_settings_env(monkeypatch)
     monkeypatch.setenv("XUANSHU_OKX_SYMBOLS", "BTC-USDT-SWAP,ETH-USDT-SWAP")
+    monkeypatch.setattr(governor_app, "_MIN_RESEARCH_NET_PNL", 0.0)
     _stub_market_data_client(monkeypatch, _build_market_candles([100.0, 101.0, 102.0, 103.0, 104.0]))
     history_store = PostgresRuntimeStore(dsn="postgresql://xuanshu:xuanshu@localhost:5432/xuanshu")
     fake_redis = _FakeRedis()
@@ -782,7 +1341,7 @@ def test_governor_cycle_auto_approves_research_with_multi_symbol_runtime(monkeyp
 
         async def generate_analysis(self, *, symbol_scope, market_environment, historical_rows, research_reason):
             assert len(symbol_scope) == 1
-            assert symbol_scope[0] == "BTC-USDT-SWAP"
+            assert symbol_scope[0] in {"BTC-USDT-SWAP", "ETH-USDT-SWAP"}
             return research_providers_module.ResearchProviderSuggestion(
                 thesis="trend remains constructive",
                 strategy_family="breakout",
@@ -842,12 +1401,16 @@ def test_governor_cycle_auto_approves_research_with_multi_symbol_runtime(monkeyp
     assert history_store.written_rows["governor_runs"][-1]["status"] == "published"
     assert history_store.written_rows["governor_runs"][-1]["validation_status"] == "succeeded"
     assert history_store.written_rows["governor_runs"][-1]["approval_status"] == "approved"
-    assert history_store.written_rows["strategy_packages"][0]["symbol_scope"] == ["BTC-USDT-SWAP"]
+    assert {tuple(row["symbol_scope"]) for row in history_store.written_rows["strategy_packages"]} == {
+        ("BTC-USDT-SWAP",),
+        ("ETH-USDT-SWAP",),
+    }
 
 
 def test_governor_cycle_publishes_auto_approved_research_with_guardrails(monkeypatch) -> None:
     _set_required_settings_env(monkeypatch)
     _clear_unrelated_settings_env(monkeypatch)
+    monkeypatch.setattr(governor_app, "_MIN_RESEARCH_NET_PNL", 0.0)
     _stub_market_data_client(monkeypatch, _build_market_candles([100.0, 101.0, 102.0, 103.0, 104.0]))
     history_store = PostgresRuntimeStore(dsn="postgresql://xuanshu:xuanshu@localhost:5432/xuanshu")
     fake_redis = _FakeRedis()
@@ -932,15 +1495,15 @@ def test_governor_cycle_publishes_auto_approved_research_with_guardrails(monkeyp
 
     asyncio.run(governor_app._run_governor_cycle(runtime))
 
-    package_id = history_store.written_rows["strategy_packages"][0]["strategy_package_id"]
-    backtest_report_id = history_store.written_rows["backtest_reports"][0]["backtest_report_id"]
+    package_id = history_store.written_rows["approval_records"][0]["strategy_package_id"]
+    backtest_report_id = history_store.written_rows["approval_records"][0]["backtest_report_id"]
     approval_record_id = history_store.written_rows["approval_records"][0]["approval_record_id"]
     assert runtime.last_snapshot.source_reason == "approved research package"
     assert runtime.last_snapshot.market_mode == RunMode.DEGRADED
     assert len(runtime.history_store.written_rows["approval_records"]) == 1
     assert history_store.written_rows["approval_records"][0]["decision"] == "approved_with_guardrails"
-    assert len(history_store.written_rows["strategy_packages"]) == 1
-    assert len(history_store.written_rows["backtest_reports"]) == 1
+    assert len(history_store.written_rows["strategy_packages"]) >= 3
+    assert len(history_store.written_rows["backtest_reports"]) >= 3
     assert len(runtime.published_snapshots) == 1
     assert history_store.written_rows["strategy_snapshots"] == [
         {
@@ -967,6 +1530,7 @@ def test_governor_cycle_publishes_auto_approved_research_with_guardrails(monkeyp
         "approved_at": history_store.written_rows["approval_records"][0]["created_at"],
         "approval_decision": "approved_with_guardrails",
     }
+    expected_candidate_count = len(history_store.written_rows["strategy_packages"])
     assert history_store.written_rows["governor_runs"][-1] == {
         "version_id": runtime.last_snapshot.version_id,
         "status": "published",
@@ -975,7 +1539,7 @@ def test_governor_cycle_publishes_auto_approved_research_with_guardrails(monkeyp
         "research_status": "candidate_built",
         "research_provider_success": True,
         "research_error": None,
-        "research_candidate_count": 1,
+        "research_candidate_count": expected_candidate_count,
         "approved_research_candidate_ids": [package_id],
         "validation_status": "succeeded",
         "validation_error": None,
@@ -1259,9 +1823,12 @@ def test_governor_cycle_records_validation_failed_status(monkeypatch) -> None:
     asyncio.run(governor_app._run_governor_cycle(runtime))
 
     assert runtime.published_snapshots == []
-    assert len(history_store.written_rows["strategy_packages"]) == 1
+    assert len(history_store.written_rows["strategy_packages"]) >= 3
     assert history_store.written_rows["backtest_reports"] == []
     assert history_store.written_rows["governor_runs"][-1]["status"] == "validation_failed"
+    assert history_store.written_rows["governor_runs"][-1]["research_candidate_count"] == len(
+        history_store.written_rows["strategy_packages"]
+    )
     assert history_store.written_rows["governor_runs"][-1]["validation_status"] == "failed"
     assert history_store.written_rows["governor_runs"][-1]["approval_status"] == "validation_failed"
 
@@ -1802,7 +2369,7 @@ def test_governor_loop_short_circuits_wait_on_event_trigger(monkeypatch) -> None
 
     assert len(runtime.published_snapshots) == 1
     assert runtime.published_snapshots[0].version_id.startswith("governor-")
-    assert waits == [30, 0]
+    assert waits == [5, 0]
 
 
 def test_governor_cycle_keeps_manual_release_target_after_publishing_release_snapshot(monkeypatch) -> None:

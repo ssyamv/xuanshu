@@ -24,6 +24,17 @@ _RESEARCH_PROVIDER_INSTRUCTIONS = (
     "Do not return keys outside this schema. "
     "Do not suggest executable trading actions. Return JSON only."
 )
+_CODEX_CLI_RESEARCH_PROVIDER_INSTRUCTIONS = (
+    "You are a strategy research helper inside Governor. "
+    "Return a JSON array containing between 8 and 20 diverse candidate strategies and nothing else. "
+    "Every item must exactly match this schema and include no extra keys: "
+    '{"thesis": string, "strategy_family": string, "entry_signal": string, '
+    '"exit_stop_loss_bps": integer, "exit_take_profit_bps": integer, '
+    '"risk_fraction": number, "max_hold_minutes": integer, '
+    '"failure_modes": string[], "invalidating_conditions": string[]}. '
+    "Diversify across strategy families, market environments, stop/take-profit distances, hold times, and risk fractions. "
+    "Do not suggest executable trading actions. Return JSON only."
+)
 
 
 class ResearchProviderName(StrEnum):
@@ -48,14 +59,14 @@ class ResearchProviderSuggestion(BaseModel):
 class ResearchProvider(Protocol):
     provider_name: ResearchProviderName
 
-    async def generate_analysis(
+    async def generate_analyses(
         self,
         *,
         symbol_scope: list[str],
         market_environment: str,
         historical_rows: list[dict[str, object]],
         research_reason: str,
-    ) -> ResearchProviderSuggestion:
+    ) -> list[ResearchProviderSuggestion]:
         ...
 
 
@@ -66,14 +77,14 @@ class ApiResearchProvider:
         self.api_key = api_key
         self.timeout_sec = timeout_sec
 
-    async def generate_analysis(
+    async def generate_analyses(
         self,
         *,
         symbol_scope: list[str],
         market_environment: str,
         historical_rows: list[dict[str, object]],
         research_reason: str,
-    ) -> ResearchProviderSuggestion:
+    ) -> list[ResearchProviderSuggestion]:
         payload = {
             "model": _DEFAULT_RESEARCH_MODEL,
             "input": [
@@ -113,14 +124,6 @@ class ApiResearchProvider:
             response.raise_for_status()
         return _parse_suggestion_payload(response.json())
 
-
-class CodexCliResearchProvider:
-    provider_name = ResearchProviderName.CODEX_CLI
-
-    def __init__(self, *, command: str = "codex", cwd: str | None = None) -> None:
-        self.command = command
-        self.cwd = cwd
-
     async def generate_analysis(
         self,
         *,
@@ -129,8 +132,33 @@ class CodexCliResearchProvider:
         historical_rows: list[dict[str, object]],
         research_reason: str,
     ) -> ResearchProviderSuggestion:
+        return (
+            await self.generate_analyses(
+                symbol_scope=symbol_scope,
+                market_environment=market_environment,
+                historical_rows=historical_rows,
+                research_reason=research_reason,
+            )
+        )[0]
+
+
+class CodexCliResearchProvider:
+    provider_name = ResearchProviderName.CODEX_CLI
+
+    def __init__(self, *, command: str = "codex", cwd: str | None = None) -> None:
+        self.command = command
+        self.cwd = cwd
+
+    async def generate_analyses(
+        self,
+        *,
+        symbol_scope: list[str],
+        market_environment: str,
+        historical_rows: list[dict[str, object]],
+        research_reason: str,
+    ) -> list[ResearchProviderSuggestion]:
         prompt = (
-            f"{_RESEARCH_PROVIDER_INSTRUCTIONS}\n"
+            f"{_CODEX_CLI_RESEARCH_PROVIDER_INSTRUCTIONS}\n"
             f"Research context JSON:\n"
             f"{json.dumps({'symbol_scope': symbol_scope, 'market_environment': market_environment, 'historical_rows': _canonicalize_historical_rows(historical_rows), 'research_reason': research_reason}, ensure_ascii=True, sort_keys=True)}"
         )
@@ -145,6 +173,23 @@ class CodexCliResearchProvider:
             stderr = (completed.stderr or completed.stdout or "").strip()
             raise RuntimeError(stderr or "codex exec failed")
         return _parse_suggestion_payload(completed.stdout)
+
+    async def generate_analysis(
+        self,
+        *,
+        symbol_scope: list[str],
+        market_environment: str,
+        historical_rows: list[dict[str, object]],
+        research_reason: str,
+    ) -> ResearchProviderSuggestion:
+        return (
+            await self.generate_analyses(
+                symbol_scope=symbol_scope,
+                market_environment=market_environment,
+                historical_rows=historical_rows,
+                research_reason=research_reason,
+            )
+        )[0]
 
 
 def create_research_provider(
@@ -173,14 +218,32 @@ def create_research_provider(
     raise ValueError(f"unsupported research provider: {provider_name}")
 
 
-def _parse_suggestion_payload(payload: object) -> ResearchProviderSuggestion:
+def _parse_suggestion_payload(payload: object) -> list[ResearchProviderSuggestion]:
     if isinstance(payload, Mapping):
         text = _extract_response_text(payload)
         if text is not None:
-            return ResearchProviderSuggestion.model_validate_json(_extract_json_object(text))
+            payload = text
     if isinstance(payload, str):
-        return ResearchProviderSuggestion.model_validate_json(_extract_json_object(payload))
+        normalized_payload = json.loads(_extract_json_payload(payload))
+        if isinstance(normalized_payload, list):
+            return [ResearchProviderSuggestion.model_validate(item) for item in normalized_payload]
+        return [ResearchProviderSuggestion.model_validate(normalized_payload)]
     raise RuntimeError("research provider response did not contain valid JSON")
+
+
+def _extract_json_payload(text: str) -> str:
+    stripped = text.strip()
+    if stripped.startswith("```"):
+        lines = stripped.splitlines()
+        if lines:
+            lines = lines[1:]
+        while lines and lines[-1].strip() == "```":
+            lines.pop()
+        stripped = "\n".join(lines).strip()
+
+    if stripped.startswith("[") and stripped.endswith("]"):
+        return stripped
+    return _extract_json_object(stripped)
 
 
 def _canonicalize_historical_rows(historical_rows: list[dict[str, object]]) -> list[dict[str, object]]:

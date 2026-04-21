@@ -4,6 +4,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from hashlib import sha256
+from itertools import product
 import json
 
 from xuanshu.contracts.research import ResearchTrigger, StrategyPackage
@@ -40,38 +41,156 @@ class StrategyResearchEngine:
         historical_rows: list[dict[str, object]],
         research_reason: str,
     ) -> StrategyPackage:
-        if self.provider is None:
-            raise RuntimeError("research provider is not configured")
-        suggestion = await self.provider.generate_analysis(
+        packages = await self.build_candidate_packages_from_provider(
+            trigger=trigger,
             symbol_scope=symbol_scope,
             market_environment=market_environment,
             historical_rows=historical_rows,
             research_reason=research_reason,
         )
-        provider_reason = f"{research_reason} | {self._normalize_text(suggestion.thesis, 'thesis')}"
-        normalized_strategy_family = self._normalize_provider_strategy_family(
-            suggestion.strategy_family,
-            market_environment=market_environment,
+        if not packages:
+            raise RuntimeError("research provider returned no candidate strategies")
+        return packages[0]
+
+    async def build_candidate_packages_from_provider(
+        self,
+        *,
+        trigger: ResearchTrigger,
+        symbol_scope: list[str],
+        market_environment: str,
+        historical_rows: list[dict[str, object]],
+        research_reason: str,
+    ) -> list[StrategyPackage]:
+        if self.provider is None:
+            raise RuntimeError("research provider is not configured")
+        if hasattr(self.provider, "generate_analyses"):
+            suggestions = await self.provider.generate_analyses(
+                symbol_scope=symbol_scope,
+                market_environment=market_environment,
+                historical_rows=historical_rows,
+                research_reason=research_reason,
+            )
+        else:
+            suggestion = await self.provider.generate_analysis(
+                symbol_scope=symbol_scope,
+                market_environment=market_environment,
+                historical_rows=historical_rows,
+                research_reason=research_reason,
+            )
+            suggestions = [suggestion]
+
+        packages: list[StrategyPackage] = []
+        for suggestion in suggestions:
+            provider_reason = f"{research_reason} | {self._normalize_text(suggestion.thesis, 'thesis')}"
+            normalized_strategy_family = self._normalize_provider_strategy_family(
+                suggestion.strategy_family,
+                market_environment=market_environment,
+            )
+            normalized_entry_signal = self._normalize_provider_entry_signal(
+                suggestion.entry_signal,
+                strategy_family=normalized_strategy_family,
+            )
+            packages.extend(
+                self._build_candidate_variants(
+                    trigger=trigger,
+                    symbol_scope=symbol_scope,
+                    market_environment=market_environment,
+                    historical_rows=historical_rows,
+                    research_reason=provider_reason,
+                    strategy_family=normalized_strategy_family,
+                    entry_signal=normalized_entry_signal,
+                    stop_loss_bps=suggestion.exit_stop_loss_bps,
+                    take_profit_bps=suggestion.exit_take_profit_bps,
+                    risk_fraction=suggestion.risk_fraction,
+                    max_hold_minutes=suggestion.max_hold_minutes,
+                    failure_modes=suggestion.failure_modes,
+                    invalidating_conditions=suggestion.invalidating_conditions,
+                )
+            )
+        return packages
+
+    def _build_candidate_variants(
+        self,
+        *,
+        trigger: ResearchTrigger,
+        symbol_scope: list[str],
+        market_environment: str,
+        historical_rows: list[dict[str, object]],
+        research_reason: str,
+        strategy_family: str,
+        entry_signal: str,
+        stop_loss_bps: int,
+        take_profit_bps: int,
+        risk_fraction: float,
+        max_hold_minutes: int,
+        failure_modes: list[str],
+        invalidating_conditions: list[str],
+    ) -> list[StrategyPackage]:
+        lookbacks = self._candidate_lookbacks(strategy_family=strategy_family, entry_signal=entry_signal)
+        parameter_profiles = self._candidate_parameter_profiles(
+            stop_loss_bps=stop_loss_bps,
+            take_profit_bps=take_profit_bps,
+            max_hold_minutes=max_hold_minutes,
         )
-        normalized_entry_signal = self._normalize_provider_entry_signal(
-            suggestion.entry_signal,
-            strategy_family=normalized_strategy_family,
-        )
-        return self._build_candidate_package(
-            trigger=trigger,
-            symbol_scope=symbol_scope,
-            market_environment=market_environment,
-            historical_rows=historical_rows,
-            research_reason=provider_reason,
-            strategy_family=normalized_strategy_family,
-            entry_signal=normalized_entry_signal,
-            stop_loss_bps=suggestion.exit_stop_loss_bps,
-            take_profit_bps=suggestion.exit_take_profit_bps,
-            risk_fraction=suggestion.risk_fraction,
-            max_hold_minutes=suggestion.max_hold_minutes,
-            failure_modes=suggestion.failure_modes,
-            invalidating_conditions=suggestion.invalidating_conditions,
-        )
+        risk_fractions = self._candidate_risk_fractions(risk_fraction)
+        directionalities = self._candidate_directionalities(strategy_family=strategy_family, market_environment=market_environment)
+
+        variants: list[StrategyPackage] = []
+        seen: set[str] = set()
+        normalized_rows = self._normalize_historical_rows(historical_rows)
+        closes = [row["close"] for row in normalized_rows]
+        for lookback, profile, risk_fraction_value, directionality in product(
+            lookbacks,
+            parameter_profiles,
+            risk_fractions,
+            directionalities,
+        ):
+            stop_loss, take_profit, hold_minutes_value = profile
+            package = self._build_candidate_package(
+                trigger=trigger,
+                symbol_scope=symbol_scope,
+                market_environment=market_environment,
+                historical_rows=historical_rows,
+                research_reason=research_reason,
+                strategy_family=strategy_family,
+                entry_signal=entry_signal,
+                stop_loss_bps=stop_loss,
+                take_profit_bps=take_profit,
+                risk_fraction=risk_fraction_value,
+                max_hold_minutes=hold_minutes_value,
+                failure_modes=failure_modes,
+                invalidating_conditions=invalidating_conditions,
+            ).model_copy(
+                update={
+                    "strategy_package_id": self._build_package_id(
+                        trigger=trigger,
+                        symbol_scope=symbol_scope,
+                        market_environment=market_environment,
+                        historical_rows=normalized_rows,
+                        research_reason=research_reason,
+                        strategy_family=strategy_family,
+                        entry_signal=entry_signal,
+                        stop_loss_bps=stop_loss,
+                        take_profit_bps=take_profit,
+                        risk_fraction=risk_fraction_value,
+                        max_hold_minutes=hold_minutes_value,
+                        lookback=lookback,
+                        directionality=directionality,
+                    ),
+                    "directionality": directionality,
+                    "parameter_set": {
+                        "row_count": len(historical_rows),
+                        "start_close": closes[0],
+                        "end_close": closes[-1],
+                        "lookback": lookback,
+                    },
+                }
+            )
+            if package.strategy_package_id in seen:
+                continue
+            seen.add(package.strategy_package_id)
+            variants.append(package)
+        return variants
 
     def _build_candidate_package(
         self,
@@ -120,6 +239,16 @@ class StrategyResearchEngine:
             "row_count": len(historical_rows),
             "start_close": start_close,
             "end_close": end_close,
+            "lookback": self._default_lookback_for_entry_signal(
+                strategy_family=self._normalize_text(
+                    strategy_family or self._select_strategy_family(normalized_market_environment),
+                    "strategy_family",
+                ),
+                entry_signal=self._normalize_text(
+                    entry_signal or self._select_entry_signal(normalized_market_environment),
+                    "entry_signal",
+                ),
+            ),
         }
         strategy_package_id = self._build_package_id(
             trigger=trigger,
@@ -127,6 +256,20 @@ class StrategyResearchEngine:
             market_environment=normalized_market_environment,
             historical_rows=normalized_rows,
             research_reason=normalized_research_reason,
+            strategy_family=self._normalize_text(
+                strategy_family or self._select_strategy_family(normalized_market_environment),
+                "strategy_family",
+            ),
+            entry_signal=self._normalize_text(
+                entry_signal or self._select_entry_signal(normalized_market_environment),
+                "entry_signal",
+            ),
+            stop_loss_bps=stop_loss_bps,
+            take_profit_bps=take_profit_bps,
+            risk_fraction=risk_fraction,
+            max_hold_minutes=max_hold_minutes,
+            lookback=parameter_set["lookback"],
+            directionality="long_short",
         )
 
         return StrategyPackage(
@@ -195,6 +338,14 @@ class StrategyResearchEngine:
         market_environment: str,
         historical_rows: list[dict[str, object]],
         research_reason: str,
+        strategy_family: str,
+        entry_signal: str,
+        stop_loss_bps: int,
+        take_profit_bps: int,
+        risk_fraction: float,
+        max_hold_minutes: int,
+        lookback: int,
+        directionality: str,
     ) -> str:
         fingerprint = {
             "trigger": trigger.value,
@@ -202,6 +353,14 @@ class StrategyResearchEngine:
             "market_environment": market_environment,
             "historical_rows": StrategyResearchEngine._canonicalize_historical_rows(historical_rows),
             "research_reason": research_reason,
+            "strategy_family": strategy_family,
+            "entry_signal": entry_signal,
+            "stop_loss_bps": stop_loss_bps,
+            "take_profit_bps": take_profit_bps,
+            "risk_fraction": risk_fraction,
+            "max_hold_minutes": max_hold_minutes,
+            "lookback": lookback,
+            "directionality": directionality,
         }
         digest = sha256(json.dumps(fingerprint, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
         return f"pkg-{digest[:12]}"
@@ -241,6 +400,66 @@ class StrategyResearchEngine:
         if "range retest" in normalized or "range_retest" in normalized or "retest" in normalized:
             return "range_retest"
         return "mean_reversion_signal"
+
+    @staticmethod
+    def _candidate_lookbacks(*, strategy_family: str, entry_signal: str) -> list[int]:
+        if strategy_family == "mean_reversion" or entry_signal == "range_retest":
+            return [2, 3, 5, 8, 13, 21]
+        return [1, 2, 3, 5, 8, 13]
+
+    @staticmethod
+    def _candidate_stop_losses(base_value: int) -> list[int]:
+        return sorted({max(10, round(base_value * scale)) for scale in (0.5, 0.8, 1.0, 1.4, 2.0)})
+
+    @staticmethod
+    def _candidate_take_profits(base_value: int) -> list[int]:
+        return sorted({max(20, round(base_value * scale)) for scale in (0.75, 1.0, 1.5, 2.0, 3.0)})
+
+    @staticmethod
+    def _candidate_risk_fractions(base_value: float) -> list[float]:
+        values = {
+            round(min(max(base_value * scale, 0.001), 1.0), 6)
+            for scale in (0.5, 1.0, 2.0, 5.0, 20.0, 100.0, 400.0)
+        }
+        values.update({0.01, 0.05, 0.1, 0.2, 0.5, 1.0})
+        return sorted(value for value in values if 0.0 < value <= 1.0)
+
+    @staticmethod
+    def _candidate_hold_minutes(base_value: int) -> list[int]:
+        return sorted({max(5, round(base_value * scale)) for scale in (0.5, 1.0, 2.0, 4.0, 12.0, 24.0)})
+
+    @classmethod
+    def _candidate_parameter_profiles(
+        cls,
+        *,
+        stop_loss_bps: int,
+        take_profit_bps: int,
+        max_hold_minutes: int,
+    ) -> list[tuple[int, int, int]]:
+        stop_losses = cls._candidate_stop_losses(stop_loss_bps)
+        take_profits = cls._candidate_take_profits(take_profit_bps)
+        hold_minutes = cls._candidate_hold_minutes(max_hold_minutes)
+        profile_count = min(len(stop_losses), len(take_profits), len(hold_minutes))
+        profiles = [
+            (stop_losses[index], take_profits[index], hold_minutes[index])
+            for index in range(profile_count)
+        ]
+        profiles.append((stop_loss_bps, take_profit_bps, max_hold_minutes))
+        return list(dict.fromkeys(profiles))
+
+    @staticmethod
+    def _candidate_directionalities(*, strategy_family: str, market_environment: str) -> list[str]:
+        if strategy_family == "breakout" and market_environment == "trend":
+            return ["long_only", "long_short"]
+        if strategy_family == "mean_reversion":
+            return ["long_short", "short_only", "long_only"]
+        return ["long_short"]
+
+    @staticmethod
+    def _default_lookback_for_entry_signal(*, strategy_family: str, entry_signal: str) -> int:
+        if strategy_family == "mean_reversion" or entry_signal == "range_retest":
+            return 2
+        return 1
 
     @staticmethod
     def _normalize_free_text_label(value: str) -> str:

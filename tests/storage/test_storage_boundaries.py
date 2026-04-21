@@ -46,6 +46,7 @@ def test_redis_key_naming_matches_hot_state_contract() -> None:
     assert RedisKeys.symbol_runtime("BTC-USDT-SWAP") == "xuanshu:runtime:symbol:BTC-USDT-SWAP"
     assert RedisKeys.budget_pool_summary() == "xuanshu:runtime:budget_pool"
     assert RedisKeys.governor_health_summary() == "xuanshu:runtime:governor_health"
+    assert RedisKeys.strategy_search_mode() == "xuanshu:runtime:strategy_search_mode"
     assert RedisKeys.pending_approval_summary() == "xuanshu:runtime:pending_approval_summary"
     assert RedisKeys.latest_approved_package_summary() == "xuanshu:runtime:latest_approved_package_summary"
     assert RedisKeys.backtest_health_summary() == "xuanshu:runtime:backtest_health_summary"
@@ -135,6 +136,14 @@ def test_redis_runtime_state_store_round_trips_pending_approval_summary() -> Non
     store.set_pending_approval_summary(summary)
 
     assert store.get_pending_approval_summary() == summary
+
+
+def test_redis_runtime_state_store_round_trips_strategy_search_mode() -> None:
+    store = RedisRuntimeStateStore(redis_client=_FakeRedis())
+
+    store.set_strategy_search_mode("observe_until_invalidated")
+
+    assert store.get_strategy_search_mode() == "observe_until_invalidated"
 
 
 def test_redis_runtime_state_store_ignores_malformed_pending_approval_summary_json() -> None:

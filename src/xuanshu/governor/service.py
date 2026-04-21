@@ -286,6 +286,7 @@ class GovernorService:
         )
         recent_governor_runs = history_store.list_recent_rows("governor_runs", limit=5)
         manual_release_target = getattr(runtime_store, "get_manual_release_target", lambda: None)()
+        strategy_search_mode = getattr(runtime_store, "get_strategy_search_mode", lambda: None)()
         summary = {
             "scope": "governor",
             "current_run_mode": current_mode.value if current_mode is not None else "unknown",
@@ -297,6 +298,8 @@ class GovernorService:
         }
         if isinstance(manual_release_target, str) and manual_release_target:
             summary["manual_release_target"] = manual_release_target
+        if isinstance(strategy_search_mode, str) and strategy_search_mode:
+            summary["strategy_search_mode"] = strategy_search_mode
         expert_opinions = self.build_expert_opinions(summary, now=timestamp)
         summary["expert_opinions"] = [self._serialize_expert_opinion(opinion) for opinion in expert_opinions]
         summary["committee_summary"] = self.build_committee_summary(expert_opinions)

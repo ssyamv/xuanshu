@@ -46,6 +46,10 @@ class RedisKeys:
         return "xuanshu:runtime:manual_release_target"
 
     @staticmethod
+    def strategy_search_mode() -> str:
+        return "xuanshu:runtime:strategy_search_mode"
+
+    @staticmethod
     def pending_approval_summary() -> str:
         return "xuanshu:runtime:pending_approval_summary"
 
@@ -124,6 +128,12 @@ class RuntimeStateStore(Protocol):
     def clear_manual_release_target(self) -> None:
         ...
 
+    def set_strategy_search_mode(self, mode: str) -> None:
+        ...
+
+    def get_strategy_search_mode(self) -> str | None:
+        ...
+
 
 class RedisSnapshotStore:
     def __init__(
@@ -176,8 +186,10 @@ class RedisRuntimeStateStore:
         self._redis = redis_client or Redis.from_url(redis_url)
         self._key = RedisKeys.run_mode()
         self._manual_release_key = RedisKeys.manual_release_target()
+        self._strategy_search_mode_key = RedisKeys.strategy_search_mode()
         self._latest_mode: RunMode | None = None
         self._latest_manual_release_target: str | None = None
+        self._latest_strategy_search_mode: str | None = None
 
     def set_run_mode(self, mode: RunMode) -> None:
         self._latest_mode = mode
@@ -433,3 +445,32 @@ class RedisRuntimeStateStore:
             self._redis.delete(self._manual_release_key)
         except RedisError:
             return
+
+    def set_strategy_search_mode(self, mode: str) -> None:
+        normalized = str(mode).strip()
+        self._latest_strategy_search_mode = normalized or None
+        try:
+            if self._latest_strategy_search_mode is None:
+                self._redis.delete(self._strategy_search_mode_key)
+            else:
+                self._redis.set(self._strategy_search_mode_key, self._latest_strategy_search_mode)
+        except RedisError:
+            return
+
+    def get_strategy_search_mode(self) -> str | None:
+        try:
+            payload = self._redis.get(self._strategy_search_mode_key)
+        except RedisError:
+            return self._latest_strategy_search_mode
+        if payload is None:
+            return self._latest_strategy_search_mode
+        if isinstance(payload, bytes):
+            try:
+                payload = payload.decode("utf-8")
+            except UnicodeDecodeError:
+                return self._latest_strategy_search_mode
+        if not isinstance(payload, str):
+            return self._latest_strategy_search_mode
+        normalized = payload.strip()
+        self._latest_strategy_search_mode = normalized or None
+        return self._latest_strategy_search_mode
