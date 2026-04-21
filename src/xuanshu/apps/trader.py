@@ -587,17 +587,29 @@ async def _evaluate_symbol(runtime: TraderRuntime, symbol: str) -> None:
                     }
                 )
                 continue
+            client_order_id = _next_client_order_id(runtime, signal)
+            strategy_logic = "空头优先信号触发，先平多头，等待仓位归零后再开空。"
+            runtime.components.state_engine.stage_order_submission(
+                signal.symbol,
+                client_order_id=client_order_id,
+                side=OrderSide.SELL.value,
+                size=abs(position_quantity),
+                intent="close",
+                strategy_id=signal.strategy_id.value,
+                strategy_logic=strategy_logic,
+            )
             try:
                 response = await runtime.execution_coordinator.submit_market_close(
                     symbol=signal.symbol,
                     side=OrderSide.SELL.value,
                     size=abs(position_quantity),
-                    client_order_id=_next_client_order_id(runtime, signal),
+                    client_order_id=client_order_id,
                     decision=decision,
                     timestamp=_now_timestamp(),
                     position_side="long",
                 )
             except Exception as exc:
+                runtime.components.state_engine.clear_order_submission(signal.symbol, client_order_id)
                 runtime.history_store.append_risk_event(
                     {
                         "event_type": "execution_submission_failed",
@@ -607,6 +619,7 @@ async def _evaluate_symbol(runtime: TraderRuntime, symbol: str) -> None:
                 )
                 continue
             if response is None:
+                runtime.components.state_engine.clear_order_submission(signal.symbol, client_order_id)
                 runtime.history_store.append_risk_event(
                     {
                         "event_type": "signal_blocked",
@@ -615,7 +628,6 @@ async def _evaluate_symbol(runtime: TraderRuntime, symbol: str) -> None:
                     }
                 )
                 continue
-            strategy_logic = "空头优先信号触发，先平多头，等待仓位归零后再开空。"
             for row in response:
                 runtime.history_store.append_order_fact(
                     {
@@ -629,15 +641,6 @@ async def _evaluate_symbol(runtime: TraderRuntime, symbol: str) -> None:
                         "strategy_logic": strategy_logic,
                     }
                 )
-            runtime.components.state_engine.stage_order_submission(
-                signal.symbol,
-                client_order_id=str(response[0].get("clOrdId") or ""),
-                side=OrderSide.SELL.value,
-                size=abs(position_quantity),
-                intent="close",
-                strategy_id=signal.strategy_id.value,
-                strategy_logic=strategy_logic,
-            )
             _LOGGER.info(
                 "order_submitted",
                 extra={
@@ -653,16 +656,29 @@ async def _evaluate_symbol(runtime: TraderRuntime, symbol: str) -> None:
             continue
         if has_exposure:
             continue
+        client_order_id = _next_client_order_id(runtime, signal)
+        order_size = max(1.0, decision.max_order_size)
+        strategy_logic = _build_strategy_logic(signal, runtime.startup_snapshot)
+        runtime.components.state_engine.stage_order_submission(
+            signal.symbol,
+            client_order_id=client_order_id,
+            side=signal.side.value,
+            size=order_size,
+            intent="open",
+            strategy_id=signal.strategy_id.value,
+            strategy_logic=strategy_logic,
+        )
         try:
             response = await runtime.execution_coordinator.submit_market_open(
                 symbol=signal.symbol,
                 side=signal.side.value,
-                size=max(1.0, decision.max_order_size),
-                client_order_id=_next_client_order_id(runtime, signal),
+                size=order_size,
+                client_order_id=client_order_id,
                 decision=decision,
                 timestamp=_now_timestamp(),
             )
         except Exception as exc:
+            runtime.components.state_engine.clear_order_submission(signal.symbol, client_order_id)
             runtime.history_store.append_risk_event(
                 {
                     "event_type": "execution_submission_failed",
@@ -672,6 +688,7 @@ async def _evaluate_symbol(runtime: TraderRuntime, symbol: str) -> None:
             )
             continue
         if response is None:
+            runtime.components.state_engine.clear_order_submission(signal.symbol, client_order_id)
             runtime.history_store.append_risk_event(
                 {
                     "event_type": "signal_blocked",
@@ -681,7 +698,6 @@ async def _evaluate_symbol(runtime: TraderRuntime, symbol: str) -> None:
             )
             continue
         for row in response:
-            strategy_logic = _build_strategy_logic(signal, runtime.startup_snapshot)
             runtime.history_store.append_order_fact(
                 {
                     "symbol": signal.symbol,
@@ -694,16 +710,6 @@ async def _evaluate_symbol(runtime: TraderRuntime, symbol: str) -> None:
                     "strategy_logic": strategy_logic,
                 }
             )
-        strategy_logic = _build_strategy_logic(signal, runtime.startup_snapshot)
-        runtime.components.state_engine.stage_order_submission(
-            signal.symbol,
-            client_order_id=str(response[0].get("clOrdId") or ""),
-            side=signal.side.value,
-            size=max(1.0, decision.max_order_size),
-            intent="open",
-            strategy_id=signal.strategy_id.value,
-            strategy_logic=strategy_logic,
-        )
         _LOGGER.info(
             "order_submitted",
             extra={

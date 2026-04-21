@@ -164,6 +164,39 @@ def test_state_engine_removes_terminal_orders_and_keeps_latest_private_marker() 
     assert engine.open_orders_by_symbol["BTC-USDT-SWAP"] == {}
 
 
+def test_state_engine_removes_staged_order_when_fill_arrives_with_exchange_order_id() -> None:
+    engine = StateEngine()
+    engine.stage_order_submission(
+        "BTC-USDT-SWAP",
+        client_order_id="BTCUSDTSWAPvolbreakout000001",
+        side="buy",
+        size=3.5,
+        intent="open",
+        strategy_id="vol_breakout",
+        strategy_logic="BTC-USDT-SWAP 12H 波动率突破，价格突破 ATR 阈值后顺势开多。",
+    )
+
+    engine.on_order_update(
+        OrderUpdateEvent(
+            event_type=TraderEventType.ORDER_UPDATE,
+            symbol="BTC-USDT-SWAP",
+            exchange="okx",
+            generated_at=datetime.now(UTC),
+            private_sequence="pri-fill",
+            order_id="ord-1",
+            client_order_id="BTCUSDTSWAPvolbreakout000001",
+            side="buy",
+            price=100.1,
+            size=3.5,
+            filled_size=3.5,
+            status="filled",
+        )
+    )
+
+    assert engine.open_orders_by_symbol["BTC-USDT-SWAP"] == {}
+    assert engine.trade_context_by_symbol["BTC-USDT-SWAP"]["strategy_id"] == "vol_breakout"
+
+
 def test_state_engine_clears_staged_close_orders_when_position_is_flat() -> None:
     engine = StateEngine()
     engine.stage_order_submission(

@@ -129,6 +129,16 @@ class StateEngine:
         if context:
             self.trade_context_by_symbol[symbol] = context
 
+    def clear_order_submission(self, symbol: str, client_order_id: str) -> None:
+        symbol_orders = self.open_orders_by_symbol.setdefault(symbol, {})
+        order_ids = [
+            order_id
+            for order_id, order in symbol_orders.items()
+            if order.client_order_id == client_order_id or order_id == client_order_id
+        ]
+        for order_id in order_ids:
+            symbol_orders.pop(order_id, None)
+
     def on_order_update(self, event: OrderUpdateEvent) -> None:
         self.last_private_stream_marker = event.private_sequence
         symbol_orders = self.open_orders_by_symbol.setdefault(event.symbol, {})
