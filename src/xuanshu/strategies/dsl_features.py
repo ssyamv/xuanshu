@@ -96,8 +96,11 @@ def _build_features_for_rows(
         if window is None:
             raise ValueError("feature_spec.indicators must define a window")
         row_slice = _indicator_row_slice(historical_rows, window=window, previous=previous)
-        value = _compute_indicator(indicator, row_slice)
-        features[_indicator_name(indicator)] = value
+        feature_name = _indicator_name(indicator)
+        if feature_name in features:
+            raise ValueError(f"duplicate feature name: {feature_name}")
+        value = _compute_indicator(indicator, row_slice, historical_rows=historical_rows, previous=previous)
+        features[feature_name] = value
     base_row = historical_rows[-2 if previous else -1]
     if "close" in base_row:
         features["close"] = _coerce_number(base_row["close"], field_name="close")
@@ -115,7 +118,13 @@ def _indicator_row_slice(
     return historical_rows[-window:]
 
 
-def _compute_indicator(indicator: IndicatorSpec, rows: Sequence[Mapping[str, object]]) -> float:
+def _compute_indicator(
+    indicator: IndicatorSpec,
+    rows: Sequence[Mapping[str, object]],
+    *,
+    historical_rows: Sequence[Mapping[str, object]],
+    previous: bool,
+) -> float:
     source = indicator.source or "close"
     try:
         values = [_coerce_number(row[source], field_name=source) for row in rows]
@@ -132,7 +141,11 @@ def _compute_indicator(indicator: IndicatorSpec, rows: Sequence[Mapping[str, obj
     if indicator.name == "zscore":
         return _compute_zscore(values)
     if indicator.name == "atr":
-        return _compute_atr(rows)
+        start_index = len(historical_rows) - len(rows) - (1 if previous else 0)
+        prior_close = None
+        if start_index > 0:
+            prior_close = _coerce_number(historical_rows[start_index - 1]["close"], field_name="close")
+        return _compute_atr(rows, prior_close=prior_close)
     raise ValueError("unsupported indicator")
 
 
@@ -156,9 +169,9 @@ def _compute_zscore(values: Sequence[float]) -> float:
     return (values[-1] - mean) / math.sqrt(variance)
 
 
-def _compute_atr(rows: Sequence[Mapping[str, object]]) -> float:
+def _compute_atr(rows: Sequence[Mapping[str, object]], *, prior_close: float | None) -> float:
     true_ranges: list[float] = []
-    previous_close: float | None = None
+    previous_close: float | None = prior_close
     for row in rows:
         try:
             high = _coerce_number(row["high"], field_name="high")
