@@ -1,11 +1,37 @@
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
+
 from xuanshu.contracts.market import MarketStateSnapshot
 from xuanshu.contracts.risk import CandidateSignal
+from xuanshu.contracts.strategy_definition import StrategyDefinition
 from xuanshu.core.enums import EntryType, MarketRegime, OrderSide, SignalUrgency, StrategyId
+from xuanshu.strategies.dsl_execution import build_candidate_signal as build_dsl_candidate_signal
 
 
-def build_candidate_signals(snapshot: MarketStateSnapshot) -> list[CandidateSignal]:
+def build_candidate_signals(
+    snapshot: MarketStateSnapshot,
+    *,
+    dsl_strategy_definitions: Sequence[StrategyDefinition] | None = None,
+    historical_rows_by_strategy_def_id: Mapping[str, Sequence[dict[str, object]]] | None = None,
+) -> list[CandidateSignal]:
+    if dsl_strategy_definitions is None:
+        dsl_strategy_definitions = getattr(snapshot, "dsl_strategy_definitions", None)
+    if historical_rows_by_strategy_def_id is None:
+        historical_rows_by_strategy_def_id = getattr(snapshot, "dsl_historical_rows_by_strategy_def_id", None)
+    if dsl_strategy_definitions is not None:
+        if historical_rows_by_strategy_def_id is None:
+            raise ValueError("historical_rows_by_strategy_def_id is required for DSL strategy evaluation")
+        return [
+            signal
+            for definition in dsl_strategy_definitions
+            if (signal := build_dsl_candidate_signal(
+                definition,
+                historical_rows_by_strategy_def_id.get(definition.strategy_def_id, []),
+            ))
+            is not None
+        ]
+
     if snapshot.regime == MarketRegime.TREND:
         return [
             CandidateSignal(
