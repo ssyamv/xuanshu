@@ -124,6 +124,11 @@ def _build_market_candles(
     return list(reversed(candles))
 
 
+def test_governor_candidate_clears_return_gate_uses_return_percent() -> None:
+    assert governor_app._candidate_clears_return_gate(50.1) is True
+    assert governor_app._candidate_clears_return_gate(50.0) is False
+
+
 def _stub_market_data_client(
     monkeypatch: pytest.MonkeyPatch,
     candles: list[dict[str, object]],
@@ -607,7 +612,7 @@ def test_governor_runtime_publishes_snapshot_to_shared_redis_store(monkeypatch) 
 def test_governor_cycle_can_publish_snapshot_from_approved_research(monkeypatch) -> None:
     _set_required_settings_env(monkeypatch)
     _clear_unrelated_settings_env(monkeypatch)
-    monkeypatch.setattr(governor_app, "_MIN_RESEARCH_NET_PNL", 0.0)
+    monkeypatch.setattr(governor_app, "_candidate_clears_return_gate", lambda return_percent: True)
     captured_state_summary = None
 
     definition = _sample_strategy_definition(parameter_set={"lookback_fast": 20, "lookback_slow": 60})
@@ -694,7 +699,7 @@ def test_governor_cycle_can_publish_snapshot_from_approved_research(monkeypatch)
 def test_governor_cycle_does_not_send_unapproved_research_downstream(monkeypatch) -> None:
     _set_required_settings_env(monkeypatch)
     _clear_unrelated_settings_env(monkeypatch)
-    monkeypatch.setattr(governor_app, "_MIN_RESEARCH_NET_PNL", 0.0)
+    monkeypatch.setattr(governor_app, "_candidate_clears_return_gate", lambda return_percent: True)
     captured_state_summary = None
     history_store = PostgresRuntimeStore(dsn="postgresql://xuanshu:xuanshu@localhost:5432/xuanshu")
     fake_redis = _FakeRedis()
@@ -804,7 +809,7 @@ def test_governor_cycle_does_not_send_unapproved_research_downstream(monkeypatch
 def test_governor_cycle_auto_approves_research_after_validation_and_publishes(monkeypatch) -> None:
     _set_required_settings_env(monkeypatch)
     _clear_unrelated_settings_env(monkeypatch)
-    monkeypatch.setattr(governor_app, "_MIN_RESEARCH_NET_PNL", 0.0)
+    monkeypatch.setattr(governor_app, "_candidate_clears_return_gate", lambda return_percent: True)
     _stub_market_data_client(monkeypatch, _build_market_candles([100.0, 101.0, 102.0, 103.0, 104.0]))
     history_store = PostgresRuntimeStore(dsn="postgresql://xuanshu:xuanshu@localhost:5432/xuanshu")
     fake_redis = _FakeRedis()
@@ -911,7 +916,7 @@ def test_governor_cycle_auto_approves_research_after_validation_and_publishes(mo
     ]
 
 
-def test_governor_cycle_selects_highest_net_pnl_candidate_above_threshold(monkeypatch) -> None:
+def test_governor_cycle_selects_highest_return_percent_candidate_above_threshold(monkeypatch) -> None:
     _set_required_settings_env(monkeypatch)
     _clear_unrelated_settings_env(monkeypatch)
     history_store = PostgresRuntimeStore(dsn="postgresql://xuanshu:xuanshu@localhost:5432/xuanshu")
@@ -1057,9 +1062,25 @@ def test_governor_cycle_selects_highest_net_pnl_candidate_above_threshold(monkey
     assert history_store.written_rows["approval_records"][0]["strategy_package_id"] == "pkg-high"
     assert history_store.written_rows["governor_runs"][-1]["approved_research_candidate_ids"] == ["pkg-high"]
     assert runtime.runtime_store.get_latest_approved_package_summary()["latest_strategy_package_id"] == "pkg-high"
+    assert (
+        runtime.last_snapshot.symbol_strategy_bindings["BTC-USDT-SWAP"].strategy_package_id == "pkg-high"
+    )
+    assert runtime.last_snapshot.symbol_strategy_bindings["BTC-USDT-SWAP"].score == 82.0
+    assert (
+        history_store.written_rows["strategy_snapshots"][0]["symbol_strategy_bindings"]["BTC-USDT-SWAP"][
+            "strategy_package_id"
+        ]
+        == "pkg-high"
+    )
+    assert (
+        history_store.written_rows["strategy_snapshots"][0]["symbol_strategy_bindings"]["BTC-USDT-SWAP"][
+            "score"
+        ]
+        == 82.0
+    )
 
 
-def test_governor_cycle_rejects_all_candidates_below_required_net_pnl(monkeypatch) -> None:
+def test_governor_cycle_rejects_all_candidates_below_required_return_percent(monkeypatch) -> None:
     _set_required_settings_env(monkeypatch)
     _clear_unrelated_settings_env(monkeypatch)
     history_store = PostgresRuntimeStore(dsn="postgresql://xuanshu:xuanshu@localhost:5432/xuanshu")
@@ -1152,7 +1173,7 @@ def test_governor_cycle_rejects_all_candidates_below_required_net_pnl(monkeypatc
 
     assert runtime.last_snapshot.version_id == "bootstrap"
     assert history_store.written_rows["governor_runs"][-1]["status"] == "validation_failed"
-    assert "minimum quality threshold 0.5" in history_store.written_rows["governor_runs"][-1]["validation_error"]
+    assert "minimum quality threshold 50.0" in history_store.written_rows["governor_runs"][-1]["validation_error"]
     assert runtime.runtime_store.get_pending_approval_summary() == {
         "pending_count": 0,
         "latest_strategy_package_id": "pkg-low",
@@ -1443,7 +1464,7 @@ def test_governor_cycle_auto_approves_research_with_multi_symbol_runtime(monkeyp
     _set_required_settings_env(monkeypatch)
     _clear_unrelated_settings_env(monkeypatch)
     monkeypatch.setenv("XUANSHU_OKX_SYMBOLS", "BTC-USDT-SWAP,ETH-USDT-SWAP")
-    monkeypatch.setattr(governor_app, "_MIN_RESEARCH_NET_PNL", 0.0)
+    monkeypatch.setattr(governor_app, "_candidate_clears_return_gate", lambda return_percent: True)
     _stub_market_data_client(monkeypatch, _build_market_candles([100.0, 101.0, 102.0, 103.0, 104.0]))
     history_store = PostgresRuntimeStore(dsn="postgresql://xuanshu:xuanshu@localhost:5432/xuanshu")
     fake_redis = _FakeRedis()
@@ -1541,7 +1562,7 @@ def test_governor_cycle_auto_approves_research_with_multi_symbol_runtime(monkeyp
 def test_governor_cycle_publishes_auto_approved_research_with_guardrails(monkeypatch) -> None:
     _set_required_settings_env(monkeypatch)
     _clear_unrelated_settings_env(monkeypatch)
-    monkeypatch.setattr(governor_app, "_MIN_RESEARCH_NET_PNL", 0.0)
+    monkeypatch.setattr(governor_app, "_candidate_clears_return_gate", lambda return_percent: True)
     _stub_market_data_client(monkeypatch, _build_market_candles([100.0, 101.0, 102.0, 103.0, 104.0]))
     history_store = PostgresRuntimeStore(dsn="postgresql://xuanshu:xuanshu@localhost:5432/xuanshu")
     fake_redis = _FakeRedis()
@@ -1629,6 +1650,7 @@ def test_governor_cycle_publishes_auto_approved_research_with_guardrails(monkeyp
     package_id = history_store.written_rows["approval_records"][0]["strategy_package_id"]
     backtest_report_id = history_store.written_rows["approval_records"][0]["backtest_report_id"]
     approval_record_id = history_store.written_rows["approval_records"][0]["approval_record_id"]
+    binding_payload = runtime.last_snapshot.symbol_strategy_bindings["BTC-USDT-SWAP"].model_dump(mode="json")
     assert runtime.last_snapshot.source_reason == "approved research package"
     assert runtime.last_snapshot.market_mode == RunMode.DEGRADED
     assert len(runtime.history_store.written_rows["approval_records"]) == 1
@@ -1647,6 +1669,14 @@ def test_governor_cycle_publishes_auto_approved_research_with_guardrails(monkeyp
             "per_symbol_max_position": 0.12,
             "max_leverage": 3,
             "source_reason": "approved research package",
+            "symbol_strategy_bindings": {
+                "BTC-USDT-SWAP": {
+                    **binding_payload,
+                    "strategy_package_id": package_id,
+                    "backtest_report_id": backtest_report_id,
+                    "approval_record_id": approval_record_id,
+                }
+            },
             "strategy_package_id": package_id,
             "backtest_report_id": backtest_report_id,
             "approval_record_id": approval_record_id,
@@ -1776,6 +1806,7 @@ def test_governor_cycle_validation_failure_blocks_publication_explicitly(monkeyp
 def test_governor_cycle_auto_rejects_non_publishable_research(monkeypatch) -> None:
     _set_required_settings_env(monkeypatch)
     _clear_unrelated_settings_env(monkeypatch)
+    monkeypatch.setattr(governor_app, "_candidate_clears_return_gate", lambda return_percent: True)
     _stub_market_data_client(monkeypatch, _build_market_candles([100.0, 101.0, 102.0, 103.0, 104.0]))
     history_store = PostgresRuntimeStore(dsn="postgresql://xuanshu:xuanshu@localhost:5432/xuanshu")
     fake_redis = _FakeRedis()
@@ -1865,9 +1896,9 @@ def test_governor_cycle_auto_rejects_non_publishable_research(monkeypatch) -> No
 
     def _candidate_beats_baseline(*, package, historical_rows):
         report = original_validate(package=package, historical_rows=historical_rows)
-        if package.strategy_package_id == package_id:
-            return report
-        return report.model_copy(update={"net_pnl": report.net_pnl + 1.0})
+        if package.strategy_package_id == "pkg-blocked-next":
+            return report.model_copy(update={"net_pnl": report.net_pnl + 1000.0, "return_percent": 100.0})
+        return report.model_copy(update={"net_pnl": report.net_pnl, "return_percent": 1.0})
 
     monkeypatch.setattr(runtime.backtest_validator, "validate", _candidate_beats_baseline)
     baseline_package = governor_app.StrategyPackage.model_validate(
@@ -1882,6 +1913,8 @@ def test_governor_cycle_auto_rejects_non_publishable_research(monkeypatch) -> No
         )
 
     monkeypatch.setattr(governor_app, "_prepare_research_candidates", _second_candidate)
+    monkeypatch.setattr(governor_app, "_get_strategy_search_mode", lambda runtime: "search_until_qualified")
+    runtime.runtime_store.set_strategy_search_mode("search_until_qualified")
 
     asyncio.run(governor_app._run_governor_cycle(runtime))
 

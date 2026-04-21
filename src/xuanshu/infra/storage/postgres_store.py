@@ -24,6 +24,7 @@ POSTGRES_TABLES = (
     "strategy_packages",
     "backtest_reports",
     "approval_records",
+    "strategy_replacements",
 )
 
 
@@ -110,6 +111,9 @@ class PostgresRuntimeStore:
 
     def append_approval_record(self, payload: dict[str, Any]) -> None:
         self._append_row("approval_records", payload)
+
+    def append_strategy_replacement(self, payload: dict[str, Any]) -> None:
+        self._append_row("strategy_replacements", payload)
 
     def has_strategy_package(self, *, strategy_package_id: str) -> bool:
         return self._find_row_by_payload_fields(

@@ -44,6 +44,10 @@ def test_redis_key_naming_matches_hot_state_contract() -> None:
     assert RedisKeys.latest_snapshot() == "xuanshu:strategy:latest"
     assert RedisKeys.run_mode() == "xuanshu:runtime:mode"
     assert RedisKeys.symbol_runtime("BTC-USDT-SWAP") == "xuanshu:runtime:symbol:BTC-USDT-SWAP"
+    assert (
+        RedisKeys.active_symbol_strategy("BTC-USDT-SWAP")
+        == "xuanshu:runtime:active_strategy:BTC-USDT-SWAP"
+    )
     assert RedisKeys.budget_pool_summary() == "xuanshu:runtime:budget_pool"
     assert RedisKeys.governor_health_summary() == "xuanshu:runtime:governor_health"
     assert RedisKeys.strategy_search_mode() == "xuanshu:runtime:strategy_search_mode"
@@ -55,6 +59,11 @@ def test_redis_key_naming_matches_hot_state_contract() -> None:
 def test_redis_symbol_runtime_rejects_unsafe_input() -> None:
     with pytest.raises(ValueError):
         RedisKeys.symbol_runtime("btc/usdt swap")
+
+
+def test_redis_active_symbol_strategy_rejects_unsafe_input() -> None:
+    with pytest.raises(ValueError):
+        RedisKeys.active_symbol_strategy("btc/usdt swap")
 
 
 def test_redis_snapshot_store_keeps_only_the_latest_snapshot() -> None:
@@ -190,6 +199,7 @@ def test_postgres_store_exposes_append_fact_methods() -> None:
     assert hasattr(store, "append_strategy_package")
     assert hasattr(store, "append_backtest_report")
     assert hasattr(store, "append_approval_record")
+    assert hasattr(store, "append_strategy_replacement")
     assert hasattr(store, "list_recent_rows")
 
 
@@ -204,6 +214,7 @@ def test_postgres_store_exposes_append_fact_methods() -> None:
         ("append_strategy_package", "strategy_packages"),
         ("append_backtest_report", "backtest_reports"),
         ("append_approval_record", "approval_records"),
+        ("append_strategy_replacement", "strategy_replacements"),
     ],
 )
 def test_postgres_store_copies_payloads_before_append(method_name: str, table_name: str) -> None:
@@ -234,6 +245,7 @@ def test_postgres_tables_are_deterministic_and_immutable() -> None:
         "strategy_packages",
         "backtest_reports",
         "approval_records",
+        "strategy_replacements",
     )
 
 
@@ -247,6 +259,26 @@ def test_postgres_runtime_store_appends_strategy_package_backtest_and_approval_r
     assert store.list_recent_rows("strategy_packages", limit=1)[0]["strategy_package_id"] == "pkg-1"
     assert store.list_recent_rows("backtest_reports", limit=1)[0]["backtest_report_id"] == "bt-1"
     assert store.list_recent_rows("approval_records", limit=1)[0]["approval_record_id"] == "apr-1"
+
+
+def test_postgres_runtime_store_appends_strategy_replacement_rows() -> None:
+    store = PostgresRuntimeStore(dsn="postgresql://xuanshu:xuanshu@localhost:5432/xuanshu")
+
+    store.append_strategy_replacement(
+        {
+            "symbol": "BTC-USDT-SWAP",
+            "current_strategy_def_id": "strat-old",
+            "next_strategy_def_id": "strat-new",
+            "score_delta_percent": 12.5,
+        }
+    )
+
+    assert store.list_recent_rows("strategy_replacements", limit=1)[0] == {
+        "symbol": "BTC-USDT-SWAP",
+        "current_strategy_def_id": "strat-old",
+        "next_strategy_def_id": "strat-new",
+        "score_delta_percent": 12.5,
+    }
 
 
 def test_postgres_runtime_store_supports_keyed_lookup_helpers_without_recent_row_limits() -> None:

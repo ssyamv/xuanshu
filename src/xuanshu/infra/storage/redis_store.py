@@ -30,6 +30,12 @@ class RedisKeys:
         return f"xuanshu:runtime:symbol:{symbol}"
 
     @staticmethod
+    def active_symbol_strategy(symbol: str) -> str:
+        if not RedisKeys._SYMBOL_PATTERN.fullmatch(symbol):
+            raise ValueError(f"invalid runtime symbol: {symbol!r}")
+        return f"xuanshu:runtime:active_strategy:{symbol}"
+
+    @staticmethod
     def budget_pool_summary() -> str:
         return "xuanshu:runtime:budget_pool"
 

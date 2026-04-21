@@ -33,7 +33,7 @@ from xuanshu.ops.runtime_logging import configure_runtime_logger
 
 _LOGGER = configure_runtime_logger("xuanshu.governor")
 _OKX_REST_BASE_URL = "https://www.okx.com"
-_MIN_RESEARCH_NET_PNL = 0.5
+_MIN_RESEARCH_NET_PNL = 50.0
 _SEARCH_MODE_ACTIVE = "search_until_qualified"
 _SEARCH_MODE_OBSERVE = "observe_until_invalidated"
 _SEARCH_RETRY_DELAY_SEC = 5
@@ -65,6 +65,10 @@ class ResearchCandidateBuildResult:
 
 
 _RESEARCH_MARKET_ENVIRONMENTS = ("trend", "range", "mean_reversion")
+
+
+def _candidate_clears_return_gate(return_percent: float) -> bool:
+    return return_percent > _MIN_RESEARCH_NET_PNL
 
 
 def build_governor_service() -> GovernorService:
@@ -488,23 +492,23 @@ async def _run_governor_cycle(runtime: GovernorRuntime) -> None:
                 backtest_report_id=backtest_report.backtest_report_id,
             ):
                 runtime.history_store.append_backtest_report(backtest_report.model_dump(mode="json"))
-            if backtest_report.net_pnl >= _MIN_RESEARCH_NET_PNL:
+            if _candidate_clears_return_gate(backtest_report.return_percent):
                 validated_candidates.append((candidate, backtest_report))
             elif (
                 best_report_under_threshold is None
-                or backtest_report.net_pnl > best_report_under_threshold[1].net_pnl
+                or backtest_report.return_percent > best_report_under_threshold[1].return_percent
             ):
                 best_report_under_threshold = (candidate, backtest_report)
 
         if validated_candidates or best_report_under_threshold is not None:
-            validated_candidates.sort(key=lambda item: item[1].net_pnl, reverse=True)
+            validated_candidates.sort(key=lambda item: item[1].return_percent, reverse=True)
             if not validated_candidates:
                 validation_status = "failed"
                 approval_status = "validation_failed"
                 if best_report_under_threshold is not None:
                     candidate, backtest_report = best_report_under_threshold
                     validation_error = (
-                        f"best candidate net_pnl {backtest_report.net_pnl} "
+                        f"best candidate return_percent {backtest_report.return_percent} "
                         f"did not exceed minimum quality threshold {_MIN_RESEARCH_NET_PNL}"
                     )
                     runtime.runtime_store.set_pending_approval_summary(
@@ -519,8 +523,8 @@ async def _run_governor_cycle(runtime: GovernorRuntime) -> None:
                             "status": "candidate_rejected_low_quality",
                             "candidate_strategy_package_id": candidate.strategy_package_id,
                             "candidate_backtest_report_id": backtest_report.backtest_report_id,
-                            "minimum_net_pnl": _MIN_RESEARCH_NET_PNL,
-                            "best_net_pnl": backtest_report.net_pnl,
+                            "minimum_return_percent": _MIN_RESEARCH_NET_PNL,
+                            "best_return_percent": backtest_report.return_percent,
                         }
                     )
                 state_summary["validation_status"] = validation_status
@@ -547,11 +551,11 @@ async def _run_governor_cycle(runtime: GovernorRuntime) -> None:
                     runtime=runtime,
                     historical_rows=candidate_historical_rows.get(candidate.strategy_package_id, historical_rows),
                 )
-                if baseline_report is not None and backtest_report.net_pnl <= baseline_report.net_pnl:
+                if baseline_report is not None and backtest_report.return_percent <= baseline_report.return_percent:
                     validation_status = "failed"
                     validation_error = (
-                        f"candidate net_pnl {backtest_report.net_pnl} "
-                        f"did not exceed current strategy {baseline_report.net_pnl}"
+                        f"candidate return_percent {backtest_report.return_percent} "
+                        f"did not exceed current strategy {baseline_report.return_percent}"
                     )
                     approval_status = "validation_failed"
                     runtime.runtime_store.set_pending_approval_summary(
@@ -607,6 +611,18 @@ async def _run_governor_cycle(runtime: GovernorRuntime) -> None:
                         runtime.runtime_store.set_strategy_search_mode(_SEARCH_MODE_OBSERVE)
                         state_summary["research_candidates"] = [candidate.model_dump(mode="json")]
                         state_summary["approved_source_reason"] = _APPROVED_RESEARCH_SOURCE_REASON
+                        state_summary["approved_symbol_strategy_bindings"] = {
+                            symbol: {
+                                "strategy_def_id": candidate.strategy_definition.strategy_def_id,
+                                "strategy_package_id": candidate.strategy_package_id,
+                                "backtest_report_id": backtest_report.backtest_report_id,
+                                "score": backtest_report.return_percent,
+                                "score_basis": "backtest_return_percent",
+                                "approval_record_id": approval_record.approval_record_id,
+                                "activated_at": approval_record.created_at,
+                            }
+                            for symbol in candidate.symbol_scope
+                        }
                         runtime.runtime_store.set_latest_approved_package_summary(
                             {
                                 "latest_strategy_package_id": candidate.strategy_package_id,
@@ -654,6 +670,8 @@ async def _run_governor_cycle(runtime: GovernorRuntime) -> None:
             "max_leverage": snapshot.max_leverage,
             "source_reason": snapshot.source_reason,
         }
+        if snapshot.symbol_strategy_bindings:
+            payload["symbol_strategy_bindings"] = snapshot.model_dump(mode="json")["symbol_strategy_bindings"]
         if approved_research_candidates and backtest_report_id is not None and approval_record is not None:
             payload.update(
                 {

@@ -12,7 +12,7 @@ from pydantic import ValidationError
 from xuanshu.contracts.approval import ApprovalDecision, ApprovalRecord
 from xuanshu.contracts.governance import ExpertOpinion
 from xuanshu.contracts.research import StrategyPackage
-from xuanshu.contracts.strategy import StrategyConfigSnapshot
+from xuanshu.contracts.strategy import ApprovedStrategyBinding, StrategyConfigSnapshot
 from xuanshu.core.enums import ApprovalState, RunMode
 from xuanshu.infra.ai.governor_client import GovernorClient
 
@@ -61,6 +61,10 @@ class GovernorCycleResult:
 
 
 class GovernorService:
+    @staticmethod
+    def _candidate_clears_return_gate(return_percent: float) -> bool:
+        return return_percent > 50.0
+
     @staticmethod
     def _load_approval_record(state_summary: Mapping[str, object]) -> ApprovalRecord | None:
         payload = state_summary.get("approval_record")
@@ -654,6 +658,21 @@ class GovernorService:
             "health_state": health_state,
         }
 
+    def bind_symbol_strategy(
+        self,
+        *,
+        snapshot: StrategyConfigSnapshot,
+        symbol: str,
+        binding_payload: Mapping[str, object],
+    ) -> StrategyConfigSnapshot:
+        normalized_symbol = symbol.strip()
+        payload = snapshot.model_dump(mode="python")
+        payload["symbol_strategy_bindings"] = dict(payload["symbol_strategy_bindings"])
+        payload["symbol_strategy_bindings"][normalized_symbol] = ApprovedStrategyBinding.model_validate(
+            dict(binding_payload)
+        )
+        return StrategyConfigSnapshot.model_validate(payload)
+
     def apply_approval_guardrails(
         self,
         candidate: StrategyConfigSnapshot,
@@ -747,6 +766,22 @@ class GovernorService:
             approved_source_reason = str(state_summary.get("approved_source_reason") or "").strip()
             if approval_record is not None and approved_source_reason:
                 snapshot = snapshot.model_copy(update={"source_reason": approved_source_reason})
+            approved_bindings = state_summary.get("approved_symbol_strategy_bindings")
+            if (
+                approval_record is not None
+                and approval_record.decision in {
+                    ApprovalDecision.APPROVED,
+                    ApprovalDecision.APPROVED_WITH_GUARDRAILS,
+                }
+                and isinstance(approved_bindings, Mapping)
+            ):
+                for symbol, binding_payload in approved_bindings.items():
+                    if isinstance(symbol, str) and isinstance(binding_payload, Mapping):
+                        snapshot = self.bind_symbol_strategy(
+                            snapshot=snapshot,
+                            symbol=symbol,
+                            binding_payload=binding_payload,
+                        )
             if self._snapshots_are_semantically_equal(snapshot, last_snapshot):
                 return GovernorCycleResult(snapshot=last_snapshot, status="unchanged", error=None)
             status = "published"

@@ -1332,6 +1332,91 @@ def test_governor_service_filters_symbol_strategy_bindings_when_guardrails_shrin
     assert list(governed.symbol_strategy_bindings) == ["BTC-USDT-SWAP"]
 
 
+def test_governor_service_binds_symbol_strategy_and_updates_existing_binding() -> None:
+    service = GovernorService()
+    snapshot = StrategyConfigSnapshot(
+        version_id="snap-candidate",
+        generated_at=datetime.now(UTC),
+        effective_from=datetime.now(UTC),
+        expires_at=datetime.now(UTC) + timedelta(minutes=5),
+        symbol_whitelist=["BTC-USDT-SWAP", "ETH-USDT-SWAP"],
+        strategy_enable_flags={"breakout": True, "mean_reversion": False, "risk_pause": True},
+        risk_multiplier=0.7,
+        per_symbol_max_position=0.12,
+        max_leverage=3,
+        market_mode=RunMode.NORMAL,
+        approval_state=ApprovalState.APPROVED,
+        source_reason="candidate",
+        ttl_sec=300,
+    )
+
+    first = service.bind_symbol_strategy(
+        snapshot=snapshot,
+        symbol="BTC-USDT-SWAP",
+        binding_payload={
+            "strategy_def_id": "strat-1",
+            "strategy_package_id": "pkg-1",
+            "backtest_report_id": "bt-1",
+            "score": 67.5,
+            "score_basis": "backtest_return_percent",
+            "approval_record_id": "apr-1",
+            "activated_at": datetime.now(UTC),
+        },
+    )
+    updated = service.bind_symbol_strategy(
+        snapshot=first,
+        symbol="BTC-USDT-SWAP",
+        binding_payload={
+            "strategy_def_id": "strat-1",
+            "strategy_package_id": "pkg-1",
+            "backtest_report_id": "bt-1",
+            "score": 72.0,
+            "score_basis": "backtest_return_percent",
+            "approval_record_id": "apr-2",
+            "activated_at": datetime.now(UTC),
+        },
+    )
+
+    assert snapshot.symbol_strategy_bindings == {}
+    assert first.symbol_strategy_bindings["BTC-USDT-SWAP"].score == 67.5
+    assert updated.symbol_strategy_bindings["BTC-USDT-SWAP"].score == 72.0
+    assert updated.symbol_strategy_bindings["BTC-USDT-SWAP"].approval_record_id == "apr-2"
+
+
+def test_governor_service_rejects_binding_for_symbol_not_in_whitelist() -> None:
+    service = GovernorService()
+    snapshot = StrategyConfigSnapshot(
+        version_id="snap-candidate",
+        generated_at=datetime.now(UTC),
+        effective_from=datetime.now(UTC),
+        expires_at=datetime.now(UTC) + timedelta(minutes=5),
+        symbol_whitelist=["BTC-USDT-SWAP"],
+        strategy_enable_flags={"breakout": True, "mean_reversion": False, "risk_pause": True},
+        risk_multiplier=0.7,
+        per_symbol_max_position=0.12,
+        max_leverage=3,
+        market_mode=RunMode.NORMAL,
+        approval_state=ApprovalState.APPROVED,
+        source_reason="candidate",
+        ttl_sec=300,
+    )
+
+    with pytest.raises(ValidationError, match="symbol_strategy_bindings keys must be listed in symbol_whitelist"):
+        service.bind_symbol_strategy(
+            snapshot=snapshot,
+            symbol="ETH-USDT-SWAP",
+            binding_payload={
+                "strategy_def_id": "strat-2",
+                "strategy_package_id": "pkg-2",
+                "backtest_report_id": "bt-2",
+                "score": 67.5,
+                "score_basis": "backtest_return_percent",
+                "approval_record_id": "apr-1",
+                "activated_at": datetime.now(UTC),
+            },
+        )
+
+
 @pytest.mark.asyncio
 async def test_governor_service_blocks_rejected_research_snapshot_publication() -> None:
     service = GovernorService()
