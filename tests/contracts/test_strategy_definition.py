@@ -1,4 +1,5 @@
 from datetime import UTC, datetime
+from math import inf
 
 import pytest
 from pydantic import ValidationError
@@ -62,6 +63,14 @@ def test_strategy_definition_rejects_negative_score() -> None:
     payload["score"] = -1.0
 
     with pytest.raises(ValidationError):
+        StrategyDefinition.model_validate(payload)
+
+
+def test_strategy_definition_rejects_non_finite_score() -> None:
+    payload = _sample_strategy_definition()
+    payload["score"] = inf
+
+    with pytest.raises(ValidationError, match="score must be finite"):
         StrategyDefinition.model_validate(payload)
 
 
@@ -224,6 +233,36 @@ def test_strategy_package_rejects_negative_score() -> None:
     }
 
     with pytest.raises(ValidationError):
+        StrategyPackage.model_validate(payload)
+
+
+def test_strategy_package_rejects_non_finite_score() -> None:
+    definition = _sample_strategy_definition()
+    definition["score"] = inf
+    payload = {
+        "strategy_package_id": "pkg-1",
+        "generated_at": datetime.now(UTC),
+        "trigger": "schedule",
+        "symbol_scope": ["BTC-USDT-SWAP"],
+        "market_environment_scope": ["trend"],
+        "strategy_family": "volatility_break_retest",
+        "directionality": "long_only",
+        "entry_rules": definition["entry_rules"],
+        "exit_rules": definition["exit_rules"],
+        "position_sizing_rules": definition["position_sizing_rules"],
+        "risk_constraints": definition["risk_constraints"],
+        "parameter_set": definition["parameter_set"],
+        "backtest_summary": {"row_count": 100},
+        "performance_summary": {"return_percent": 67.5},
+        "failure_modes": ["late_reversal"],
+        "invalidating_conditions": ["gap_down"],
+        "research_reason": "ai candidate",
+        "strategy_definition": definition,
+        "score": inf,
+        "score_basis": "backtest_return_percent",
+    }
+
+    with pytest.raises(ValidationError, match="score must be finite"):
         StrategyPackage.model_validate(payload)
 
 
@@ -449,6 +488,38 @@ def test_strategy_binding_rejects_unsupported_score_basis() -> None:
         )
 
 
+def test_strategy_binding_rejects_non_finite_score() -> None:
+    with pytest.raises(ValidationError, match="score must be finite"):
+        StrategyConfigSnapshot.model_validate(
+            {
+                "version_id": "snap-1",
+                "generated_at": "2026-04-21T00:00:00Z",
+                "effective_from": "2026-04-21T00:00:00Z",
+                "expires_at": "2026-04-21T00:05:00Z",
+                "symbol_whitelist": ["BTC-USDT-SWAP"],
+                "strategy_enable_flags": {"risk_pause": True},
+                "risk_multiplier": 0.5,
+                "per_symbol_max_position": 0.12,
+                "max_leverage": 3,
+                "market_mode": "normal",
+                "approval_state": "approved",
+                "source_reason": "approved research package",
+                "ttl_sec": 300,
+                "symbol_strategy_bindings": {
+                    "BTC-USDT-SWAP": {
+                        "strategy_def_id": "strat-btc-001",
+                        "strategy_package_id": "pkg-1",
+                        "backtest_report_id": "bt-1",
+                        "score": inf,
+                        "score_basis": "backtest_return_percent",
+                        "approval_record_id": "apr-1",
+                        "activated_at": "2026-04-21T00:00:00Z",
+                    }
+                },
+            }
+        )
+
+
 def test_strategy_snapshot_rejects_blank_symbol_strategy_binding_key() -> None:
     with pytest.raises(ValidationError, match="must not be blank"):
         StrategyConfigSnapshot.model_validate(
@@ -500,6 +571,38 @@ def test_strategy_snapshot_rejects_symbol_strategy_binding_key_not_in_whitelist(
                 "ttl_sec": 300,
                 "symbol_strategy_bindings": {
                     "ETH-USDT-SWAP": {
+                        "strategy_def_id": "strat-btc-001",
+                        "strategy_package_id": "pkg-1",
+                        "backtest_report_id": "bt-1",
+                        "score": 67.5,
+                        "score_basis": "backtest_return_percent",
+                        "approval_record_id": "apr-1",
+                        "activated_at": "2026-04-21T00:00:00Z",
+                    }
+                },
+            }
+        )
+
+
+def test_strategy_snapshot_rejects_padded_symbol_strategy_binding_key() -> None:
+    with pytest.raises(ValidationError, match="must not contain surrounding whitespace"):
+        StrategyConfigSnapshot.model_validate(
+            {
+                "version_id": "snap-1",
+                "generated_at": "2026-04-21T00:00:00Z",
+                "effective_from": "2026-04-21T00:00:00Z",
+                "expires_at": "2026-04-21T00:05:00Z",
+                "symbol_whitelist": ["BTC-USDT-SWAP"],
+                "strategy_enable_flags": {"risk_pause": True},
+                "risk_multiplier": 0.5,
+                "per_symbol_max_position": 0.12,
+                "max_leverage": 3,
+                "market_mode": "normal",
+                "approval_state": "approved",
+                "source_reason": "approved research package",
+                "ttl_sec": 300,
+                "symbol_strategy_bindings": {
+                    " BTC-USDT-SWAP ": {
                         "strategy_def_id": "strat-btc-001",
                         "strategy_package_id": "pkg-1",
                         "backtest_report_id": "bt-1",

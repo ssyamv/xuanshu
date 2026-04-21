@@ -1,5 +1,6 @@
-from typing import Annotated
 from datetime import UTC, datetime
+import math
+from typing import Annotated
 
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, ValidationInfo, field_validator, model_validator
 
@@ -33,6 +34,13 @@ class ApprovedStrategyBinding(BaseModel):
         if normalized != "backtest_return_percent":
             raise ValueError("unsupported score basis")
         return normalized
+
+    @field_validator("score")
+    @classmethod
+    def validate_score_is_finite(cls, value: float) -> float:
+        if not math.isfinite(value):
+            raise ValueError("score must be finite")
+        return value
 
 
 class StrategyConfigSnapshot(BaseModel):
@@ -82,6 +90,8 @@ class StrategyConfigSnapshot(BaseModel):
             normalized_symbol = symbol.strip()
             if not normalized_symbol:
                 raise ValueError("symbol_strategy_bindings keys must not be blank")
+            if symbol != normalized_symbol:
+                raise ValueError("symbol_strategy_bindings keys must not contain surrounding whitespace")
             if normalized_symbol not in whitelist:
                 raise ValueError("symbol_strategy_bindings keys must be listed in symbol_whitelist")
         return self

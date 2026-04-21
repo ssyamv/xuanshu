@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+import math
 from numbers import Real
 from typing import Annotated
 
@@ -80,6 +81,13 @@ class StrategyDefinition(BaseModel):
         if normalized not in _SUPPORTED_SCORE_BASES:
             raise ValueError("unsupported score basis")
         return normalized
+
+    @field_validator("score")
+    @classmethod
+    def validate_score_is_finite(cls, value: float) -> float:
+        if not math.isfinite(value):
+            raise ValueError("score must be finite")
+        return value
 
     @model_validator(mode="after")
     def validate_supported_rule_tree(self) -> "StrategyDefinition":

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from enum import StrEnum
+import math
 from typing import Annotated
 
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, field_validator, model_validator
@@ -46,6 +47,13 @@ class StrategyPackage(BaseModel):
     @classmethod
     def validate_generated_at(cls, value: datetime) -> datetime:
         return _normalize_timezone_aware_timestamp(value, field_name="generated_at")
+
+    @field_validator("score")
+    @classmethod
+    def validate_score_is_finite(cls, value: float) -> float:
+        if not math.isfinite(value):
+            raise ValueError("score must be finite")
+        return value
 
     @model_validator(mode="after")
     def validate_strategy_definition_consistency(self) -> "StrategyPackage":
