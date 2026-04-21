@@ -37,7 +37,14 @@ def _sample_strategy_definition(
         "directionality": directionality,
         "feature_spec": {"indicators": [{"name": "sma", "source": "close", "window": 20}]},
         "entry_rules": {"all": [{"op": "crosses_above", "left": "close", "right": "sma_20"}]},
-        "exit_rules": {"any": [{"op": "crosses_below", "left": "close", "right": "sma_20"}]},
+        "exit_rules": {
+            "any": [
+                {"op": "crosses_below", "left": "close", "right": "sma_20"},
+                {"op": "take_profit_bps", "value": take_profit_bps},
+                {"op": "stop_loss_bps", "value": stop_loss_bps},
+                {"op": "time_stop_minutes", "value": max_hold_minutes},
+            ]
+        },
         "position_sizing_rules": {"risk_fraction": risk_fraction},
         "risk_constraints": {"max_hold_minutes": max_hold_minutes},
         "parameter_set": {
@@ -356,6 +363,37 @@ def test_backtest_validator_builds_strategy_aware_report() -> None:
     assert report.generated_at == datetime(2026, 4, 19, 0, 4, tzinfo=UTC)
     assert report.dataset_range.regime_fit == RegimeFit.ALIGNED
     assert report.overfit_risk == OverfitRisk.MEDIUM
+
+
+def test_backtest_validator_uses_exit_rules_not_parameter_set_for_exit_thresholds() -> None:
+    package = _make_package(take_profit_bps=80)
+    drifted_definition = package.strategy_definition.model_copy(
+        update={
+            "parameter_set": {
+                **package.strategy_definition.parameter_set,
+                "stop_loss_bps": 500,
+                "take_profit_bps": 500,
+                "max_hold_minutes": 999,
+            }
+        }
+    )
+    drifted_package = package.model_copy(
+        update={
+            "parameter_set": drifted_definition.parameter_set,
+            "strategy_definition": drifted_definition,
+        }
+    )
+
+    baseline_report = BacktestValidator().validate(
+        package=package,
+        historical_rows=_build_rows([100.0, 101.0, 102.0, 103.0, 104.0]),
+    )
+    drifted_report = BacktestValidator().validate(
+        package=drifted_package,
+        historical_rows=_build_rows([100.0, 101.0, 102.0, 103.0, 104.0]),
+    )
+
+    assert baseline_report == drifted_report
 
 
 def test_backtest_validator_normalizes_row_order_before_simulation() -> None:

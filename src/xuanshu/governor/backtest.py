@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from hashlib import sha256
 import math
@@ -48,18 +49,18 @@ class BacktestValidator:
             parameter_set=definition.parameter_set,
             lookback=lookback,
         )
-        stop_loss_bps = self._extract_positive_float(definition.parameter_set, "stop_loss_bps", default=50.0)
-        take_profit_bps = self._extract_positive_float(definition.parameter_set, "take_profit_bps", default=100.0)
+        stop_loss_bps = self._extract_exit_rule_float(definition.exit_rules, "stop_loss_bps", default=50.0)
+        take_profit_bps = self._extract_exit_rule_float(definition.exit_rules, "take_profit_bps", default=100.0)
         risk_fraction = self._extract_positive_float(
             package.position_sizing_rules,
             "risk_fraction",
             default=1.0,
             upper_bound=1.0,
         )
-        max_hold_minutes = self._extract_positive_int(
-            package.risk_constraints,
-            "max_hold_minutes",
-            default=60,
+        max_hold_minutes = self._extract_exit_rule_int(
+            definition.exit_rules,
+            "time_stop_minutes",
+            default=self._extract_positive_int(package.risk_constraints, "max_hold_minutes", default=60),
         )
         if entry_signal == "range_retest" and lookback < 2:
             raise ValueError("range_retest requires lookback >= 2")
@@ -274,6 +275,68 @@ class BacktestValidator:
         if strategy_family == "breakout":
             return "breakout_confirmed"
         return "range_retest" if lookback >= 2 else "mean_reversion_signal"
+
+    @classmethod
+    def _extract_exit_rule_float(
+        cls,
+        exit_rules: object,
+        key: str,
+        *,
+        default: float,
+    ) -> float:
+        value = cls._find_exit_rule_value(exit_rules, key)
+        if value is None:
+            return default
+        if isinstance(value, bool) or not isinstance(value, Real | Decimal):
+            raise ValueError(f"{key} must be numeric")
+        try:
+            normalized_value = float(value)
+        except OverflowError as exc:
+            raise ValueError(f"{key} must be finite") from exc
+        if not math.isfinite(normalized_value) or normalized_value <= 0.0:
+            raise ValueError(f"{key} must be > 0")
+        return normalized_value
+
+    @classmethod
+    def _extract_exit_rule_int(
+        cls,
+        exit_rules: object,
+        key: str,
+        *,
+        default: int,
+    ) -> int:
+        value = cls._find_exit_rule_value(exit_rules, key)
+        if value is None:
+            return default
+        if isinstance(value, bool) or not isinstance(value, Real | Decimal):
+            raise ValueError(f"{key} must be numeric")
+        try:
+            normalized_value = float(value)
+        except OverflowError as exc:
+            raise ValueError(f"{key} must be finite") from exc
+        if not math.isfinite(normalized_value) or normalized_value <= 0.0:
+            raise ValueError(f"{key} must be > 0")
+        return int(normalized_value)
+
+    @classmethod
+    def _find_exit_rule_value(cls, node: object, key: str) -> object | None:
+        if isinstance(node, Mapping):
+            op = node.get("op")
+            if isinstance(op, str) and op.strip().lower() == key:
+                return node.get("value")
+            for combinator in ("all", "any"):
+                children = node.get(combinator)
+                if isinstance(children, list):
+                    for child in children:
+                        value = cls._find_exit_rule_value(child, key)
+                        if value is not None:
+                            return value
+        elif isinstance(node, list):
+            for child in node:
+                value = cls._find_exit_rule_value(child, key)
+                if value is not None:
+                    return value
+        return None
 
     @staticmethod
     def _extract_positive_int(config: dict[str, object], key: str, *, default: int) -> int:

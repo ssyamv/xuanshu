@@ -50,7 +50,14 @@ def _sample_strategy_definition(
         "directionality": directionality,
         "feature_spec": {"indicators": [{"name": "sma", "source": "close", "window": 20}]},
         "entry_rules": {"all": [{"op": "crosses_above", "left": "close", "right": "sma_20"}]},
-        "exit_rules": {"any": [{"op": "crosses_below", "left": "close", "right": "sma_20"}]},
+        "exit_rules": {
+            "any": [
+                {"op": "crosses_below", "left": "close", "right": "sma_20"},
+                {"op": "take_profit_bps", "value": 120},
+                {"op": "stop_loss_bps", "value": 50},
+                {"op": "time_stop_minutes", "value": 60},
+            ]
+        },
         "position_sizing_rules": {"risk_fraction": 0.0025},
         "risk_constraints": {"max_hold_minutes": 60},
         "parameter_set": parameter_set,

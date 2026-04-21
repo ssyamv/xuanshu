@@ -42,7 +42,14 @@ def _sample_strategy_definition(
         "directionality": directionality,
         "feature_spec": {"indicators": [{"name": "sma", "source": "close", "window": 20}]},
         "entry_rules": {"all": [{"op": "crosses_above", "left": "close", "right": "sma_20"}]},
-        "exit_rules": {"any": [{"op": "crosses_below", "left": "close", "right": "sma_20"}]},
+        "exit_rules": {
+            "any": [
+                {"op": "crosses_below", "left": "close", "right": "sma_20"},
+                {"op": "take_profit_bps", "value": 120},
+                {"op": "stop_loss_bps", "value": 50},
+                {"op": "time_stop_minutes", "value": 60},
+            ]
+        },
         "position_sizing_rules": {"risk_fraction": 0.0025},
         "risk_constraints": {"max_hold_minutes": 60},
         "parameter_set": parameter_set,
@@ -318,6 +325,7 @@ async def test_codex_cli_governor_runner_invokes_codex_exec_with_snapshot_schema
     assert '"approval_state": "approved"|"rejected"' in prompt
     assert '"source_reason": string' in prompt
     assert '"ttl_sec": integer' in prompt
+    assert 'Include "symbol_strategy_bindings" as an object<string, object> field; it may be empty.' in prompt
     assert "Do not return keys outside this schema." in prompt
     assert "If state_summary contains symbol_summaries" in prompt
 

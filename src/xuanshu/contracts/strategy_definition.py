@@ -122,6 +122,8 @@ class StrategyDefinition(BaseModel):
 
     @staticmethod
     def _validate_comparison_rule(node: Mapping[str, object]) -> None:
+        if set(node.keys()) != {"op", "left", "right"}:
+            raise ValueError("comparison nodes must contain exactly op, left, and right")
         if "left" not in node or "right" not in node:
             raise ValueError("left and right are required")
         left = node["left"]
@@ -143,6 +145,8 @@ class StrategyDefinition(BaseModel):
 
     @staticmethod
     def _validate_positive_value_rule(node: Mapping[str, object], *, op: str) -> None:
+        if set(node.keys()) != {"op", "value"}:
+            raise ValueError("exit primitive nodes must contain exactly op and value")
         value = node.get("value")
         if not isinstance(value, Real) or isinstance(value, bool) or value <= 0:
             raise ValueError(f"{op} value must be positive")

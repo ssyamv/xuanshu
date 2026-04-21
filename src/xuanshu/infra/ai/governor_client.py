@@ -21,6 +21,7 @@ _GOVERNOR_INSTRUCTIONS = (
     '"per_symbol_max_position": number, "max_leverage": integer, '
     '"market_mode": "normal"|"degraded"|"reduce_only"|"halted", '
     '"approval_state": "approved"|"rejected", "source_reason": string, "ttl_sec": integer}. '
+    'Include "symbol_strategy_bindings" as an object<string, object> field; it may be empty. '
     "If state_summary contains symbol_summaries, derive symbol_whitelist from those symbols and never return an empty list. "
     "Do not return keys outside this schema. "
     "Return JSON only with no commentary."

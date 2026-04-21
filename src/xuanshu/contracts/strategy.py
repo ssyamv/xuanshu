@@ -77,6 +77,12 @@ class StrategyConfigSnapshot(BaseModel):
     def validate_temporal_window(self) -> "StrategyConfigSnapshot":
         if self.expires_at <= self.effective_from:
             raise ValueError("expires_at must be after effective_from")
+        whitelist = {symbol.strip() for symbol in self.symbol_whitelist}
+        for symbol in self.symbol_strategy_bindings:
+            if not symbol.strip():
+                raise ValueError("symbol_strategy_bindings keys must not be blank")
+            if symbol not in whitelist:
+                raise ValueError("symbol_strategy_bindings keys must be listed in symbol_whitelist")
         return self
 
     @field_validator("generated_at", "effective_from", "expires_at")
