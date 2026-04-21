@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
+from numbers import Real
 from typing import Annotated
 
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, field_validator, model_validator
@@ -60,7 +62,7 @@ class StrategyDefinition(BaseModel):
     position_sizing_rules: dict[str, object]
     risk_constraints: dict[str, object]
     parameter_set: dict[str, object]
-    score: float
+    score: float = Field(ge=0.0)
     score_basis: str
 
     @field_validator("directionality")
@@ -104,5 +106,37 @@ class StrategyDefinition(BaseModel):
             op = node.get("op")
             if not isinstance(op, str) or op.strip().lower() not in _SUPPORTED_OPERATORS:
                 raise ValueError("unsupported operator")
+            normalized_op = op.strip().lower()
+            if normalized_op in {"greater_than", "less_than", "crosses_above", "crosses_below"}:
+                cls._validate_comparison_rule(node)
+            elif normalized_op in {"take_profit_bps", "stop_loss_bps", "time_stop_minutes"}:
+                cls._validate_positive_value_rule(node, op=normalized_op)
             return
         raise ValueError("rule node must be a mapping")
+
+    @staticmethod
+    def _validate_comparison_rule(node: Mapping[str, object]) -> None:
+        if "left" not in node or "right" not in node:
+            raise ValueError("left and right are required")
+        left = node["left"]
+        right = node["right"]
+        if not isinstance(left, str) or not left.strip():
+            raise ValueError("left must be a non-empty string")
+        if isinstance(right, str):
+            if not right.strip():
+                raise ValueError("right must be a non-empty string or const mapping")
+            return
+        if isinstance(right, Mapping):
+            if set(right.keys()) != {"const"}:
+                raise ValueError("right must be a non-empty string or const mapping")
+            const_value = right["const"]
+            if not isinstance(const_value, Real) or isinstance(const_value, bool):
+                raise ValueError("right const must be numeric")
+            return
+        raise ValueError("right must be a non-empty string or const mapping")
+
+    @staticmethod
+    def _validate_positive_value_rule(node: Mapping[str, object], *, op: str) -> None:
+        value = node.get("value")
+        if not isinstance(value, Real) or isinstance(value, bool) or value <= 0:
+            raise ValueError(f"{op} value must be positive")

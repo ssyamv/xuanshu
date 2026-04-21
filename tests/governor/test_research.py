@@ -40,6 +40,27 @@ def test_strategy_research_engine_builds_candidate_package_from_history() -> Non
         "close_change_bps": 300.0,
     }
     assert package.performance_summary == {"return_percent": 3.0}
+    assert package.score == 3.0
+    assert package.strategy_definition.score == 3.0
+
+
+def test_strategy_research_engine_clamps_negative_return_score_to_zero() -> None:
+    engine = StrategyResearchEngine()
+
+    package = engine.build_candidate_package(
+        trigger=ResearchTrigger.MANUAL,
+        symbol_scope=["BTC-USDT-SWAP"],
+        market_environment="trend",
+        historical_rows=[
+            {"timestamp": datetime(2026, 4, 19, 0, 0, tzinfo=UTC), "close": 100.0},
+            {"timestamp": datetime(2026, 4, 19, 0, 5, tzinfo=UTC), "close": 90.0},
+        ],
+        research_reason="manual trend study",
+    )
+
+    assert package.performance_summary["return_percent"] < 0
+    assert package.score == 0.0
+    assert package.strategy_definition.score == 0.0
 
 
 @pytest.mark.asyncio
@@ -81,6 +102,8 @@ async def test_strategy_research_engine_builds_candidate_package_from_provider_a
     assert any(package.exit_rules == {"stop_loss_bps": 65, "take_profit_bps": 150} for package in packages)
     assert any(package.position_sizing_rules == {"risk_fraction": 0.003} for package in packages)
     assert any(package.risk_constraints == {"max_hold_minutes": 90} for package in packages)
+    assert any(package.strategy_definition.position_sizing_rules == {"risk_fraction": 0.003} for package in packages)
+    assert any(package.strategy_definition.risk_constraints == {"max_hold_minutes": 90} for package in packages)
     assert any(package.failure_modes == ["whipsaw"] for package in packages)
     assert any(package.invalidating_conditions == ["trend breakdown"] for package in packages)
     assert all(package.research_reason == "manual trend study | trend continuation remains intact" for package in packages)

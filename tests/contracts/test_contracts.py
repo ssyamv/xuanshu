@@ -24,7 +24,7 @@ def _sample_strategy_definition() -> dict[str, object]:
         "exit_rules": {"any": [{"op": "crosses_below", "left": "close", "right": "sma_20"}]},
         "position_sizing_rules": {"risk_fraction": 0.01},
         "risk_constraints": {"max_hold_minutes": 240},
-        "parameter_set": {"lookback": 20},
+        "parameter_set": {"lookback_fast": 20, "lookback_slow": 60},
         "score": 67.5,
         "score_basis": "backtest_return_percent",
     }

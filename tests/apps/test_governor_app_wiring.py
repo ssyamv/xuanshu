@@ -27,19 +27,27 @@ from xuanshu.infra.storage.postgres_store import PostgresRuntimeStore
 from xuanshu.infra.storage.redis_store import RedisSnapshotStore
 
 
-def _sample_strategy_definition() -> dict[str, object]:
+def _sample_strategy_definition(
+    *,
+    strategy_family: str = "breakout",
+    directionality: str = "long_only",
+    parameter_set: dict[str, object] | None = None,
+    score: float = 67.5,
+) -> dict[str, object]:
+    if parameter_set is None:
+        parameter_set = {"lookback": 20}
     return {
         "strategy_def_id": "strat-app-001",
         "symbol": "BTC-USDT-SWAP",
-        "strategy_family": "breakout",
-        "directionality": "long_only",
+        "strategy_family": strategy_family,
+        "directionality": directionality,
         "feature_spec": {"indicators": [{"name": "sma", "source": "close", "window": 20}]},
         "entry_rules": {"all": [{"op": "crosses_above", "left": "close", "right": "sma_20"}]},
         "exit_rules": {"any": [{"op": "crosses_below", "left": "close", "right": "sma_20"}]},
         "position_sizing_rules": {"risk_fraction": 0.01},
         "risk_constraints": {"max_hold_minutes": 240},
-        "parameter_set": {"lookback": 20},
-        "score": 67.5,
+        "parameter_set": parameter_set,
+        "score": score,
         "score_basis": "backtest_return_percent",
     }
 
@@ -606,7 +614,9 @@ def test_governor_cycle_can_publish_snapshot_from_approved_research(monkeypatch)
         failure_modes=["range_whipsaw"],
         invalidating_conditions=["liquidity_collapse"],
         research_reason="manual research run",
-        strategy_definition=_sample_strategy_definition(),
+        strategy_definition=_sample_strategy_definition(
+            parameter_set={"lookback_fast": 20, "lookback_slow": 60},
+        ),
         score=67.5,
         score_basis="backtest_return_percent",
     )
@@ -694,7 +704,9 @@ def test_governor_cycle_does_not_send_unapproved_research_downstream(monkeypatch
         failure_modes=["range_whipsaw"],
         invalidating_conditions=["liquidity_collapse"],
         research_reason="manual research run",
-        strategy_definition=_sample_strategy_definition(),
+        strategy_definition=_sample_strategy_definition(
+            parameter_set={"lookback_fast": 20, "lookback_slow": 60},
+        ),
         score=67.5,
         score_basis="backtest_return_percent",
     )
@@ -1026,7 +1038,7 @@ def test_governor_cycle_rejects_all_candidates_below_required_net_pnl(monkeypatc
         failure_modes=[],
         invalidating_conditions=[],
         research_reason="low candidate",
-        strategy_definition=_sample_strategy_definition(),
+        strategy_definition=_sample_strategy_definition(directionality="short_only"),
         score=67.5,
         score_basis="backtest_return_percent",
     )
@@ -1121,7 +1133,10 @@ def test_governor_cycle_skips_invalid_candidates_and_keeps_evaluating_remaining_
         failure_modes=[],
         invalidating_conditions=[],
         research_reason="invalid candidate",
-        strategy_definition=_sample_strategy_definition(),
+        strategy_definition=_sample_strategy_definition(
+            strategy_family="mean_reversion",
+            parameter_set={"lookback": 1},
+        ),
         score=67.5,
         score_basis="backtest_return_percent",
     )
@@ -1132,6 +1147,12 @@ def test_governor_cycle_skips_invalid_candidates_and_keeps_evaluating_remaining_
             "strategy_family": "breakout",
             "entry_rules": {"signal": "breakout_confirmed"},
             "parameter_set": {"lookback": 2},
+            "strategy_definition": invalid_candidate.strategy_definition.model_copy(
+                update={
+                    "strategy_family": "breakout",
+                    "parameter_set": {"lookback": 2},
+                }
+            ),
             "research_reason": "valid candidate",
         }
     )
@@ -1957,7 +1978,7 @@ def test_governor_cycle_drops_candidate_that_underperforms_current_strategy(monk
             "exit_rules": {"stop_loss_bps": 50, "take_profit_bps": 120},
             "position_sizing_rules": {"risk_fraction": 0.0025},
             "risk_constraints": {"max_hold_minutes": 60},
-            "parameter_set": {"lookback": 1},
+            "parameter_set": {"lookback": 20},
             "backtest_summary": {},
             "performance_summary": {},
             "failure_modes": [],

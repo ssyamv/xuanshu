@@ -1,19 +1,22 @@
+from typing import Annotated
 from datetime import UTC, datetime
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints, ValidationInfo, field_validator, model_validator
 
 from xuanshu.core.enums import ApprovalState, RunMode
+
+NormalizedStr = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
 
 
 class ApprovedStrategyBinding(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    strategy_def_id: str = Field(min_length=1)
-    strategy_package_id: str = Field(min_length=1)
-    backtest_report_id: str = Field(min_length=1)
+    strategy_def_id: NormalizedStr
+    strategy_package_id: NormalizedStr
+    backtest_report_id: NormalizedStr
     score: float = Field(ge=0.0)
-    score_basis: str = Field(min_length=1)
-    approval_record_id: str = Field(min_length=1)
+    score_basis: NormalizedStr
+    approval_record_id: NormalizedStr
     activated_at: datetime
 
     @field_validator("activated_at")

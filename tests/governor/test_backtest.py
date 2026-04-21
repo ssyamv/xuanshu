@@ -17,18 +17,23 @@ from xuanshu.contracts.research import ResearchTrigger, StrategyPackage
 from xuanshu.governor.backtest import BacktestValidator
 
 
-def _sample_strategy_definition(*, directionality: str) -> dict[str, object]:
+def _sample_strategy_definition(
+    *,
+    strategy_family: str = "breakout",
+    directionality: str,
+    lookback: int = 20,
+) -> dict[str, object]:
     return {
         "strategy_def_id": "strat-backtest-001",
         "symbol": "BTC-USDT-SWAP",
-        "strategy_family": "breakout",
+        "strategy_family": strategy_family,
         "directionality": directionality,
         "feature_spec": {"indicators": [{"name": "sma", "source": "close", "window": 20}]},
         "entry_rules": {"all": [{"op": "crosses_above", "left": "close", "right": "sma_20"}]},
         "exit_rules": {"any": [{"op": "crosses_below", "left": "close", "right": "sma_20"}]},
         "position_sizing_rules": {"risk_fraction": 0.01},
         "risk_constraints": {"max_hold_minutes": 240},
-        "parameter_set": {"lookback": 20},
+        "parameter_set": {"lookback": lookback},
         "score": 67.5,
         "score_basis": "backtest_return_percent",
     }
@@ -148,7 +153,7 @@ def test_strategy_package_requires_timezone_aware_generated_at() -> None:
             exit_rules={},
             position_sizing_rules={},
             risk_constraints={},
-            parameter_set={},
+            parameter_set={"lookback": 20},
             backtest_summary={},
             performance_summary={},
             failure_modes=["late breakouts"],
@@ -173,7 +178,7 @@ def test_strategy_package_normalizes_timezone_aware_generated_at_to_utc() -> Non
         exit_rules={},
         position_sizing_rules={},
         risk_constraints={},
-        parameter_set={},
+        parameter_set={"lookback": 20},
         backtest_summary={},
         performance_summary={},
             failure_modes=["late breakouts"],
@@ -294,7 +299,11 @@ def _make_package(
         failure_modes=["late"],
         invalidating_conditions=["spread expansion"],
         research_reason="scheduled research",
-        strategy_definition=_sample_strategy_definition(directionality=directionality),
+            strategy_definition=_sample_strategy_definition(
+                strategy_family=strategy_family,
+                directionality=directionality,
+                lookback=lookback,
+            ),
         score=67.5,
         score_basis="backtest_return_percent",
     )

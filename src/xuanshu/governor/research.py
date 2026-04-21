@@ -271,7 +271,7 @@ class StrategyResearchEngine:
                 lookback=parameter_set["lookback"],
                 directionality=directionality,
             )
-        score = performance_summary["return_percent"]
+        score = max(performance_summary["return_percent"], 0.0)
 
         return StrategyPackage(
             strategy_package_id=strategy_package_id,
@@ -289,6 +289,8 @@ class StrategyResearchEngine:
                 parameter_set=parameter_set,
                 stop_loss_bps=stop_loss_bps,
                 take_profit_bps=take_profit_bps,
+                risk_fraction=risk_fraction,
+                max_hold_minutes=max_hold_minutes,
                 score=score,
             ),
             entry_rules={"signal": entry_signal_value},
@@ -470,6 +472,8 @@ class StrategyResearchEngine:
         parameter_set: dict[str, object],
         stop_loss_bps: int,
         take_profit_bps: int,
+        risk_fraction: float,
+        max_hold_minutes: int,
         score: float,
     ) -> StrategyDefinition:
         if directionality == "short_only":
@@ -514,8 +518,8 @@ class StrategyResearchEngine:
             },
             entry_rules=entry_rules,
             exit_rules=exit_rules,
-            position_sizing_rules={"risk_fraction": 0.01},
-            risk_constraints={"max_hold_minutes": 240},
+            position_sizing_rules={"risk_fraction": risk_fraction},
+            risk_constraints={"max_hold_minutes": max_hold_minutes},
             parameter_set=parameter_set,
             score=score,
             score_basis="backtest_return_percent",

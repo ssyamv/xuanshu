@@ -4,7 +4,7 @@ from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Annotated
 
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints, field_validator
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints, field_validator, model_validator
 
 from xuanshu.contracts.strategy_definition import StrategyDefinition
 
@@ -46,6 +46,23 @@ class StrategyPackage(BaseModel):
     @classmethod
     def validate_generated_at(cls, value: datetime) -> datetime:
         return _normalize_timezone_aware_timestamp(value, field_name="generated_at")
+
+    @model_validator(mode="after")
+    def validate_strategy_definition_consistency(self) -> "StrategyPackage":
+        definition = self.strategy_definition
+        if self.symbol_scope[0] != definition.symbol:
+            raise ValueError("symbol_scope[0] must match strategy_definition.symbol")
+        if self.strategy_family != definition.strategy_family:
+            raise ValueError("strategy_family must match strategy_definition.strategy_family")
+        if self.directionality != definition.directionality:
+            raise ValueError("directionality must match strategy_definition.directionality")
+        if self.score != definition.score:
+            raise ValueError("score must match strategy_definition.score")
+        if self.score_basis != definition.score_basis:
+            raise ValueError("score_basis must match strategy_definition.score_basis")
+        if self.parameter_set != definition.parameter_set:
+            raise ValueError("parameter_set must match strategy_definition.parameter_set")
+        return self
 
 
 def _normalize_timezone_aware_timestamp(value: datetime, *, field_name: str) -> datetime:

@@ -35,7 +35,7 @@ def _sample_strategy_definition() -> dict[str, object]:
         },
         "position_sizing_rules": {"risk_fraction": 0.01},
         "risk_constraints": {"max_hold_minutes": 240},
-        "parameter_set": {"fast_window": 20, "slow_window": 50},
+        "parameter_set": {"fast_window": 20},
         "score": 67.5,
         "score_basis": "backtest_return_percent",
     }
@@ -57,6 +57,14 @@ def test_strategy_definition_rejects_unsupported_operator() -> None:
         StrategyDefinition.model_validate(payload)
 
 
+def test_strategy_definition_rejects_negative_score() -> None:
+    payload = _sample_strategy_definition()
+    payload["score"] = -1.0
+
+    with pytest.raises(ValidationError):
+        StrategyDefinition.model_validate(payload)
+
+
 @pytest.mark.parametrize(
     ("field_name", "bad_value", "message"),
     [
@@ -71,6 +79,26 @@ def test_strategy_definition_rejects_unsupported_dsl_values(field_name: str, bad
     payload[field_name] = bad_value
 
     with pytest.raises(ValidationError, match=message):
+        StrategyDefinition.model_validate(payload)
+
+
+def test_strategy_definition_rejects_missing_comparison_operand() -> None:
+    payload = _sample_strategy_definition()
+    payload["entry_rules"] = {"all": [{"op": "greater_than", "left": "close"}]}
+
+    with pytest.raises(ValidationError, match="left and right are required"):
+        StrategyDefinition.model_validate(payload)
+
+
+@pytest.mark.parametrize(
+    ("op", "value"),
+    [("take_profit_bps", -1), ("stop_loss_bps", 0), ("time_stop_minutes", -10)],
+)
+def test_strategy_definition_rejects_non_positive_exit_values(op: str, value: int) -> None:
+    payload = _sample_strategy_definition()
+    payload["exit_rules"] = {"any": [{"op": op, "value": value}]}
+
+    with pytest.raises(ValidationError, match="must be positive"):
         StrategyDefinition.model_validate(payload)
 
 
@@ -101,6 +129,34 @@ def test_strategy_package_requires_embedded_strategy_definition() -> None:
     )
 
     assert package.strategy_definition.strategy_def_id == "strat-btc-001"
+
+
+def test_strategy_package_rejects_inconsistent_embedded_definition() -> None:
+    payload = {
+        "strategy_package_id": "pkg-1",
+        "generated_at": datetime.now(UTC),
+        "trigger": "schedule",
+        "symbol_scope": ["BTC-USDT-SWAP"],
+        "market_environment_scope": ["trend"],
+        "strategy_family": "volatility_break_retest",
+        "directionality": "long_only",
+        "entry_rules": {"signal": "dsl"},
+        "exit_rules": {"mode": "dsl"},
+        "position_sizing_rules": {"risk_fraction": 0.01},
+        "risk_constraints": {"max_hold_minutes": 240},
+        "parameter_set": {"fast_window": 99},
+        "backtest_summary": {"row_count": 100},
+        "performance_summary": {"return_percent": 67.5},
+        "failure_modes": ["late_reversal"],
+        "invalidating_conditions": ["gap_down"],
+        "research_reason": "ai candidate",
+        "strategy_definition": _sample_strategy_definition(),
+        "score": 67.5,
+        "score_basis": "backtest_return_percent",
+    }
+
+    with pytest.raises(ValidationError, match="parameter_set must match"):
+        StrategyPackage.model_validate(payload)
 
 
 def test_strategy_package_rejects_missing_strategy_definition() -> None:
@@ -189,6 +245,38 @@ def test_strategy_snapshot_accepts_symbol_strategy_bindings() -> None:
     )
 
     assert snapshot.symbol_strategy_bindings["BTC-USDT-SWAP"].score == 67.5
+
+
+def test_strategy_binding_rejects_whitespace_identifiers() -> None:
+    with pytest.raises(ValidationError):
+        StrategyConfigSnapshot.model_validate(
+            {
+                "version_id": "snap-1",
+                "generated_at": "2026-04-21T00:00:00Z",
+                "effective_from": "2026-04-21T00:00:00Z",
+                "expires_at": "2026-04-21T00:05:00Z",
+                "symbol_whitelist": ["BTC-USDT-SWAP"],
+                "strategy_enable_flags": {"risk_pause": True},
+                "risk_multiplier": 0.5,
+                "per_symbol_max_position": 0.12,
+                "max_leverage": 3,
+                "market_mode": "normal",
+                "approval_state": "approved",
+                "source_reason": "approved research package",
+                "ttl_sec": 300,
+                "symbol_strategy_bindings": {
+                    "BTC-USDT-SWAP": {
+                        "strategy_def_id": "   ",
+                        "strategy_package_id": "pkg-1",
+                        "backtest_report_id": "bt-1",
+                        "score": 67.5,
+                        "score_basis": "backtest_return_percent",
+                        "approval_record_id": "apr-1",
+                        "activated_at": "2026-04-21T00:00:00Z",
+                    }
+                },
+            }
+        )
 
 
 def test_strategy_binding_rejects_unsupported_score_basis() -> None:
