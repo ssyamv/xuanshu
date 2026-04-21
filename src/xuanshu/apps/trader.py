@@ -299,9 +299,12 @@ def _load_latest_checkpoint(runtime: TraderRuntime) -> ExecutionCheckpoint:
     )
     latest_row.setdefault("needs_reconcile", False)
     try:
-        return ExecutionCheckpoint.model_validate(latest_row)
+        checkpoint = ExecutionCheckpoint.model_validate(latest_row)
     except Exception:
         return runtime.startup_checkpoint
+    if checkpoint.active_snapshot_version != runtime.startup_snapshot.version_id:
+        return _build_startup_checkpoint(runtime.startup_snapshot, runtime.current_mode)
+    return checkpoint
 
 
 def _publish_runtime_state(runtime: TraderRuntime, *, symbol: str | None = None) -> None:
