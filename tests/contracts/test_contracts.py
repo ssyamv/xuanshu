@@ -1,214 +1,47 @@
-from datetime import UTC, datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from pydantic import ValidationError
 
-from xuanshu.config.settings import GovernorRuntimeSettings, Settings, TraderRuntimeSettings
+from xuanshu.config.settings import Settings, TraderRuntimeSettings
 from xuanshu.contracts.checkpoint import CheckpointBudgetState, CheckpointOrder, CheckpointPosition, ExecutionCheckpoint
-from xuanshu.contracts.research import ResearchTrigger, StrategyPackage
-from xuanshu.contracts.risk import CandidateSignal
 from xuanshu.contracts.market import MarketStateSnapshot
-from xuanshu.contracts.governance import ExpertOpinion
-from xuanshu.contracts.strategy import StrategyConfigSnapshot
-from xuanshu.core.enums import EntryType, MarketRegime, OkxAccountMode, OrderSide, RunMode, SignalUrgency, VolatilityState
+from xuanshu.contracts.risk import CandidateSignal
+from xuanshu.contracts.strategy import ApprovedStrategyBinding, StrategyConfigSnapshot
+from xuanshu.core.enums import ApprovalState, EntryType, MarketRegime, OkxAccountMode, OrderSide, RunMode, SignalUrgency, StrategyId, VolatilityState
 
 
-def _sample_strategy_definition() -> dict[str, object]:
-    return {
-        "strategy_def_id": "strat-contract-001",
-        "symbol": "BTC-USDT-SWAP",
-        "strategy_family": "breakout",
-        "directionality": "long_only",
-        "feature_spec": {"indicators": [{"name": "sma", "source": "close", "window": 20}]},
-        "entry_rules": {"all": [{"op": "crosses_above", "left": "close", "right": "sma_20"}]},
-        "exit_rules": {"any": [{"op": "crosses_below", "left": "close", "right": "sma_20"}]},
-        "position_sizing_rules": {"risk_fraction": 0.01},
-        "risk_constraints": {"max_hold_minutes": 240},
-        "parameter_set": {"lookback_fast": 20, "lookback_slow": 60},
-        "score": 67.5,
-        "score_basis": "backtest_return_percent",
-    }
-
-
-def test_strategy_snapshot_and_expert_opinion_are_stable_contracts() -> None:
+def test_strategy_snapshot_contract_is_typed_and_active_when_approved() -> None:
     snapshot = StrategyConfigSnapshot(
         version_id="snap-001",
         generated_at=datetime.now(UTC),
         effective_from=datetime.now(UTC),
         expires_at=datetime.now(UTC) + timedelta(minutes=5),
-        symbol_whitelist=["BTC-USDT-SWAP", "ETH-USDT-SWAP"],
-        strategy_enable_flags={"breakout": True, "mean_reversion": True, "risk_pause": True},
+        symbol_whitelist=["ETH-USDT-SWAP"],
+        strategy_enable_flags={"vol_breakout": True},
         risk_multiplier=0.8,
         per_symbol_max_position=0.12,
         max_leverage=3,
         market_mode=RunMode.NORMAL,
-        approval_state="approved",
-        source_reason="committee result",
+        approval_state=ApprovalState.APPROVED,
+        source_reason="fixed strategy",
         ttl_sec=300,
-    )
-    opinion = ExpertOpinion(
-        opinion_id="op-001",
-        expert_type="risk",
-        generated_at=datetime.now(UTC),
-        symbol_scope=["BTC-USDT-SWAP"],
-        decision="tighten_risk",
-        confidence=0.8,
-        supporting_facts=["recent risk events rising"],
-        risk_flags=["drawdown_watch"],
-        ttl_sec=300,
-    )
-
-    assert snapshot.is_expired(datetime.now(UTC)) is False
-    assert opinion.expert_type == "risk"
-
-
-def test_strategy_package_contract_is_typed() -> None:
-    definition = _sample_strategy_definition()
-    package = StrategyPackage(
-        strategy_package_id="pkg-001",
-        generated_at=datetime.now(UTC),
-        trigger=ResearchTrigger.MANUAL,
-        symbol_scope=["BTC-USDT-SWAP", "ETH-USDT-SWAP"],
-        market_environment_scope=["trend"],
-        strategy_family="breakout",
-        directionality="long_only",
-        entry_rules=definition["entry_rules"],
-        exit_rules=definition["exit_rules"],
-        position_sizing_rules=definition["position_sizing_rules"],
-        risk_constraints=definition["risk_constraints"],
-        parameter_set=definition["parameter_set"],
-        backtest_summary={"total_return": 0.18},
-        performance_summary={"sharpe": 1.4},
-        failure_modes=["range_whipsaw"],
-        invalidating_conditions=["liquidity_collapse"],
-        research_reason="manual research run",
-        strategy_definition=definition,
-        score=67.5,
-        score_basis="backtest_return_percent",
+        symbol_strategy_bindings={
+            "ETH-USDT-SWAP": ApprovedStrategyBinding(
+                strategy_def_id="vol-breakout-eth-4h",
+                strategy_package_id="fixed-vol-breakout",
+                backtest_report_id="bt-vol-breakout",
+                score=56.04,
+                score_basis="backtest_return_percent",
+                approval_record_id="fixed-vol-breakout",
+                activated_at=datetime.now(UTC),
+            )
+        },
     )
 
-    assert package.directionality == "long_only"
-
-
-def test_strategy_package_rejects_unknown_trigger_value() -> None:
-    definition = _sample_strategy_definition()
-    payload = {
-        "strategy_package_id": "pkg-001",
-        "generated_at": datetime.now(UTC),
-        "trigger": "not-a-trigger",
-        "symbol_scope": ["BTC-USDT-SWAP", "ETH-USDT-SWAP"],
-        "market_environment_scope": ["trend"],
-        "strategy_family": "breakout",
-        "directionality": "long_only",
-        "entry_rules": definition["entry_rules"],
-        "exit_rules": definition["exit_rules"],
-        "position_sizing_rules": definition["position_sizing_rules"],
-        "risk_constraints": definition["risk_constraints"],
-        "parameter_set": definition["parameter_set"],
-        "backtest_summary": {"total_return": 0.18},
-        "performance_summary": {"sharpe": 1.4},
-        "failure_modes": ["range_whipsaw"],
-        "invalidating_conditions": ["liquidity_collapse"],
-        "research_reason": "manual research run",
-        "strategy_definition": definition,
-        "score": 67.5,
-        "score_basis": "backtest_return_percent",
-    }
-
-    with pytest.raises(ValidationError):
-        StrategyPackage(**payload)
-
-
-@pytest.mark.parametrize(
-    "field_name",
-    ["symbol_scope", "market_environment_scope"],
-)
-def test_strategy_package_rejects_blank_entries(field_name: str) -> None:
-    definition = _sample_strategy_definition()
-    payload = {
-        "strategy_package_id": "pkg-001",
-        "generated_at": datetime.now(UTC),
-        "trigger": ResearchTrigger.MANUAL,
-        "symbol_scope": ["BTC-USDT-SWAP"],
-        "market_environment_scope": ["trend"],
-        "strategy_family": "breakout",
-        "directionality": "long_only",
-        "entry_rules": definition["entry_rules"],
-        "exit_rules": definition["exit_rules"],
-        "position_sizing_rules": definition["position_sizing_rules"],
-        "risk_constraints": definition["risk_constraints"],
-        "parameter_set": definition["parameter_set"],
-        "backtest_summary": {"total_return": 0.18},
-        "performance_summary": {"sharpe": 1.4},
-        "failure_modes": ["range_whipsaw"],
-        "invalidating_conditions": ["liquidity_collapse"],
-        "research_reason": "manual research run",
-        "strategy_definition": definition,
-        "score": 67.5,
-        "score_basis": "backtest_return_percent",
-    }
-    payload[field_name] = ["", "trend"] if field_name == "market_environment_scope" else ["BTC-USDT-SWAP", " "]
-
-    with pytest.raises(ValidationError):
-        StrategyPackage(**payload)
-
-
-def test_strategy_package_rejects_naive_generated_at() -> None:
-    definition = _sample_strategy_definition()
-    payload = {
-        "strategy_package_id": "pkg-001",
-        "generated_at": datetime.now(),
-        "trigger": ResearchTrigger.MANUAL,
-        "symbol_scope": ["BTC-USDT-SWAP", "ETH-USDT-SWAP"],
-        "market_environment_scope": ["trend"],
-        "strategy_family": "breakout",
-        "directionality": "long_only",
-        "entry_rules": definition["entry_rules"],
-        "exit_rules": definition["exit_rules"],
-        "position_sizing_rules": definition["position_sizing_rules"],
-        "risk_constraints": definition["risk_constraints"],
-        "parameter_set": definition["parameter_set"],
-        "backtest_summary": {"total_return": 0.18},
-        "performance_summary": {"sharpe": 1.4},
-        "failure_modes": ["range_whipsaw"],
-        "invalidating_conditions": ["liquidity_collapse"],
-        "research_reason": "manual research run",
-        "strategy_definition": definition,
-        "score": 67.5,
-        "score_basis": "backtest_return_percent",
-    }
-
-    with pytest.raises(ValidationError, match="timezone-aware"):
-        StrategyPackage(**payload)
-
-
-def test_strategy_package_normalizes_generated_at_to_utc() -> None:
-    definition = _sample_strategy_definition()
-    package = StrategyPackage(
-        strategy_package_id="pkg-001",
-        generated_at=datetime(2026, 1, 1, 12, 0, tzinfo=timezone(timedelta(hours=8))),
-        trigger=ResearchTrigger.MANUAL,
-        symbol_scope=["BTC-USDT-SWAP", "ETH-USDT-SWAP"],
-        market_environment_scope=["trend"],
-        strategy_family="breakout",
-        directionality="long_only",
-        entry_rules=definition["entry_rules"],
-        exit_rules=definition["exit_rules"],
-        position_sizing_rules=definition["position_sizing_rules"],
-        risk_constraints=definition["risk_constraints"],
-        parameter_set=definition["parameter_set"],
-        backtest_summary={"total_return": 0.18},
-        performance_summary={"sharpe": 1.4},
-        failure_modes=["range_whipsaw"],
-        invalidating_conditions=["liquidity_collapse"],
-        research_reason="manual research run",
-        strategy_definition=definition,
-        score=67.5,
-        score_basis="backtest_return_percent",
-    )
-
-    assert package.generated_at == datetime(2026, 1, 1, 4, 0, tzinfo=UTC)
-    assert package.generated_at.tzinfo == UTC
+    assert snapshot.is_active(datetime.now(UTC)) is True
+    assert snapshot.allows_symbol(" ETH-USDT-SWAP ")
+    assert snapshot.is_strategy_enabled("vol_breakout")
 
 
 @pytest.mark.parametrize("field_name", ["generated_at", "effective_from", "expires_at"])
@@ -218,14 +51,14 @@ def test_strategy_snapshot_rejects_naive_datetimes(field_name: str) -> None:
         "generated_at": datetime.now(UTC),
         "effective_from": datetime.now(UTC),
         "expires_at": datetime.now(UTC) + timedelta(minutes=5),
-        "symbol_whitelist": ["BTC-USDT-SWAP", "ETH-USDT-SWAP"],
-        "strategy_enable_flags": {"breakout": True},
+        "symbol_whitelist": ["ETH-USDT-SWAP"],
+        "strategy_enable_flags": {"vol_breakout": True},
         "risk_multiplier": 0.8,
         "per_symbol_max_position": 0.12,
         "max_leverage": 3,
         "market_mode": RunMode.NORMAL,
-        "approval_state": "approved",
-        "source_reason": "committee result",
+        "approval_state": ApprovalState.APPROVED,
+        "source_reason": "fixed strategy",
         "ttl_sec": 300,
     }
     payload[field_name] = datetime.now()
@@ -240,14 +73,14 @@ def test_strategy_snapshot_rejects_naive_reference_times() -> None:
         generated_at=datetime.now(UTC),
         effective_from=datetime.now(UTC),
         expires_at=datetime.now(UTC) + timedelta(minutes=5),
-        symbol_whitelist=["BTC-USDT-SWAP", "ETH-USDT-SWAP"],
-        strategy_enable_flags={"breakout": True, "mean_reversion": True, "risk_pause": True},
+        symbol_whitelist=["ETH-USDT-SWAP"],
+        strategy_enable_flags={"vol_breakout": True},
         risk_multiplier=0.8,
         per_symbol_max_position=0.12,
         max_leverage=3,
         market_mode=RunMode.NORMAL,
-        approval_state="approved",
-        source_reason="committee result",
+        approval_state=ApprovalState.APPROVED,
+        source_reason="fixed strategy",
         ttl_sec=300,
     )
 
@@ -255,24 +88,11 @@ def test_strategy_snapshot_rejects_naive_reference_times() -> None:
         snapshot.is_active(datetime.now())
 
 
-def test_governor_runtime_settings_allow_codex_cli_without_openai_api_key(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setenv("XUANSHU_RESEARCH_PROVIDER", "codex_cli")
-    monkeypatch.setenv("POSTGRES_DSN", "postgresql+psycopg://xuanshu:xuanshu@localhost:5432/xuanshu")
-    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
-
-    settings = GovernorRuntimeSettings()
-
-    assert settings.research_provider.value == "codex_cli"
-    assert settings.openai_api_key is None
-
-
 @pytest.mark.parametrize(
     "symbol_whitelist",
     [
         [""],
-        ["BTC-USDT-SWAP", " "],
+        ["ETH-USDT-SWAP", " "],
     ],
 )
 def test_strategy_snapshot_rejects_blank_symbol_whitelist_entries(symbol_whitelist: list[str]) -> None:
@@ -282,13 +102,13 @@ def test_strategy_snapshot_rejects_blank_symbol_whitelist_entries(symbol_whiteli
         "effective_from": datetime.now(UTC),
         "expires_at": datetime.now(UTC) + timedelta(minutes=5),
         "symbol_whitelist": symbol_whitelist,
-        "strategy_enable_flags": {"breakout": True},
+        "strategy_enable_flags": {"vol_breakout": True},
         "risk_multiplier": 0.8,
         "per_symbol_max_position": 0.12,
         "max_leverage": 3,
         "market_mode": RunMode.NORMAL,
-        "approval_state": "approved",
-        "source_reason": "committee result",
+        "approval_state": ApprovalState.APPROVED,
+        "source_reason": "fixed strategy",
         "ttl_sec": 300,
     }
 
@@ -306,7 +126,6 @@ def test_strategy_snapshot_rejects_blank_symbol_whitelist_entries(symbol_whiteli
 def test_settings_load_okx_symbols_from_csv_env(monkeypatch: pytest.MonkeyPatch, env_value: str, expected: tuple[str, ...]) -> None:
     monkeypatch.setenv("REDIS_URL", "redis://localhost:6379/0")
     monkeypatch.setenv("POSTGRES_DSN", "postgresql://xuanshu:xuanshu@localhost:5432/xuanshu")
-    monkeypatch.setenv("QDRANT_URL", "http://localhost:6333")
     monkeypatch.setenv("XUANSHU_OKX_SYMBOLS", env_value)
 
     settings = Settings()
@@ -354,19 +173,15 @@ def test_trader_runtime_settings_default_okx_account_mode_is_live(monkeypatch: p
 def test_runtime_settings_reject_blank_okx_symbols(
     settings_type: type[Settings] | type[TraderRuntimeSettings],
 ) -> None:
-    payload = {
-        "okx_symbols": [" "],
-        "REDIS_URL": "redis://localhost:6379/0",
-        "POSTGRES_DSN": "postgresql://xuanshu:xuanshu@localhost:5432/xuanshu",
-        "QDRANT_URL": "http://localhost:6333",
-        "OKX_API_KEY": "okx-key",
-        "OKX_API_SECRET": "okx-secret",
-        "OKX_API_PASSPHRASE": "okx-passphrase",
-    }
-
     if settings_type is Settings:
         with pytest.raises(ValidationError):
-            settings_type.model_validate(payload)
+            settings_type.model_validate(
+                {
+                    "okx_symbols": [" "],
+                    "REDIS_URL": "redis://localhost:6379/0",
+                    "POSTGRES_DSN": "postgresql://xuanshu:xuanshu@localhost:5432/xuanshu",
+                }
+            )
     else:
         with pytest.raises(ValidationError):
             settings_type.model_validate(
@@ -379,61 +194,10 @@ def test_runtime_settings_reject_blank_okx_symbols(
             )
 
 
-@pytest.mark.parametrize(
-    ("field_name", "empty_value"),
-    [
-        ("opinion_id", ""),
-        ("expert_type", ""),
-        ("symbol_scope", []),
-        ("decision", ""),
-    ],
-)
-def test_expert_opinion_rejects_empty_key_fields(field_name: str, empty_value: object) -> None:
-    payload = {
-        "opinion_id": "op-001",
-        "expert_type": "risk",
-        "generated_at": datetime.now(UTC),
-        "symbol_scope": ["BTC-USDT-SWAP"],
-        "decision": "tighten_risk",
-        "confidence": 0.8,
-        "supporting_facts": ["recent risk events rising"],
-        "risk_flags": ["drawdown_watch"],
-        "ttl_sec": 300,
-    }
-    payload[field_name] = empty_value
-
-    with pytest.raises(ValidationError):
-        ExpertOpinion(**payload)
-
-
-@pytest.mark.parametrize(
-    "symbol_scope",
-    [
-        [""],
-        ["BTC-USDT-SWAP", " "],
-    ],
-)
-def test_expert_opinion_rejects_blank_symbol_scope_entries(symbol_scope: list[str]) -> None:
-    payload = {
-        "opinion_id": "op-001",
-        "expert_type": "risk",
-        "generated_at": datetime.now(UTC),
-        "symbol_scope": symbol_scope,
-        "decision": "tighten_risk",
-        "confidence": 0.8,
-        "supporting_facts": ["recent risk events rising"],
-        "risk_flags": ["drawdown_watch"],
-        "ttl_sec": 300,
-    }
-
-    with pytest.raises(ValidationError):
-        ExpertOpinion(**payload)
-
-
 def test_taxonomy_and_numeric_bounds_reject_invalid_contracts() -> None:
     with pytest.raises(ValidationError):
         CandidateSignal(
-            symbol="BTC-USDT-SWAP",
+            symbol="ETH-USDT-SWAP",
             strategy_id="breakout",
             side="buy",
             entry_type=EntryType.MARKET,
@@ -448,7 +212,7 @@ def test_taxonomy_and_numeric_bounds_reject_invalid_contracts() -> None:
         MarketStateSnapshot(
             snapshot_id="snap-001",
             generated_at=datetime.now(UTC),
-            symbol="BTC-USDT-SWAP",
+            symbol="ETH-USDT-SWAP",
             mid_price=-1.0,
             spread=0.1,
             imbalance=1.2,
@@ -469,18 +233,18 @@ def test_checkpoint_payload_is_typed_and_settings_validate_urls() -> None:
         current_mode=RunMode.NORMAL,
         positions_snapshot=[
             CheckpointPosition(
-                symbol="BTC-USDT-SWAP",
+                symbol="ETH-USDT-SWAP",
                 net_quantity=0.2,
-                mark_price=62000.0,
+                mark_price=3200.0,
                 unrealized_pnl=125.0,
             )
         ],
         open_orders_snapshot=[
             CheckpointOrder(
                 order_id="order-001",
-                symbol="BTC-USDT-SWAP",
+                symbol="ETH-USDT-SWAP",
                 side=OrderSide.BUY,
-                price=62100.0,
+                price=3210.0,
                 size=0.05,
                 status="open",
             )
@@ -496,7 +260,7 @@ def test_checkpoint_payload_is_typed_and_settings_validate_urls() -> None:
         needs_reconcile=False,
     )
 
-    assert checkpoint.positions_snapshot[0].symbol == "BTC-USDT-SWAP"
+    assert checkpoint.positions_snapshot[0].symbol == "ETH-USDT-SWAP"
 
     with pytest.raises(ValidationError):
         ExecutionCheckpoint(
@@ -504,7 +268,7 @@ def test_checkpoint_payload_is_typed_and_settings_validate_urls() -> None:
             created_at=datetime.now(UTC),
             active_snapshot_version="snap-002",
             current_mode=RunMode.NORMAL,
-            positions_snapshot=[{"symbol": "BTC-USDT-SWAP", "net_quantity": 0.2}],
+            positions_snapshot=[{"symbol": "ETH-USDT-SWAP", "net_quantity": 0.2}],
             open_orders_snapshot=[],
             budget_state=CheckpointBudgetState(
                 max_daily_loss=1000.0,
@@ -521,5 +285,4 @@ def test_checkpoint_payload_is_typed_and_settings_validate_urls() -> None:
         Settings(
             REDIS_URL="not-a-url",
             POSTGRES_DSN="postgresql://xuanshu",
-            QDRANT_URL="http://qdrant:6333",
         )
