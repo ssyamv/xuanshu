@@ -190,6 +190,61 @@ def test_trader_runtime_loads_fixed_strategy_snapshot_before_redis(monkeypatch, 
     assert runtime.startup_snapshot.strategy_enable_flags == {"momentum": True}
 
 
+def test_trader_runtime_keeps_fixed_strategy_snapshot_during_run_when_redis_has_stale_snapshot(monkeypatch, tmp_path) -> None:
+    _set_required_settings_env(monkeypatch)
+    fake_redis = _FakeRedis()
+    fixed_path = tmp_path / "active_strategy.json"
+    generated_at = datetime(2026, 1, 1, tzinfo=UTC)
+    fixed_snapshot = trader_app.StrategyConfigSnapshot(
+        version_id="fixed-vol-breakout-test",
+        generated_at=generated_at,
+        effective_from=generated_at,
+        expires_at=generated_at + trader_app.timedelta(days=3650),
+        symbol_whitelist=["ETH-USDT-SWAP"],
+        strategy_enable_flags={"vol_breakout": True},
+        risk_multiplier=0.5,
+        per_symbol_max_position=0.12,
+        max_leverage=3,
+        market_mode=RunMode.NORMAL,
+        approval_state=ApprovalState.APPROVED,
+        source_reason="fixed vol breakout",
+        ttl_sec=315360000,
+    )
+    stale_snapshot = fixed_snapshot.model_copy(
+        update={
+            "version_id": "governor-stale",
+            "symbol_whitelist": ["BTC-USDT-SWAP"],
+            "strategy_enable_flags": {"risk_pause": True},
+            "market_mode": RunMode.HALTED,
+        }
+    )
+    fixed_path.write_text(fixed_snapshot.model_dump_json(), encoding="utf-8")
+    fake_snapshot_store = RedisSnapshotStore(redis_client=fake_redis)
+    fake_snapshot_store.set_latest_snapshot("governor-stale", stale_snapshot)
+    monkeypatch.setenv("XUANSHU_FIXED_STRATEGY_SNAPSHOT_PATH", str(fixed_path))
+    monkeypatch.setattr(trader_app, "build_snapshot_store", lambda settings: fake_snapshot_store)
+
+    async def _noop_wait_forever() -> None:
+        return None
+
+    monkeypatch.setattr(trader_app, "_wait_forever", _noop_wait_forever)
+
+    runtime = trader_app.build_trader_runtime()
+    _replace_runtime_streams_with_empty_event_streams(runtime)
+
+    async def _run_and_close_runtime() -> None:
+        try:
+            await trader_app._run_trader(runtime)
+        finally:
+            await runtime.components.aclose()
+
+    asyncio.run(_run_and_close_runtime())
+
+    assert runtime.startup_snapshot.version_id == "fixed-vol-breakout-test"
+    assert runtime.current_mode == RunMode.NORMAL
+    assert runtime.startup_snapshot.strategy_enable_flags == {"vol_breakout": True}
+
+
 def test_trader_runtime_rejects_malformed_fixed_strategy_snapshot(monkeypatch, tmp_path) -> None:
     _set_required_settings_env(monkeypatch)
     fixed_path = tmp_path / "active_strategy.json"

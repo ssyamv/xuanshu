@@ -184,6 +184,11 @@ def _more_restrictive_mode(left: RunMode, right: RunMode) -> RunMode:
     return right
 
 
+def _uses_fixed_strategy_snapshot(runtime: TraderRuntime) -> bool:
+    path = runtime.settings.fixed_strategy_snapshot_path
+    return path is not None and bool(path.strip())
+
+
 def build_trader_runtime() -> TraderRuntime:
     settings = TraderRuntimeSettings()
     components = build_trader_components(settings)
@@ -437,15 +442,16 @@ def _can_relax_to_snapshot_mode(runtime: TraderRuntime, snapshot: StrategyConfig
 
 
 async def _evaluate_symbol(runtime: TraderRuntime, symbol: str) -> None:
-    latest_snapshot = runtime.snapshot_store.get_latest_snapshot()
-    if latest_snapshot is not None:
-        runtime.startup_snapshot = latest_snapshot
-        _apply_symbol_strategy_bindings(runtime, latest_snapshot)
-        if _can_relax_to_snapshot_mode(runtime, latest_snapshot):
-            runtime.current_mode = latest_snapshot.market_mode
-            runtime.components.state_engine.set_run_mode(runtime.current_mode)
-            runtime.opening_allowed = True
-            _publish_runtime_state(runtime)
+    if not _uses_fixed_strategy_snapshot(runtime):
+        latest_snapshot = runtime.snapshot_store.get_latest_snapshot()
+        if latest_snapshot is not None:
+            runtime.startup_snapshot = latest_snapshot
+            _apply_symbol_strategy_bindings(runtime, latest_snapshot)
+            if _can_relax_to_snapshot_mode(runtime, latest_snapshot):
+                runtime.current_mode = latest_snapshot.market_mode
+                runtime.components.state_engine.set_run_mode(runtime.current_mode)
+                runtime.opening_allowed = True
+                _publish_runtime_state(runtime)
     if runtime.startup_snapshot.version_id == "bootstrap":
         return
     snapshot = runtime.components.state_engine.snapshot(symbol)
@@ -620,10 +626,11 @@ async def _run_trader(runtime: TraderRuntime) -> None:
             "symbols": list(runtime.settings.okx_symbols),
         },
     )
-    latest_snapshot = runtime.snapshot_store.get_latest_snapshot()
-    if latest_snapshot is not None:
-        runtime.startup_snapshot = latest_snapshot
-        _apply_symbol_strategy_bindings(runtime, latest_snapshot)
+    if not _uses_fixed_strategy_snapshot(runtime):
+        latest_snapshot = runtime.snapshot_store.get_latest_snapshot()
+        if latest_snapshot is not None:
+            runtime.startup_snapshot = latest_snapshot
+            _apply_symbol_strategy_bindings(runtime, latest_snapshot)
     runtime.startup_checkpoint = _load_latest_checkpoint(runtime)
     runtime.startup_checkpoint.active_snapshot_version = runtime.startup_snapshot.version_id
     if runtime.startup_checkpoint.checkpoint_id != "startup":
