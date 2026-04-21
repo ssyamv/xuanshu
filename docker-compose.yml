@@ -17,6 +17,8 @@ services:
       XUANSHU_FIXED_STRATEGY_SNAPSHOT_PATH: ${XUANSHU_FIXED_STRATEGY_SNAPSHOT_PATH:-}
       # Trader runtime startup capital
       XUANSHU_TRADER_STARTING_NAV: ${XUANSHU_TRADER_STARTING_NAV:-250000}
+    volumes:
+      - ./configs:/app/configs:ro
     depends_on:
       redis:
         condition: service_healthy

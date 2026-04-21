@@ -285,6 +285,7 @@ def test_single_host_deploy_doc_pins_compose_entrypoint() -> None:
     assert "OPENAI_API_KEY:" not in compose
     assert "QDRANT_URL:" not in compose
     assert "XUANSHU_CODEX_AUTH_DIR" not in compose
+    assert "./configs:/app/configs:ro" in compose
     assert "nodejs npm" not in dockerfile
     assert "@openai/codex" not in dockerfile
 
