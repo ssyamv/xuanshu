@@ -727,9 +727,12 @@ class StrategyResearchEngine:
     ) -> None:
         if isinstance(node, dict):
             op = node.get("op")
-            if isinstance(op, str) and op in required_values:
-                node["value"] = required_values[op]
-                present[op] = True
+            if isinstance(op, str):
+                normalized_op = op.strip().lower()
+                if normalized_op in required_values:
+                    node["op"] = normalized_op
+                    node["value"] = required_values[normalized_op]
+                    present[normalized_op] = True
             for key in ("all", "any"):
                 children = node.get(key)
                 if isinstance(children, list):

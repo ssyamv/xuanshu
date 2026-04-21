@@ -345,6 +345,90 @@ def test_strategy_research_engine_build_candidate_package_accepts_strategy_defin
     assert package.exit_rules == package.strategy_definition.exit_rules
 
 
+@pytest.mark.asyncio
+async def test_strategy_research_engine_canonicalizes_provider_exit_rule_primitive_aliases() -> None:
+    aliased_definition = {
+        "strategy_def_id": "ai-base-004",
+        "symbol": "BTC-USDT-SWAP",
+        "strategy_family": "breakout",
+        "directionality": "long_only",
+        "feature_spec": {"indicators": [{"name": "sma", "source": "close", "window": 20}]},
+        "entry_rules": {"all": [{"op": "crosses_above", "left": "close", "right": "sma_20"}]},
+        "exit_rules": {
+            "any": [
+                {"op": "crosses_below", "left": "close", "right": "sma_20"},
+                {"op": " TAKE_PROFIT_BPS ", "value": 999},
+                {"op": " STOP_LOSS_BPS ", "value": 12},
+                {"op": " TIME_STOP_MINUTES ", "value": 15},
+            ]
+        },
+        "position_sizing_rules": {"risk_fraction": 0.003},
+        "risk_constraints": {"max_hold_minutes": 90},
+        "parameter_set": {
+            "lookback": 8,
+            "signal_mode": "provider_breakout_signal",
+            "stop_loss_bps": 65,
+            "take_profit_bps": 150,
+            "risk_fraction": 0.003,
+            "max_hold_minutes": 90,
+        },
+        "score": 12.5,
+        "score_basis": "backtest_return_percent",
+    }
+
+    class _Provider:
+        provider_name = ResearchProviderName.API
+
+        async def generate_analyses(self, *, symbol_scope, market_environment, historical_rows, research_reason):
+            return [
+                research_providers_module.ResearchProviderSuggestion(
+                    thesis="aliased dsl should be canonicalized",
+                    strategy_family="breakout",
+                    entry_signal="provider_breakout_signal",
+                    exit_stop_loss_bps=65,
+                    exit_take_profit_bps=150,
+                    risk_fraction=0.003,
+                    max_hold_minutes=90,
+                    strategy_definition=aliased_definition,
+                    failure_modes=["whipsaw"],
+                    invalidating_conditions=["trend breakdown"],
+                )
+            ]
+
+    engine = StrategyResearchEngine(provider=_Provider())
+
+    packages = await engine.build_candidate_packages_from_provider(
+        trigger=ResearchTrigger.MANUAL,
+        symbol_scope=["BTC-USDT-SWAP"],
+        market_environment="trend",
+        historical_rows=[
+            {"timestamp": datetime(2026, 4, 19, 0, 0, tzinfo=UTC), "close": 100.0},
+            {"timestamp": datetime(2026, 4, 19, 0, 5, tzinfo=UTC), "close": 103.0},
+        ],
+        research_reason="manual trend study",
+    )
+
+    assert packages
+    assert all(
+        {rule["op"] for rule in package.strategy_definition.exit_rules["any"] if "op" in rule}
+        <= {"crosses_below", "stop_loss_bps", "take_profit_bps", "time_stop_minutes"}
+        for package in packages
+    )
+    assert all(
+        {
+            "stop_loss_bps": next(rule["value"] for rule in package.strategy_definition.exit_rules["any"] if rule.get("op") == "stop_loss_bps"),
+            "take_profit_bps": next(rule["value"] for rule in package.strategy_definition.exit_rules["any"] if rule.get("op") == "take_profit_bps"),
+            "time_stop_minutes": next(rule["value"] for rule in package.strategy_definition.exit_rules["any"] if rule.get("op") == "time_stop_minutes"),
+        }
+        == {
+            "stop_loss_bps": package.parameter_set["stop_loss_bps"],
+            "take_profit_bps": package.parameter_set["take_profit_bps"],
+            "time_stop_minutes": package.risk_constraints["max_hold_minutes"],
+        }
+        for package in packages
+    )
+
+
 async def test_strategy_research_engine_skips_invalid_provider_dsl_and_keeps_valid_suggestions() -> None:
     valid_definition = {
         "strategy_def_id": "ai-base-001",
