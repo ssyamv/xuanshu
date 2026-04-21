@@ -358,14 +358,25 @@ def _next_client_order_id(runtime: TraderRuntime, signal: CandidateSignal) -> st
     )
 
 
-def _build_strategy_logic(signal: CandidateSignal) -> str:
+def _build_strategy_logic(signal: CandidateSignal, snapshot: StrategyConfigSnapshot) -> str:
     if signal.strategy_id == StrategyId.VOL_BREAKOUT:
-        return "ETH 4H 波动率突破，价格突破 ATR 阈值后顺势开多。"
+        binding = snapshot.symbol_strategy_bindings.get(signal.symbol)
+        bar = _extract_vol_breakout_bar(getattr(binding, "strategy_def_id", ""))
+        return f"{signal.symbol} {bar} 波动率突破，价格突破 ATR 阈值后顺势开多。"
     if signal.strategy_id == StrategyId.BREAKOUT:
         return "趋势突破，最近成交偏买方，准备顺势开多。"
     if signal.strategy_id == StrategyId.MEAN_REVERSION:
         return "均值回归，价格偏离后尝试反向回补。"
     return "风险暂停信号，当前不执行新开仓。"
+
+
+def _extract_vol_breakout_bar(strategy_def_id: object) -> str:
+    parts = str(strategy_def_id or "").split("-")
+    for part in parts:
+        normalized = part.upper()
+        if normalized.endswith(("M", "H", "D")) and normalized[:-1].isdigit():
+            return normalized
+    return "固定周期"
 
 
 def _is_stronger_replacement(
@@ -493,6 +504,7 @@ async def _evaluate_symbol(runtime: TraderRuntime, symbol: str) -> None:
             )
             continue
         for row in response:
+            strategy_logic = _build_strategy_logic(signal, runtime.startup_snapshot)
             runtime.history_store.append_order_fact(
                 {
                     "symbol": signal.symbol,
@@ -502,9 +514,10 @@ async def _evaluate_symbol(runtime: TraderRuntime, symbol: str) -> None:
                     "order_id": str(row.get("ordId") or ""),
                     "intent": "open",
                     "strategy_id": signal.strategy_id.value,
-                    "strategy_logic": _build_strategy_logic(signal),
+                    "strategy_logic": strategy_logic,
                 }
             )
+        strategy_logic = _build_strategy_logic(signal, runtime.startup_snapshot)
         runtime.components.state_engine.stage_order_submission(
             signal.symbol,
             client_order_id=str(response[0].get("clOrdId") or ""),
@@ -512,7 +525,7 @@ async def _evaluate_symbol(runtime: TraderRuntime, symbol: str) -> None:
             size=max(1.0, decision.max_order_size),
             intent="open",
             strategy_id=signal.strategy_id.value,
-            strategy_logic=_build_strategy_logic(signal),
+            strategy_logic=strategy_logic,
         )
         _LOGGER.info(
             "order_submitted",

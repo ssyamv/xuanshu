@@ -149,7 +149,7 @@ def build_vol_breakout_snapshot(
         max_leverage=3,
         market_mode=RunMode.HALTED,
         approval_state=ApprovalState.APPROVED,
-        source_reason="fixed ETH 4H volatility breakout backtest",
+        source_reason=f"fixed {symbol} {selected.parameters.bar} volatility breakout backtest",
         ttl_sec=315_360_000,
         symbol_strategy_bindings={
             symbol: ApprovedStrategyBinding(

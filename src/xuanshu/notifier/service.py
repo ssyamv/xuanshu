@@ -80,7 +80,7 @@ def _infer_strategy_id_from_client_order_id(client_order_id: object) -> str | No
 
 def _default_strategy_logic(strategy_id: object) -> str | None:
     if strategy_id == "vol_breakout":
-        return "ETH 4H 波动率突破，价格突破 ATR 阈值后顺势开多。"
+        return "波动率突破，价格突破 ATR 阈值后顺势开多。"
     if strategy_id == "breakout":
         return "趋势突破，最近成交偏买方，准备顺势开多。"
     if strategy_id == "mean_reversion":

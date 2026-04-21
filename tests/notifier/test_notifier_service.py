@@ -386,7 +386,7 @@ async def test_notifier_service_emits_chinese_trade_notifications_for_submit_can
             "order_id": "ord-open-1",
             "intent": "open",
             "strategy_id": "vol_breakout",
-            "strategy_logic": "ETH 4H 波动率突破，价格突破 ATR 阈值后顺势开多。",
+            "strategy_logic": "BTC-USDT-SWAP 12H 波动率突破，价格突破 ATR 阈值后顺势开多。",
         }
     )
     history.append_order_fact(
@@ -417,7 +417,7 @@ async def test_notifier_service_emits_chinese_trade_notifications_for_submit_can
             "unrealized_pnl": 0.3,
             "intent": "open",
             "strategy_id": "vol_breakout",
-            "strategy_logic": "ETH 4H 波动率突破已确认，完成开仓。",
+            "strategy_logic": "BTC-USDT-SWAP 12H 波动率突破已确认，完成开仓。",
         }
     )
     history.append_position_fact(
@@ -448,9 +448,9 @@ async def test_notifier_service_emits_chinese_trade_notifications_for_submit_can
 
     assert flushed == 4
     assert delivered == [
-        "订单已提交：BTC-USDT-SWAP 买入开仓\n策略：vol_breakout\n逻辑：ETH 4H 波动率突破，价格突破 ATR 阈值后顺势开多。\n客户端单号：BTCUSDTSWAPvolbreakout000001\n订单号：ord-open-1",
+        "订单已提交：BTC-USDT-SWAP 买入开仓\n策略：vol_breakout\n逻辑：BTC-USDT-SWAP 12H 波动率突破，价格突破 ATR 阈值后顺势开多。\n客户端单号：BTCUSDTSWAPvolbreakout000001\n订单号：ord-open-1",
         "订单已撤销：BTC-USDT-SWAP 卖出平仓\n策略：vol_breakout\n逻辑：平仓挂单超时未成交，已撤单等待下一次机会。\n客户端单号：BTCUSDTSWAPvolbreakout000002\n订单号：ord-close-1",
-        "已开仓：BTC-USDT-SWAP 当前仓位=2.0 均价=100.2\n策略：vol_breakout\n逻辑：ETH 4H 波动率突破已确认，完成开仓。",
+        "已开仓：BTC-USDT-SWAP 当前仓位=2.0 均价=100.2\n策略：vol_breakout\n逻辑：BTC-USDT-SWAP 12H 波动率突破已确认，完成开仓。",
         "已平仓：BTC-USDT-SWAP 当前仓位=0.0 浮盈亏=1.1\n策略：vol_breakout\n逻辑：达到平仓条件，已落袋离场。",
     ]
 
@@ -532,8 +532,8 @@ async def test_notifier_service_backfills_position_strategy_logic_from_recent_or
     flushed = await service.flush_proactive_notifications(adapter=_Adapter(), limit=10)
 
     assert flushed == 2
-    assert delivered[0] == "订单已提交：BTC-USDT-SWAP 买入开仓\n策略：vol_breakout\n逻辑：ETH 4H 波动率突破，价格突破 ATR 阈值后顺势开多。\n客户端单号：BTCUSDTSWAPvolbreakout004534\n订单号：ord-btc-1"
-    assert delivered[1] == "已开仓：BTC-USDT-SWAP 当前仓位=3.5 均价=75215.1\n策略：vol_breakout\n逻辑：ETH 4H 波动率突破，价格突破 ATR 阈值后顺势开多。"
+    assert delivered[0] == "订单已提交：BTC-USDT-SWAP 买入开仓\n策略：vol_breakout\n逻辑：波动率突破，价格突破 ATR 阈值后顺势开多。\n客户端单号：BTCUSDTSWAPvolbreakout004534\n订单号：ord-btc-1"
+    assert delivered[1] == "已开仓：BTC-USDT-SWAP 当前仓位=3.5 均价=75215.1\n策略：vol_breakout\n逻辑：波动率突破，价格突破 ATR 阈值后顺势开多。"
 
 
 @pytest.mark.asyncio

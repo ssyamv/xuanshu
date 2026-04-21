@@ -37,3 +37,36 @@ async def test_run_backtest_writes_eth_vol_breakout_snapshot(tmp_path, monkeypat
     assert payload["symbol_whitelist"] == ["ETH-USDT-SWAP"]
     assert payload["strategy_enable_flags"] == {"vol_breakout": True}
     assert payload["market_mode"] == "halted"
+
+
+@pytest.mark.asyncio
+async def test_run_backtest_accepts_atr_and_ema_period_overrides(tmp_path, monkeypatch) -> None:
+    output_path = tmp_path / "active_strategy.json"
+
+    async def fake_fetch(*args, **kwargs):
+        return _rows()
+
+    monkeypatch.setattr(app, "fetch_okx_history_rows", fake_fetch)
+
+    exit_code = await app.run_backtest(
+        [
+            "--symbol",
+            "BTC-USDT-SWAP",
+            "--bar",
+            "1D",
+            "--output",
+            str(output_path),
+            "--min-trades",
+            "1",
+            "--atr-period",
+            "7",
+            "--ema-period",
+            "20",
+        ]
+    )
+
+    assert exit_code == 0
+    payload = json.loads(output_path.read_text(encoding="utf-8"))
+    binding = payload["symbol_strategy_bindings"]["BTC-USDT-SWAP"]
+    assert payload["source_reason"] == "fixed BTC-USDT-SWAP 1D volatility breakout backtest"
+    assert "1d" in binding["strategy_def_id"]

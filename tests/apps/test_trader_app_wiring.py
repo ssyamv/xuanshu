@@ -1335,6 +1335,17 @@ def test_trader_runtime_consumes_public_and_private_streams_and_persists_runtime
                 "market_mode": RunMode.NORMAL,
                 "approval_state": ApprovalState.APPROVED,
                 "strategy_enable_flags": {"vol_breakout": True, "risk_pause": True},
+                "symbol_strategy_bindings": {
+                    "BTC-USDT-SWAP": trader_app.ApprovedStrategyBinding(
+                        strategy_def_id="vol-breakout-btc-usdt-swap-12h-test",
+                        strategy_package_id="fixed-vol-breakout-btc-usdt-swap-12h-test",
+                        backtest_report_id="bt-vol-breakout-btc",
+                        score=52.6,
+                        score_basis="backtest_return_percent",
+                        approval_record_id="fixed-vol-breakout-btc-usdt-swap-12h-test",
+                        activated_at=datetime.now(UTC),
+                    )
+                },
             }
         ),
     )
@@ -1590,6 +1601,17 @@ def test_trader_runtime_logs_order_submission(monkeypatch) -> None:
                 "market_mode": RunMode.NORMAL,
                 "approval_state": ApprovalState.APPROVED,
                 "strategy_enable_flags": {"vol_breakout": True, "risk_pause": True},
+                "symbol_strategy_bindings": {
+                    "BTC-USDT-SWAP": trader_app.ApprovedStrategyBinding(
+                        strategy_def_id="vol-breakout-btc-usdt-swap-12h-test",
+                        strategy_package_id="fixed-vol-breakout-btc-usdt-swap-12h-test",
+                        backtest_report_id="bt-vol-breakout-btc",
+                        score=52.6,
+                        score_basis="backtest_return_percent",
+                        approval_record_id="fixed-vol-breakout-btc-usdt-swap-12h-test",
+                        activated_at=datetime.now(UTC),
+                    )
+                },
             }
         ),
     )
@@ -1697,6 +1719,17 @@ def test_trader_runtime_records_trade_notification_metadata_for_order_and_positi
                 "market_mode": RunMode.NORMAL,
                 "approval_state": ApprovalState.APPROVED,
                 "strategy_enable_flags": {"vol_breakout": True, "risk_pause": True},
+                "symbol_strategy_bindings": {
+                    "BTC-USDT-SWAP": trader_app.ApprovedStrategyBinding(
+                        strategy_def_id="vol-breakout-btc-usdt-swap-12h-test",
+                        strategy_package_id="fixed-vol-breakout-btc-usdt-swap-12h-test",
+                        backtest_report_id="bt-vol-breakout-btc",
+                        score=52.6,
+                        score_basis="backtest_return_percent",
+                        approval_record_id="fixed-vol-breakout-btc-usdt-swap-12h-test",
+                        activated_at=datetime.now(UTC),
+                    )
+                },
             }
         ),
     )
@@ -1788,7 +1821,7 @@ def test_trader_runtime_records_trade_notification_metadata_for_order_and_positi
         "order_id": "ord-1",
         "intent": "open",
         "strategy_id": "vol_breakout",
-        "strategy_logic": "ETH 4H 波动率突破，价格突破 ATR 阈值后顺势开多。",
+        "strategy_logic": "BTC-USDT-SWAP 12H 波动率突破，价格突破 ATR 阈值后顺势开多。",
     }
     assert runtime.history_store.written_rows["positions"][-1] == {
         "symbol": "BTC-USDT-SWAP",
@@ -1798,7 +1831,7 @@ def test_trader_runtime_records_trade_notification_metadata_for_order_and_positi
         "unrealized_pnl": 0.2,
         "intent": "open",
         "strategy_id": "vol_breakout",
-        "strategy_logic": "ETH 4H 波动率突破，价格突破 ATR 阈值后顺势开多。",
+        "strategy_logic": "BTC-USDT-SWAP 12H 波动率突破，价格突破 ATR 阈值后顺势开多。",
     }
 
 

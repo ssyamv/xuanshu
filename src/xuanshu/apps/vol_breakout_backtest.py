@@ -20,7 +20,7 @@ _OKX_REST_BASE_URL = "https://www.okx.com"
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Backtest and export the fixed ETH 4H volatility breakout strategy")
+    parser = argparse.ArgumentParser(description="Backtest and export a fixed volatility breakout strategy")
     parser.add_argument("--symbol", default="ETH-USDT-SWAP")
     parser.add_argument("--bar", default="4H")
     parser.add_argument("--limit", type=int, default=2190)
@@ -31,6 +31,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--k", type=float, default=0.8)
     parser.add_argument("--trailing-atr", type=float, default=2.5)
     parser.add_argument("--max-hold-bars", type=int, default=12)
+    parser.add_argument("--atr-period", type=int, default=14)
+    parser.add_argument("--ema-period", type=int, default=200)
     return parser.parse_args(argv)
 
 
@@ -45,6 +47,8 @@ async def run_backtest(argv: list[str] | None = None) -> int:
         k=args.k,
         trailing_atr=args.trailing_atr,
         max_hold_bars=args.max_hold_bars,
+        atr_period=args.atr_period,
+        ema_period=args.ema_period,
         bar=args.bar,
     )
     client = OkxRestClient(base_url=_OKX_REST_BASE_URL, api_key="")
