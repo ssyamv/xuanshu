@@ -27,7 +27,6 @@ class _RuntimeStore:
         }
         self.faults = {"public_ws_disconnected": {"severity": "warn"}}
         self.budget = {"remaining_notional": 120.0, "remaining_order_count": 8, "current_mode": "degraded"}
-        self.governor_health = {"status": "published", "trigger": "risk_event", "health_state": "healthy"}
         self.manual_release_target: str | None = None
 
     def get_run_mode(self) -> RunMode | None:
@@ -41,9 +40,6 @@ class _RuntimeStore:
 
     def get_budget_pool_summary(self) -> dict[str, object] | None:
         return self.budget
-
-    def get_governor_health_summary(self) -> dict[str, object] | None:
-        return self.governor_health
 
     def set_run_mode(self, mode: RunMode) -> None:
         self.mode = mode
@@ -111,7 +107,6 @@ async def test_notifier_service_renders_status_and_market_queries_from_runtime_s
     assert "快照版本：snap-live" in status.text
     assert "故障标记：public_ws_disconnected" in status.text
     assert "预算：remaining_notional=120.0 remaining_order_count=8" in status.text
-    assert "治理状态：status=published trigger=risk_event health=healthy" in status.text
     assert "当前策略：risk_pause" in status.text
     assert "参数：risk_multiplier=0.25 per_symbol_max_position=0.12 max_leverage=1" in status.text
     assert "BTC-USDT-SWAP" in market.text
@@ -119,7 +114,6 @@ async def test_notifier_service_renders_status_and_market_queries_from_runtime_s
     assert "BTC-USDT-SWAP: net=1.25 avg=99.8 upnl=1.2" in positions.text
     assert "BTC-USDT-SWAP buy live cid=btc-breakout-000001" in orders.text
     assert "预算：remaining_notional=120.0 remaining_order_count=8 current_mode=degraded" in risk.text
-    assert "治理状态：status=published trigger=risk_event health=healthy" in risk.text
 
 
 @pytest.mark.asyncio
@@ -336,31 +330,6 @@ async def test_notifier_service_prioritizes_critical_retries_and_skips_resolved_
 @pytest.mark.asyncio
 async def test_notifier_service_emits_proactive_notifications_from_history_rows() -> None:
     history = PostgresRuntimeStore(dsn="postgresql://xuanshu:xuanshu@localhost:5432/xuanshu")
-    history.append_strategy_snapshot(
-        {
-            "version_id": "snap-002",
-            "market_mode": "degraded",
-            "approval_state": "approved",
-            "symbol_whitelist": ["BTC-USDT-SWAP"],
-            "strategy_enable_flags": {"breakout": False, "mean_reversion": False, "risk_pause": True},
-            "risk_multiplier": 0.25,
-            "per_symbol_max_position": 0.12,
-            "max_leverage": 1,
-        }
-    )
-    history.append_governor_run(
-        {
-            "version_id": "snap-002",
-            "status": "published",
-            "research_provider": "api",
-            "research_status": "candidate_built",
-            "research_candidate_count": 1,
-            "approved_research_candidate_ids": ["pkg-001"],
-            "validation_status": "succeeded",
-            "approval_status": "approved",
-            "approval_decision": "approved",
-        }
-    )
     history.save_checkpoint(
         {
             "checkpoint_id": "recovery-001",
@@ -397,83 +366,12 @@ async def test_notifier_service_emits_proactive_notifications_from_history_rows(
 
     flushed = await service.flush_proactive_notifications(adapter=_Adapter())
 
-    assert flushed == 4
+    assert flushed == 3
     assert delivered == [
         "运行模式已切换为只减仓",
-        "当前生效策略：risk_pause（模式=degraded，标的=BTC-USDT-SWAP，参数：risk_multiplier=0.25 per_symbol_max_position=0.12 max_leverage=1）",
         "恢复流程失败：exchange_state_mismatch",
         "风控事件：runtime_mode_changed startup gating tightened runtime to reduce_only",
     ]
-
-
-@pytest.mark.asyncio
-async def test_notifier_service_skips_already_sent_governor_publication_even_when_old_delivery_falls_out_of_recent_window() -> None:
-    history = PostgresRuntimeStore(dsn="postgresql://xuanshu:xuanshu@localhost:5432/xuanshu")
-    history.append_strategy_snapshot(
-        {
-            "version_id": "snap-002",
-            "market_mode": "degraded",
-            "approval_state": "approved",
-            "symbol_whitelist": ["BTC-USDT-SWAP"],
-            "strategy_enable_flags": {"breakout": False, "mean_reversion": False, "risk_pause": True},
-            "risk_multiplier": 0.25,
-            "per_symbol_max_position": 0.12,
-            "max_leverage": 1,
-        }
-    )
-    history.append_governor_run(
-        {
-            "version_id": "snap-002",
-            "status": "published",
-            "research_provider": "api",
-            "research_status": "candidate_built",
-            "research_candidate_count": 1,
-            "approved_research_candidate_ids": ["pkg-001"],
-            "validation_status": "succeeded",
-            "approval_status": "approved",
-            "approval_decision": "approved",
-        }
-    )
-    history.append_notification_event(
-        {
-            "category": "governor_snapshot_published",
-            "dedupe_key": "governor_run:snap-002:published",
-            "severity": "INFO",
-            "status": "sent",
-            "attempt_count": 1,
-            "needs_retry": False,
-            "text": "当前生效策略：risk_pause（模式=degraded，标的=BTC-USDT-SWAP，参数：risk_multiplier=0.25 per_symbol_max_position=0.12 max_leverage=1）",
-        }
-    )
-    for index in range(130):
-        history.append_notification_event(
-            {
-                "category": "noise",
-                "dedupe_key": f"noise:{index}",
-                "severity": "INFO",
-                "status": "sent",
-                "attempt_count": 1,
-                "needs_retry": False,
-                "text": f"noise-{index}",
-            }
-        )
-    service = NotifierService(
-        okx_symbols=("BTC-USDT-SWAP",),
-        runtime_store=_RuntimeStore(),
-        snapshot_store=_SnapshotStore(),
-        history_store=history,
-    )
-
-    delivered: list[str] = []
-
-    class _Adapter:
-        async def send_text(self, payload: TextMessagePayload) -> None:
-            delivered.append(payload.text)
-
-    flushed = await service.flush_proactive_notifications(adapter=_Adapter())
-
-    assert flushed == 0
-    assert delivered == []
 
 
 @pytest.mark.asyncio

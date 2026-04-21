@@ -30,9 +30,8 @@ _PROACTIVE_CATEGORY_PRIORITY: dict[str, int] = {
     "trade_position_opened": 2,
     "trade_position_closed": 3,
     "mode_change": 4,
-    "governor_snapshot_published": 5,
-    "recovery_failed": 6,
-    "risk_event": 7,
+    "recovery_failed": 5,
+    "risk_event": 6,
 }
 
 
@@ -107,9 +106,6 @@ class RuntimeStateReader(Protocol):
         ...
 
     def get_budget_pool_summary(self) -> dict[str, object] | None:
-        ...
-
-    def get_governor_health_summary(self) -> dict[str, object] | None:
         ...
 
     def set_manual_release_target(self, mode: str) -> None:
@@ -322,14 +318,6 @@ class NotifierService:
                 f"remaining_notional={budget.get('remaining_notional', 'n/a')} "
                 f"remaining_order_count={budget.get('remaining_order_count', 'n/a')}"
             )
-        governor_health = self._runtime_store.get_governor_health_summary()
-        if isinstance(governor_health, dict):
-            lines.append(
-                "治理状态："
-                f"status={governor_health.get('status', 'unknown')} "
-                f"trigger={governor_health.get('trigger', 'unknown')} "
-                f"health={governor_health.get('health_state', 'unknown')}"
-            )
         strategy_summary_lines = self._render_strategy_summary(snapshot)
         if strategy_summary_lines:
             lines.extend(strategy_summary_lines)
@@ -388,14 +376,6 @@ class NotifierService:
                 f"remaining_order_count={budget.get('remaining_order_count', 'n/a')} "
                 f"current_mode={budget.get('current_mode', 'n/a')}"
             )
-        governor_health = self._runtime_store.get_governor_health_summary()
-        if isinstance(governor_health, dict):
-            lines.append(
-                "治理状态："
-                f"status={governor_health.get('status', 'unknown')} "
-                f"trigger={governor_health.get('trigger', 'unknown')} "
-                f"health={governor_health.get('health_state', 'unknown')}"
-            )
         return "\n".join(lines)
 
     def _render_symbol_summaries(self) -> Iterable[str]:
@@ -452,7 +432,6 @@ class NotifierService:
         candidates.extend(self._collect_order_notification_candidates(limit=limit))
         candidates.extend(self._collect_position_notification_candidates(limit=limit))
         candidates.extend(self._collect_checkpoint_candidates(limit=limit))
-        candidates.extend(self._collect_governor_candidates(limit=limit))
         candidates.extend(self._collect_recovery_failure_candidates(limit=limit))
         candidates.extend(self._collect_risk_event_candidates(limit=limit))
         candidates.sort(
@@ -592,37 +571,6 @@ class NotifierService:
             )
         return candidates
 
-    def _collect_governor_candidates(self, *, limit: int) -> list[dict[str, str]]:
-        snapshot_rows = self._history_store.list_recent_rows("strategy_snapshots", limit=limit)
-        snapshots_by_version = {
-            row["version_id"]: row for row in snapshot_rows if isinstance(row.get("version_id"), str)
-        }
-        governor_rows = self._history_store.list_recent_rows("governor_runs", limit=limit)
-        candidates: list[dict[str, str]] = []
-        for row in governor_rows:
-            version_id = row.get("version_id")
-            if not isinstance(version_id, str):
-                continue
-
-            if row.get("status") == "published":
-                snapshot = snapshots_by_version.get(version_id, {})
-                summary = self._format_governor_snapshot_summary(snapshot)
-                if summary is None:
-                    latest_snapshot = self._snapshot_store.get_latest_snapshot()
-                    if getattr(latest_snapshot, "version_id", None) == version_id:
-                        summary = self._format_governor_snapshot_summary(latest_snapshot)
-                if summary is None:
-                    continue
-                candidates.append(
-                    {
-                        "category": "governor_snapshot_published",
-                        "dedupe_key": f"governor_run:{version_id}:published",
-                        "severity": "INFO",
-                        "text": summary,
-                    }
-                )
-        return candidates
-
     def _render_strategy_summary(self, snapshot: object) -> list[str]:
         summary = self._extract_snapshot_strategy_summary(snapshot)
         if summary is None:
@@ -637,17 +585,6 @@ class NotifierService:
             ),
             f"标的：{summary['symbols']}",
         ]
-
-    def _format_governor_snapshot_summary(self, snapshot: object) -> str | None:
-        summary = self._extract_snapshot_strategy_summary(snapshot)
-        if summary is None:
-            return None
-        return (
-            f"当前生效策略：{summary['strategies']}（模式={summary['market_mode']}，"
-            f"标的={summary['symbols']}，参数：risk_multiplier={summary['risk_multiplier']} "
-            f"per_symbol_max_position={summary['per_symbol_max_position']} "
-            f"max_leverage={summary['max_leverage']}）"
-        )
 
     def _extract_snapshot_strategy_summary(self, snapshot: object) -> dict[str, str] | None:
         if snapshot is None:
