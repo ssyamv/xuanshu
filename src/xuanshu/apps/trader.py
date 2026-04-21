@@ -100,7 +100,7 @@ def _build_startup_snapshot(settings: TraderRuntimeSettings) -> StrategyConfigSn
         effective_from=generated_at,
         expires_at=generated_at + timedelta(minutes=5),
         symbol_whitelist=list(settings.okx_symbols),
-        strategy_enable_flags={"breakout": True, "mean_reversion": False, "risk_pause": True},
+        strategy_enable_flags={"vol_breakout": True, "risk_pause": True},
         risk_multiplier=0.5,
         per_symbol_max_position=0.12,
         max_leverage=3,
@@ -351,6 +351,8 @@ def _next_client_order_id(runtime: TraderRuntime, signal: CandidateSignal) -> st
 
 
 def _build_strategy_logic(signal: CandidateSignal) -> str:
+    if signal.strategy_id == StrategyId.VOL_BREAKOUT:
+        return "ETH 4H 波动率突破，价格突破 ATR 阈值后顺势开多。"
     if signal.strategy_id == StrategyId.BREAKOUT:
         return "趋势突破，最近成交偏买方，准备顺势开多。"
     if signal.strategy_id == StrategyId.MEAN_REVERSION:

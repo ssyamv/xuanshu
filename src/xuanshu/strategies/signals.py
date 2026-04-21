@@ -10,14 +10,14 @@ def build_candidate_signals(snapshot: MarketStateSnapshot) -> list[CandidateSign
         return [
             CandidateSignal(
                 symbol=snapshot.symbol,
-                strategy_id=StrategyId.BREAKOUT,
+                strategy_id=StrategyId.VOL_BREAKOUT,
                 side=OrderSide.BUY,
                 entry_type=EntryType.MARKET,
                 urgency=SignalUrgency.HIGH,
                 confidence=0.7,
                 max_hold_ms=3000,
                 cancel_after_ms=750,
-                risk_tag="trend",
+                risk_tag="vol_breakout",
             )
         ]
     if snapshot.regime == MarketRegime.MEAN_REVERSION:

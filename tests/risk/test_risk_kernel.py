@@ -11,7 +11,7 @@ from xuanshu.risk.kernel import RiskKernel
 def _build_signal(
     *,
     symbol: str = "BTC-USDT-SWAP",
-    strategy_id: StrategyId = StrategyId.BREAKOUT,
+    strategy_id: StrategyId = StrategyId.VOL_BREAKOUT,
     side: OrderSide = OrderSide.BUY,
 ) -> CandidateSignal:
     return CandidateSignal(
@@ -23,7 +23,7 @@ def _build_signal(
         confidence=0.7,
         max_hold_ms=3_000,
         cancel_after_ms=750,
-        risk_tag="trend",
+        risk_tag="vol_breakout",
     )
 
 
@@ -45,8 +45,7 @@ def _build_snapshot(
         symbol_whitelist=symbol_whitelist or ["BTC-USDT-SWAP", "ETH-USDT-SWAP"],
         strategy_enable_flags=strategy_enable_flags
         or {
-            StrategyId.BREAKOUT.value: True,
-            StrategyId.MEAN_REVERSION.value: True,
+            StrategyId.VOL_BREAKOUT.value: True,
             StrategyId.RISK_PAUSE.value: True,
         },
         risk_multiplier=0.8,
@@ -68,8 +67,8 @@ def _build_snapshot(
             "symbol_not_whitelisted",
         ),
         (
-            _build_signal(strategy_id=StrategyId.BREAKOUT),
-            lambda: _build_snapshot(strategy_enable_flags={StrategyId.BREAKOUT.value: False}),
+            _build_signal(strategy_id=StrategyId.VOL_BREAKOUT),
+            lambda: _build_snapshot(strategy_enable_flags={StrategyId.VOL_BREAKOUT.value: False}),
             "strategy_disabled",
         ),
         (

@@ -16,6 +16,7 @@ class OkxAccountMode(StrEnum):
 class StrategyId(StrEnum):
     BREAKOUT = "breakout"
     MEAN_REVERSION = "mean_reversion"
+    VOL_BREAKOUT = "vol_breakout"
     RISK_PAUSE = "risk_pause"
 
 

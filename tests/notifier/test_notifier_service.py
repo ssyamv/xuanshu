@@ -63,7 +63,7 @@ class _SnapshotStore:
             version_id = "snap-live"
             market_mode = RunMode.DEGRADED
             symbol_whitelist = ["BTC-USDT-SWAP"]
-            strategy_enable_flags = {"breakout": False, "mean_reversion": False, "risk_pause": True}
+            strategy_enable_flags = {"vol_breakout": True, "risk_pause": True}
             risk_multiplier = 0.25
             per_symbol_max_position = 0.12
             max_leverage = 1
@@ -107,7 +107,7 @@ async def test_notifier_service_renders_status_and_market_queries_from_runtime_s
     assert "快照版本：snap-live" in status.text
     assert "故障标记：public_ws_disconnected" in status.text
     assert "预算：remaining_notional=120.0 remaining_order_count=8" in status.text
-    assert "当前策略：risk_pause" in status.text
+    assert "当前策略：vol_breakout, risk_pause" in status.text
     assert "参数：risk_multiplier=0.25 per_symbol_max_position=0.12 max_leverage=1" in status.text
     assert "BTC-USDT-SWAP" in market.text
     assert "ETH-USDT-SWAP" in market.text
@@ -382,11 +382,11 @@ async def test_notifier_service_emits_chinese_trade_notifications_for_submit_can
             "symbol": "BTC-USDT-SWAP",
             "side": "buy",
             "status": "submitted",
-            "client_order_id": "BTCUSDTSWAPbreakout000001",
+            "client_order_id": "BTCUSDTSWAPvolbreakout000001",
             "order_id": "ord-open-1",
             "intent": "open",
-            "strategy_id": "breakout",
-            "strategy_logic": "趋势突破，最近成交偏买方，准备顺势开多。",
+            "strategy_id": "vol_breakout",
+            "strategy_logic": "ETH 4H 波动率突破，价格突破 ATR 阈值后顺势开多。",
         }
     )
     history.append_order_fact(
@@ -394,10 +394,10 @@ async def test_notifier_service_emits_chinese_trade_notifications_for_submit_can
             "symbol": "BTC-USDT-SWAP",
             "side": "sell",
             "status": "canceled",
-            "client_order_id": "BTCUSDTSWAPbreakout000002",
+            "client_order_id": "BTCUSDTSWAPvolbreakout000002",
             "order_id": "ord-close-1",
             "intent": "close",
-            "strategy_id": "breakout",
+            "strategy_id": "vol_breakout",
             "strategy_logic": "平仓挂单超时未成交，已撤单等待下一次机会。",
         }
     )
@@ -416,8 +416,8 @@ async def test_notifier_service_emits_chinese_trade_notifications_for_submit_can
             "average_price": 100.2,
             "unrealized_pnl": 0.3,
             "intent": "open",
-            "strategy_id": "breakout",
-            "strategy_logic": "趋势突破已确认，按 breakout 策略完成开仓。",
+            "strategy_id": "vol_breakout",
+            "strategy_logic": "ETH 4H 波动率突破已确认，完成开仓。",
         }
     )
     history.append_position_fact(
@@ -427,7 +427,7 @@ async def test_notifier_service_emits_chinese_trade_notifications_for_submit_can
             "average_price": 0.0,
             "unrealized_pnl": 1.1,
             "intent": "close",
-            "strategy_id": "breakout",
+            "strategy_id": "vol_breakout",
             "strategy_logic": "达到平仓条件，已落袋离场。",
         }
     )
@@ -448,10 +448,10 @@ async def test_notifier_service_emits_chinese_trade_notifications_for_submit_can
 
     assert flushed == 4
     assert delivered == [
-        "订单已提交：BTC-USDT-SWAP 买入开仓\n策略：breakout\n逻辑：趋势突破，最近成交偏买方，准备顺势开多。\n客户端单号：BTCUSDTSWAPbreakout000001\n订单号：ord-open-1",
-        "订单已撤销：BTC-USDT-SWAP 卖出平仓\n策略：breakout\n逻辑：平仓挂单超时未成交，已撤单等待下一次机会。\n客户端单号：BTCUSDTSWAPbreakout000002\n订单号：ord-close-1",
-        "已开仓：BTC-USDT-SWAP 当前仓位=2.0 均价=100.2\n策略：breakout\n逻辑：趋势突破已确认，按 breakout 策略完成开仓。",
-        "已平仓：BTC-USDT-SWAP 当前仓位=0.0 浮盈亏=1.1\n策略：breakout\n逻辑：达到平仓条件，已落袋离场。",
+        "订单已提交：BTC-USDT-SWAP 买入开仓\n策略：vol_breakout\n逻辑：ETH 4H 波动率突破，价格突破 ATR 阈值后顺势开多。\n客户端单号：BTCUSDTSWAPvolbreakout000001\n订单号：ord-open-1",
+        "订单已撤销：BTC-USDT-SWAP 卖出平仓\n策略：vol_breakout\n逻辑：平仓挂单超时未成交，已撤单等待下一次机会。\n客户端单号：BTCUSDTSWAPvolbreakout000002\n订单号：ord-close-1",
+        "已开仓：BTC-USDT-SWAP 当前仓位=2.0 均价=100.2\n策略：vol_breakout\n逻辑：ETH 4H 波动率突破已确认，完成开仓。",
+        "已平仓：BTC-USDT-SWAP 当前仓位=0.0 浮盈亏=1.1\n策略：vol_breakout\n逻辑：达到平仓条件，已落袋离场。",
     ]
 
 
@@ -496,7 +496,7 @@ async def test_notifier_service_backfills_position_strategy_logic_from_recent_or
             "symbol": "BTC-USDT-SWAP",
             "side": "buy",
             "status": "submitted",
-            "client_order_id": "BTCUSDTSWAPbreakout004534",
+            "client_order_id": "BTCUSDTSWAPvolbreakout004534",
             "order_id": "ord-btc-1",
         }
     )
@@ -532,8 +532,8 @@ async def test_notifier_service_backfills_position_strategy_logic_from_recent_or
     flushed = await service.flush_proactive_notifications(adapter=_Adapter(), limit=10)
 
     assert flushed == 2
-    assert delivered[0] == "订单已提交：BTC-USDT-SWAP 买入开仓\n策略：breakout\n逻辑：趋势突破，最近成交偏买方，准备顺势开多。\n客户端单号：BTCUSDTSWAPbreakout004534\n订单号：ord-btc-1"
-    assert delivered[1] == "已开仓：BTC-USDT-SWAP 当前仓位=3.5 均价=75215.1\n策略：breakout\n逻辑：趋势突破，最近成交偏买方，准备顺势开多。"
+    assert delivered[0] == "订单已提交：BTC-USDT-SWAP 买入开仓\n策略：vol_breakout\n逻辑：ETH 4H 波动率突破，价格突破 ATR 阈值后顺势开多。\n客户端单号：BTCUSDTSWAPvolbreakout004534\n订单号：ord-btc-1"
+    assert delivered[1] == "已开仓：BTC-USDT-SWAP 当前仓位=3.5 均价=75215.1\n策略：vol_breakout\n逻辑：ETH 4H 波动率突破，价格突破 ATR 阈值后顺势开多。"
 
 
 @pytest.mark.asyncio

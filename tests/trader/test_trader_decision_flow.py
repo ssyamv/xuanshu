@@ -18,7 +18,7 @@ from xuanshu.state.engine import StateEngine
 from xuanshu.strategies.signals import build_candidate_signals
 
 
-def test_trader_generates_breakout_signal_for_trend_expansion() -> None:
+def test_trader_generates_vol_breakout_signal_for_trend_expansion() -> None:
     engine = StateEngine()
     engine.on_bbo("BTC-USDT-SWAP", bid=100.0, ask=100.2)
     engine.on_trade("BTC-USDT-SWAP", price=100.3, size=5.0, side="buy")
@@ -29,7 +29,7 @@ def test_trader_generates_breakout_signal_for_trend_expansion() -> None:
 
     assert snapshot.volatility_state == VolatilityState.HOT
     assert snapshot.regime == MarketRegime.TREND
-    assert signals[0].strategy_id == StrategyId.BREAKOUT
+    assert signals[0].strategy_id == StrategyId.VOL_BREAKOUT
     assert signals[0].side == OrderSide.BUY
     assert signals[0].entry_type == EntryType.MARKET
 
@@ -200,7 +200,7 @@ def _build_strategy_snapshot(binding: ApprovedStrategyBinding) -> StrategyConfig
         effective_from=now,
         expires_at=now + timedelta(minutes=5),
         symbol_whitelist=["BTC-USDT-SWAP"],
-        strategy_enable_flags={"breakout": True, "mean_reversion": False, "risk_pause": True},
+        strategy_enable_flags={"vol_breakout": True, "risk_pause": True},
         risk_multiplier=0.5,
         per_symbol_max_position=0.12,
         max_leverage=3,

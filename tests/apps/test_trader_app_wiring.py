@@ -130,7 +130,7 @@ def test_trader_entrypoint_loads_settings_and_threads_it_into_components(monkeyp
     assert isinstance(seen_components.components.okx_rest_client, OkxRestClient)
     assert isinstance(seen_components.components.okx_public_stream, OkxPublicStream)
     assert isinstance(seen_components.components.okx_private_stream, OkxPrivateStream)
-    assert seen_components.components.client_order_id_builder("BTC-USDT-SWAP", "breakout", 1) == "BTCUSDTSWAPbreakout000001"
+    assert seen_components.components.client_order_id_builder("BTC-USDT-SWAP", "vol_breakout", 1) == "BTCUSDTSWAPvolbreakout000001"
     assert seen_components.settings.okx_api_key.get_secret_value() == "api-key"
     assert seen_components.components.okx_rest_client.api_key == "api-key"
     assert seen_components.components.okx_rest_client.simulated_trading is False
@@ -577,7 +577,7 @@ def test_trader_runtime_relaxes_from_halted_when_approved_degraded_snapshot_arri
                 "market_mode": RunMode.DEGRADED,
                 "approval_state": ApprovalState.APPROVED,
                 "symbol_whitelist": ["BTC-USDT-SWAP", "ETH-USDT-SWAP"],
-                "strategy_enable_flags": {"breakout": True, "mean_reversion": False, "risk_pause": True},
+                "strategy_enable_flags": {"vol_breakout": True, "risk_pause": True},
                 "risk_multiplier": 0.25,
                 "per_symbol_max_position": 0.12,
             }
@@ -641,7 +641,7 @@ def test_trader_runtime_relaxes_from_halted_at_startup_when_approved_degraded_sn
                 "market_mode": RunMode.DEGRADED,
                 "approval_state": ApprovalState.APPROVED,
                 "symbol_whitelist": ["BTC-USDT-SWAP", "ETH-USDT-SWAP"],
-                "strategy_enable_flags": {"breakout": True, "mean_reversion": False, "risk_pause": True},
+                "strategy_enable_flags": {"vol_breakout": True, "risk_pause": True},
                 "risk_multiplier": 0.25,
                 "per_symbol_max_position": 0.12,
             }
@@ -1248,7 +1248,7 @@ def test_trader_runtime_consumes_public_and_private_streams_and_persists_runtime
                     generated_at=datetime.now(UTC),
                     private_sequence="pri-2",
                     order_id="ord-1",
-                    client_order_id="BTCUSDTSWAPbreakout000001",
+                    client_order_id="BTCUSDTSWAPvolbreakout000001",
                     side="buy",
                     price=100.2,
                     size=1.0,
@@ -1278,7 +1278,7 @@ def test_trader_runtime_consumes_public_and_private_streams_and_persists_runtime
                 "version_id": "snap-live",
                 "market_mode": RunMode.NORMAL,
                 "approval_state": ApprovalState.APPROVED,
-                "strategy_enable_flags": {"breakout": True, "mean_reversion": False, "risk_pause": True},
+                "strategy_enable_flags": {"vol_breakout": True, "risk_pause": True},
             }
         ),
     )
@@ -1430,7 +1430,7 @@ def test_trader_runtime_keeps_public_stream_healthy_when_order_submission_fails(
                 "market_mode": RunMode.NORMAL,
                 "approval_state": ApprovalState.APPROVED,
                 "symbol_whitelist": ["BTC-USDT-SWAP", "ETH-USDT-SWAP"],
-                "strategy_enable_flags": {"breakout": True, "mean_reversion": False, "risk_pause": True},
+                "strategy_enable_flags": {"vol_breakout": True, "risk_pause": True},
             }
         ),
     )
@@ -1533,7 +1533,7 @@ def test_trader_runtime_logs_order_submission(monkeypatch) -> None:
                 "version_id": "snap-live",
                 "market_mode": RunMode.NORMAL,
                 "approval_state": ApprovalState.APPROVED,
-                "strategy_enable_flags": {"breakout": True, "mean_reversion": False, "risk_pause": True},
+                "strategy_enable_flags": {"vol_breakout": True, "risk_pause": True},
             }
         ),
     )
@@ -1592,9 +1592,9 @@ def test_trader_runtime_logs_order_submission(monkeypatch) -> None:
         {
             "service": "trader",
             "symbol": "BTC-USDT-SWAP",
-            "strategy_id": "breakout",
+            "strategy_id": "vol_breakout",
             "side": "buy",
-            "client_order_id": "BTCUSDTSWAPbreakout000001",
+            "client_order_id": "BTCUSDTSWAPvolbreakout000001",
             "run_mode": "normal",
         },
     )
@@ -1640,7 +1640,7 @@ def test_trader_runtime_records_trade_notification_metadata_for_order_and_positi
                 "version_id": "snap-live",
                 "market_mode": RunMode.NORMAL,
                 "approval_state": ApprovalState.APPROVED,
-                "strategy_enable_flags": {"breakout": True, "mean_reversion": False, "risk_pause": True},
+                "strategy_enable_flags": {"vol_breakout": True, "risk_pause": True},
             }
         ),
     )
@@ -1697,7 +1697,7 @@ def test_trader_runtime_records_trade_notification_metadata_for_order_and_positi
                     generated_at=datetime.now(UTC),
                     private_sequence="pri-1",
                     order_id="ord-1",
-                    client_order_id="BTCUSDTSWAPbreakout000001",
+                    client_order_id="BTCUSDTSWAPvolbreakout000001",
                     side="buy",
                     price=100.4,
                     size=1.0,
@@ -1728,11 +1728,11 @@ def test_trader_runtime_records_trade_notification_metadata_for_order_and_positi
         "symbol": "BTC-USDT-SWAP",
         "side": "buy",
         "status": "submitted",
-        "client_order_id": "BTCUSDTSWAPbreakout000001",
+        "client_order_id": "BTCUSDTSWAPvolbreakout000001",
         "order_id": "ord-1",
         "intent": "open",
-        "strategy_id": "breakout",
-        "strategy_logic": "趋势突破，最近成交偏买方，准备顺势开多。",
+        "strategy_id": "vol_breakout",
+        "strategy_logic": "ETH 4H 波动率突破，价格突破 ATR 阈值后顺势开多。",
     }
     assert runtime.history_store.written_rows["positions"][-1] == {
         "symbol": "BTC-USDT-SWAP",
@@ -1741,8 +1741,8 @@ def test_trader_runtime_records_trade_notification_metadata_for_order_and_positi
         "mark_price": 100.5,
         "unrealized_pnl": 0.2,
         "intent": "open",
-        "strategy_id": "breakout",
-        "strategy_logic": "趋势突破，最近成交偏买方，准备顺势开多。",
+        "strategy_id": "vol_breakout",
+        "strategy_logic": "ETH 4H 波动率突破，价格突破 ATR 阈值后顺势开多。",
     }
 
 
