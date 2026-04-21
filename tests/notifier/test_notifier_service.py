@@ -26,7 +26,13 @@ class _RuntimeStore:
             "ETH-USDT-SWAP": {"symbol": "ETH-USDT-SWAP", "mid_price": 200.2, "net_quantity": 0.0},
         }
         self.faults = {"public_ws_disconnected": {"severity": "warn"}}
-        self.budget = {"remaining_notional": 120.0, "remaining_order_count": 8, "current_mode": "degraded"}
+        self.budget = {
+            "remaining_notional": 120.0,
+            "remaining_order_count": 8,
+            "current_mode": "degraded",
+            "equity": 918.27,
+            "strategy_total_amount": 5000.0,
+        }
         self.manual_release_target: str | None = None
 
     def get_run_mode(self) -> RunMode | None:
@@ -40,6 +46,9 @@ class _RuntimeStore:
 
     def get_budget_pool_summary(self) -> dict[str, object] | None:
         return self.budget
+
+    def set_budget_pool_summary(self, summary: dict[str, object]) -> None:
+        self.budget = summary
 
     def set_run_mode(self, mode: RunMode) -> None:
         self.mode = mode
@@ -106,14 +115,37 @@ async def test_notifier_service_renders_status_and_market_queries_from_runtime_s
     assert "模式：降级运行" in status.text
     assert "快照版本：snap-live" in status.text
     assert "故障标记：public_ws_disconnected" in status.text
-    assert "预算：remaining_notional=120.0 remaining_order_count=8" in status.text
+    assert "账户权益：918.27" in status.text
+    assert "策略总金额：5000.0" in status.text
+    assert "运行控制：degraded" in status.text
+    assert "remaining_notional" not in status.text
+    assert "available_balance" not in status.text
     assert "当前策略：vol_breakout, risk_pause" in status.text
     assert "参数：risk_multiplier=0.25 per_symbol_max_position=0.12 max_leverage=1" in status.text
     assert "BTC-USDT-SWAP" in market.text
     assert "ETH-USDT-SWAP" in market.text
-    assert "BTC-USDT-SWAP: net=1.25 avg=99.8 upnl=1.2" in positions.text
+    assert "BTC-USDT-SWAP: 当前净持仓=1.25" in positions.text
+    assert "ETH-USDT-SWAP: 当前净持仓=0.0" in positions.text
     assert "BTC-USDT-SWAP buy live cid=btc-breakout-000001" in orders.text
-    assert "预算：remaining_notional=120.0 remaining_order_count=8 current_mode=degraded" in risk.text
+    assert "预算：" not in risk.text
+
+
+@pytest.mark.asyncio
+async def test_notifier_service_returns_chinese_help_for_english_commands() -> None:
+    service = NotifierService(
+        okx_symbols=("BTC-USDT-SWAP",),
+        runtime_store=_RuntimeStore(),
+        snapshot_store=_SnapshotStore(),
+        history_store=PostgresRuntimeStore(dsn="postgresql://xuanshu:xuanshu@localhost:5432/xuanshu"),
+    )
+
+    payload = await service.handle_command("/help")
+
+    assert "/positions - 查看当前运行态持仓" in payload.text
+    assert "/pause [reason] - 暂停交易并切换为 halted" in payload.text
+    assert "/start [reason] - 请求恢复交易到 normal" in payload.text
+    assert "/capital <amount> [reason] - 调整当前策略总金额" in payload.text
+    assert "/budget" not in payload.text
 
 
 @pytest.mark.asyncio
@@ -164,6 +196,128 @@ async def test_notifier_service_rejects_manual_takeover_without_supported_mode()
     assert payload.text == "用法：/takeover <degraded|reduce_only|halted> [reason]"
     assert runtime.mode == RunMode.DEGRADED
     assert history.list_recent_rows("risk_events", limit=1) == []
+
+
+@pytest.mark.asyncio
+async def test_notifier_service_accepts_pause_and_start_commands() -> None:
+    runtime = _RuntimeStore()
+    runtime.mode = RunMode.NORMAL
+    runtime.faults = {}
+    history = PostgresRuntimeStore(dsn="postgresql://xuanshu:xuanshu@localhost:5432/xuanshu")
+    service = NotifierService(
+        okx_symbols=("BTC-USDT-SWAP",),
+        runtime_store=runtime,
+        snapshot_store=_SnapshotStore(),
+        history_store=history,
+    )
+
+    pause = await service.handle_command("/pause maintenance")
+    start = await service.handle_command("/start checks passed")
+
+    assert pause.text == "已暂停交易：halted（原因：maintenance）"
+    assert start.text == "已请求启动交易：normal（原因：checks passed）"
+    assert runtime.mode == RunMode.NORMAL
+    assert runtime.faults == {}
+    assert runtime.manual_release_target == "normal"
+    assert history.list_recent_rows("risk_events", limit=2) == [
+        {
+            "event_type": "manual_start_requested",
+            "symbol": "system",
+            "detail": "requested normal: checks passed",
+        },
+        {
+            "event_type": "manual_pause_requested",
+            "symbol": "system",
+            "detail": "requested halted: maintenance",
+        },
+    ]
+
+
+@pytest.mark.asyncio
+async def test_notifier_service_adjusts_strategy_total_amount_from_english_command() -> None:
+    runtime = _RuntimeStore()
+    history = PostgresRuntimeStore(dsn="postgresql://xuanshu:xuanshu@localhost:5432/xuanshu")
+    service = NotifierService(
+        okx_symbols=("BTC-USDT-SWAP",),
+        runtime_store=runtime,
+        snapshot_store=_SnapshotStore(),
+        history_store=history,
+    )
+
+    payload = await service.handle_command("/capital 5000 operator cap")
+
+    assert payload.text == "已调整当前策略总金额：5000.0（原因：operator cap）"
+    assert runtime.budget["strategy_total_amount"] == 5000.0
+    assert runtime.budget["manual_strategy_total_amount_override"] is True
+    assert history.list_recent_rows("risk_events", limit=1) == [
+        {
+            "event_type": "manual_strategy_capital_adjusted",
+            "symbol": "system",
+            "detail": "strategy_total_amount=5000.0: operator cap",
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_notifier_status_falls_back_to_checkpoint_and_order_strategy_context() -> None:
+    history = PostgresRuntimeStore(dsn="postgresql://xuanshu:xuanshu@localhost:5432/xuanshu")
+    history.save_checkpoint(
+        {
+            "checkpoint_id": "runtime",
+            "active_snapshot_version": "fixed-vol-breakout-eth4h-btc12h-20260421T1011Z",
+            "current_mode": "normal",
+            "needs_reconcile": False,
+        }
+    )
+    history.append_order_fact(
+        {
+            "symbol": "BTC-USDT-SWAP",
+            "side": "buy",
+            "status": "submitted",
+            "client_order_id": "BTCUSDTSWAPvolbreakout000004",
+            "order_id": "ord-btc",
+            "intent": "open",
+            "strategy_id": "vol_breakout",
+            "strategy_logic": "BTC-USDT-SWAP 12H 波动率突破，价格突破 ATR 阈值后顺势开多。",
+        }
+    )
+    history.append_order_fact(
+        {
+            "symbol": "ETH-USDT-SWAP",
+            "side": "buy",
+            "status": "submitted",
+            "client_order_id": "ETHUSDTSWAPvolbreakout000716",
+            "order_id": "ord-eth",
+            "intent": "open",
+            "strategy_id": "vol_breakout",
+            "strategy_logic": "ETH 4H 波动率突破，价格突破 ATR 阈值后顺势开多。",
+        }
+    )
+
+    class _EmptySnapshotStore:
+        def get_latest_snapshot(self):
+            return None
+
+    service = NotifierService(
+        okx_symbols=("BTC-USDT-SWAP", "ETH-USDT-SWAP"),
+        runtime_store=_RuntimeStore(),
+        snapshot_store=_EmptySnapshotStore(),
+        history_store=history,
+    )
+
+    status = await service.handle_command("/status")
+
+    assert "快照版本：fixed-vol-breakout-eth4h-btc12h-20260421T1011Z" in status.text
+    assert "账户权益：918.27" in status.text
+    assert "策略总金额：5000.0" in status.text
+    assert "运行控制：degraded" in status.text
+    assert "remaining_notional" not in status.text
+    assert "available_balance" not in status.text
+    assert "当前策略：vol_breakout" in status.text
+    assert "策略逻辑：" in status.text
+    assert "BTC-USDT-SWAP: BTC-USDT-SWAP 12H 波动率突破" in status.text
+    assert "ETH-USDT-SWAP: ETH 4H 波动率突破" in status.text
+    assert "运行摘要：" in status.text
 
 
 @pytest.mark.asyncio
@@ -582,6 +736,51 @@ async def test_notifier_service_ignores_signal_blocked_risk_events_for_proactive
             "event_type": "signal_blocked",
             "symbol": "BTC-USDT-SWAP",
             "detail": "strategy_disabled",
+        }
+    )
+    history.append_risk_event(
+        {
+            "event_type": "runtime_mode_changed",
+            "symbol": "system",
+            "detail": "startup gating tightened runtime to reduce_only",
+        }
+    )
+    service = NotifierService(
+        okx_symbols=("BTC-USDT-SWAP",),
+        runtime_store=_RuntimeStore(),
+        snapshot_store=_SnapshotStore(),
+        history_store=history,
+    )
+
+    delivered: list[str] = []
+
+    class _Adapter:
+        async def send_text(self, payload: TextMessagePayload) -> None:
+            delivered.append(payload.text)
+
+    flushed = await service.flush_proactive_notifications(adapter=_Adapter())
+
+    assert flushed == 1
+    assert delivered == [
+        "风控事件：runtime_mode_changed startup gating tightened runtime to reduce_only",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_notifier_service_ignores_manual_command_audit_risk_events_for_proactive_notifications() -> None:
+    history = PostgresRuntimeStore(dsn="postgresql://xuanshu:xuanshu@localhost:5432/xuanshu")
+    history.append_risk_event(
+        {
+            "event_type": "manual_strategy_capital_adjusted",
+            "symbol": "system",
+            "detail": "strategy_total_amount=5000.0: verify",
+        }
+    )
+    history.append_risk_event(
+        {
+            "event_type": "manual_pause_requested",
+            "symbol": "system",
+            "detail": "requested halted: verify",
         }
     )
     history.append_risk_event(

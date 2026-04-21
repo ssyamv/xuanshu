@@ -12,11 +12,9 @@
 本文档只覆盖 `live core`，即：
 
 - `Trader Service`
-- `Governor Service`
 - `Notifier Service`
 - 热状态、审计状态、检查点状态
 - 快路径执行闭环
-- 慢路径治理闭环
 - 单机部署前提下的服务协作方式
 - 主要持久化对象与读写责任
 
@@ -35,8 +33,9 @@
 - 模块之间怎么交互
 - 哪些状态驻留在内存，哪些落 `Redis`，哪些落 `PostgreSQL`
 - 哪些事件驱动快路径
-- 哪些时机触发慢路径治理
 - 故障和恢复时具体先做什么后做什么
+
+> 2026-04-21 更新：当前运行架构已经从早期 `Trader + Governor + Notifier` 收敛为 `Trader + Notifier + Redis + PostgreSQL`。Governor/Qdrant/AI 研究链路已从运行时移除；保留的核心路径是固定策略快照、Trader 热路径执行、Notifier 人工控制、Redis 热状态和 PostgreSQL 审计事实。
 
 ## 2. Trader Service 详细设计
 
@@ -119,6 +118,14 @@
 
 最终执行时取更保守者优先。
 
+当前固定策略运行形态下，运行模式还有一条人工控制路径：
+
+- `notifier` 通过 Telegram 命令写入 Redis 运行态。
+- `trader` 在事件分发和逐标的评估前读取 Redis 控制项。
+- 更保守的模式变更立即生效，例如 `normal -> halted`。
+- 更宽松的人工解除只在快照已批准、检查点允许新风险、且无故障标记时生效。
+- 生效后的模式、故障标记、预算摘要和 symbol 摘要由 `trader` 重新发布回 Redis。
+
 ### 2.4 关键内存态对象
 
 Trader 中建议显式维护以下运行时对象：
@@ -132,6 +139,8 @@ Trader 中建议显式维护以下运行时对象：
 - `fault_flags`
 - `last_public_stream_marker`
 - `last_private_stream_marker`
+- `manual_release_target`
+- `manual_strategy_total_amount_override`
 
 这些对象的职责分工是：
 
@@ -139,13 +148,21 @@ Trader 中建议显式维护以下运行时对象：
 - `Redis`：用于热状态映射和快速恢复辅助
 - `PostgreSQL`：用于正式持久化与检查点依据
 
-## 3. Governor Service 详细设计
+## 3. Governor Service 历史设计
 
-`Governor Service` 是 `live core` 中唯一正式承载 AI 治理能力的服务。
+`Governor Service` 是早期 `live core` 中承载 AI 治理能力的服务。当前运行时已不再部署该服务，相关设计仅作为历史背景保留，不是生产操作入口。
+
+当前生产运行规则：
+
+- 不通过 Governor 发布新策略。
+- 不通过 Qdrant 或 AI research/provider 链路影响交易热路径。
+- 当前有效策略来自经过审阅的固定 `StrategyConfigSnapshot` 文件。
+- `trader` 启动时优先加载 `XUANSHU_FIXED_STRATEGY_SNAPSHOT_PATH`，避免 Redis 中旧快照覆盖固定策略。
+- 策略切换必须先生成/审阅固定快照，再通过部署配置切换文件路径。
 
 ### 3.1 进程职责
 
-`Governor Service` 负责：
+历史设计中，`Governor Service` 负责：
 
 - 定期读取状态摘要和审计输入
 - 生成结构化专家意见
@@ -193,7 +210,7 @@ Trader 中建议显式维护以下运行时对象：
 
 ### 3.3 触发方式
 
-在 `live core` 中，Governor 采用双触发方式：
+历史设计中，Governor 采用双触发方式：
 
 - **周期触发**
   固定周期运行，例如 `30s ~ 300s`
@@ -208,7 +225,7 @@ Trader 中建议显式维护以下运行时对象：
 
 ### 3.4 AI 故障策略
 
-Governor 必须显式维护 AI 故障处理逻辑：
+历史设计中，Governor 必须显式维护 AI 故障处理逻辑：
 
 - 单次超时：本次治理放弃，不阻塞系统
 - 连续超时：记录治理健康状态下降
@@ -217,7 +234,7 @@ Governor 必须显式维护 AI 故障处理逻辑：
 
 ### 3.5 核心持久化对象
 
-Governor 在 `live core` 中正式读写以下对象：
+历史设计中，Governor 读写以下对象：
 
 - 读取：
   - 当前热状态摘要
@@ -305,18 +322,35 @@ Notifier 不自己推导业务状态，只消费已有状态视图。
 
 详细设计里至少保留以下查询面：
 
+- `/help`
 - `/status`
 - `/positions`
+- `/position`
 - `/orders`
 - `/risk`
 - `/mode`
 - `/market`
+- `/pause [reason]`
+- `/start [reason]`
+- `/resume [reason]`
+- `/takeover <mode> [reason]`
+- `/release <mode> [reason]`
+- `/capital <amount> [reason]`
+
+其中：
+
+- `/pause` 直接请求 `halted` 并写入 `manual_pause` 故障标记。
+- `/start` / `/resume` 清理人工暂停/接管标记，并写入 `normal` 释放目标。
+- `/release` 写入指定释放目标，由 `trader` 判定是否可以安全放宽。
+- `/capital` 写入 `strategy_total_amount` 和 `manual_strategy_total_amount_override=true`，由 `trader` 同步到起始 NAV 与风控 NAV。
+- `/positions` 优先读取 Redis 当前运行态持仓摘要；没有运行态摘要时才回退到最近持仓事实。
+- `/status` 优先展示模式、快照、故障、账户权益、策略总金额、运行控制、策略逻辑和运行摘要，不再暴露内部预算字段。
 
 ### 4.5 异步与失败策略
 
 Notifier 必须是异步的，并明确：
 
-- 通知发送失败不得阻塞 Trader 或 Governor
+- 通知发送失败不得阻塞 Trader
 - 失败消息需要记录可补发标记
 - `CRITICAL` 级消息允许更高重试优先级
 - 查询命令超时或失败，不影响交易主链路
@@ -336,8 +370,9 @@ Notifier 必须是异步的，并明确：
 - `fault_flags`
 - `last_public_stream_marker`
 - `last_private_stream_marker`
+- `manual_strategy_total_amount_override`
 
-**Governor 内存态**
+**Governor 内存态（历史设计，当前运行时不部署）**
 - `governor_health_state`
 - `last_governor_run_at`
 - `last_governor_result`
@@ -364,14 +399,14 @@ Notifier 必须是异步的，并明确：
 - `symbol_runtime_summary`
 - `budget_pool_summary`
 - `active_fault_flags`
-- `governor_health_summary`
+- `manual_release_target`
 
 `Redis` 的设计目标是：
 
 - 快路径快速读取
 - Notifier 快速查询
-- Governor 获取当前摘要
 - 重启后提供热恢复辅助
+- 在 `notifier` 与 `trader` 之间承载人工控制请求
 
 ### 5.3 PostgreSQL 中的主要持久化对象
 
@@ -383,28 +418,25 @@ Notifier 必须是异步的，并明确：
 - `risk_events`
 - `strategy_snapshots`
 - `execution_checkpoints`
-- `expert_opinions`
-- `governor_runs`
 - `notification_events`
 
 对象职责：
 
 - `orders / fills / positions`：交易事实
-- `risk_events`：风控与保护触发事实
-- `strategy_snapshots`：治理快照版本事实
+- `risk_events`：风控、保护触发和人工控制审计事实
+- `strategy_snapshots`：固定策略快照版本事实
 - `execution_checkpoints`：恢复依据
-- `expert_opinions / governor_runs`：治理过程审计
 - `notification_events`：关键消息发送记录
 
 ### 5.4 Qdrant 中的主要对象
 
-在 `live core` 中，`Qdrant` 只预留以下对象类型：
+`Qdrant` 是历史治理增强设计，当前运行时不部署，也不进入生产热路径。历史上预留过以下对象类型：
 
 - `market_case`
 - `risk_case`
 - `governance_case`
 
-它们只服务 Governor 后续治理增强，当前阶段不进入热路径依赖。
+它们只服务历史 Governor 治理增强设计，当前阶段不进入热路径依赖。
 
 ### 5.5 读写责任分工
 
@@ -413,13 +445,12 @@ Notifier 必须是异步的，并明确：
   - 写：`Redis` 热状态摘要、`PostgreSQL` 订单/成交/风险事件/检查点
 
 - `Governor Service`
-  - 读：`Redis` 当前热状态摘要、`PostgreSQL` 治理与风险历史、`Qdrant` 案例
-  - 写：`PostgreSQL` 专家意见与治理快照、`Redis` 最新快照和治理健康摘要
+  - 当前运行时不部署；不得作为生产策略发布或人工操作入口。
 
 - `Notifier Service`
   - 读：`Redis` 当前模式和摘要、`PostgreSQL` 最近事件
-  - 写：`PostgreSQL` 通知记录
-  - 不写业务运行状态
+  - 写：`Redis` 人工运行控制、`PostgreSQL` 通知记录和人工控制审计事件
+  - 不直接调用 OKX，也不直接改写 Trader 内存
 
 ## 6. 关键时序设计
 
@@ -444,42 +475,43 @@ Notifier 必须是异步的，并明确：
 - 风控审核在执行前是必经步骤
 - 订单回报必须回流状态引擎
 
-### 6.2 治理发布时序
+### 6.2 固定策略发布时序
 
-治理发布时序定义为：
+当前运行时的策略发布时序定义为：
 
-1. 到达治理周期，或触发治理事件
-2. `Governor Service` 的 `Input Builder` 从 `Redis / PostgreSQL` 读取治理上下文
-3. `Expert Layer` 基于输入生成结构化 `ExpertOpinion`
-4. `Decision Committee` 汇总多个专家意见形成统一裁决
-5. `Snapshot Publisher` 生成新的 `StrategyConfigSnapshot`
-6. 新快照写入 `PostgreSQL` 版本记录
-7. 最新可生效快照写入 `Redis`
-8. `Trader Service` 在下一次读取配置时消费最新有效快照
-9. `Notifier Service` 发送治理更新通知（如果需要）
-
-关键约束：
-
-- 治理发布是版本替换，不是直接改 Trader 内存对象
-- Trader 只能通过读取最新有效快照生效
-
-### 6.3 AI 故障治理时序
-
-AI 故障治理时序定义为：
-
-1. `Governor Service` 发起一次治理运行
-2. AI 调用超时、失败或返回无效结构
-3. 本次治理运行记为失败，写治理日志
-4. 当前有效快照仍保留，不被替换
-5. `Redis` 中的最新有效快照保持不变
-6. `Notifier Service` 记录并视故障等级发送 `WARN` 或 `CRITICAL`
-7. `Trader Service` 继续按最后有效快照运行
-8. 若连续治理失败达到阈值，则系统进入更保守模式或要求人工关注
+1. 离线生成或手工审阅固定 `StrategyConfigSnapshot` 文件。
+2. 将固定快照放到生产服务器受控路径。
+3. 设置 `XUANSHU_FIXED_STRATEGY_SNAPSHOT_PATH` 指向该文件。
+4. 以 `XUANSHU_DEFAULT_RUN_MODE=halted` 启动或重启运行栈。
+5. `Trader Service` 启动时优先加载固定快照。
+6. `Trader Service` 将有效快照和运行态摘要写入 Redis。
+7. `Notifier Service` 通过 `/status` 展示快照版本、策略逻辑、运行模式和持仓摘要。
+8. 操作员检查日志、检查点和运行摘要后，再通过 `/start` 或 `/release` 请求恢复交易。
 
 关键约束：
 
-- AI 故障只影响更新能力，不直接破坏当前运行能力
-- 治理层失败不能让快路径进入未定义状态
+- 策略发布是文件版本切换，不是 Telegram 命令直接改策略。
+- 启动默认必须保持保护模式。
+- 固定快照优先级高于 Redis 中可能残留的旧快照。
+
+### 6.3 人工控制时序
+
+人工控制时序定义为：
+
+1. 操作员在 Telegram 发送 `/pause`、`/start`、`/release` 或 `/capital`。
+2. `Notifier Service` 校验命令并写入 Redis 控制项。
+3. `Notifier Service` 写入对应 `manual_*` 风控审计事件。
+4. `Trader Service` 在事件分发或逐 symbol 评估前读取 Redis 控制项。
+5. 若是更保守模式，立即收紧。
+6. 若是释放到更宽松模式，必须先通过快照、检查点和故障标记检查。
+7. 若释放成功，`Trader Service` 清除释放目标并写入 `manual_release_applied`。
+8. 若释放不满足条件，保持当前更保守模式，等待后续状态变干净。
+
+关键约束：
+
+- Notifier 不直接调用 OKX，不直接改 Trader 内存。
+- 人工命令可以请求运行态变化，但最终是否放宽由 Trader 判定。
+- 人工命令审计事件不作为主动风险告警反复推送。
 
 ### 6.4 故障恢复时序
 
@@ -511,7 +543,7 @@ AI 故障治理时序定义为：
   用于 `Market Gateway -> Event Dispatcher -> State Engine / Execution Coordinator`
 
 - `MarketStateSnapshot`
-  用于 `State Engine -> Regime Router / Governor Input Builder`
+  用于 `State Engine -> Regime Router`；历史设计中也可用于 `Governor Input Builder`
 
 - `CandidateSignal`
   用于 `Signal Factory -> Risk Kernel`
@@ -520,13 +552,10 @@ AI 故障治理时序定义为：
   用于 `Risk Kernel -> Execution Coordinator`
 
 - `StrategyConfigSnapshot`
-  用于 `Governor Service -> Redis / PostgreSQL -> Trader Service`
+  用于 `fixed snapshot file / Redis / PostgreSQL -> Trader Service`
 
 - `ExecutionCheckpoint`
   用于 `Trader Service <-> PostgreSQL`，支撑恢复与对账链
-
-- `ExpertOpinion`
-  用于 `Expert Layer -> Decision Committee`
 
 这些对象必须满足：
 
@@ -540,11 +569,11 @@ AI 故障治理时序定义为：
 - **市场事件**
   通过事件分发进入 Trader 内部模块，实时生效
 
-- **治理快照**
-  通过版本化写入 `PostgreSQL` 和缓存写入 `Redis` 生效，Trader 被动读取
+- **策略快照**
+  通过固定文件和缓存写入 `Redis` 生效，Trader 启动时优先读取固定文件
 
 - **运行模式**
-  由快路径硬规则或治理快照共同决定，执行时取更保守者
+  由快路径硬规则、固定快照和人工 Redis 控制共同决定，执行时取更保守者；放宽必须由 Trader 做安全判定
 
 - **恢复状态**
   通过加载检查点和对账结果生效，而不是通过重启时默认值生效
@@ -557,6 +586,7 @@ AI 故障治理时序定义为：
 - Trader 直接调用 Governor 内部逻辑拿即时 AI 结果
 - Governor 直接写 Trader 内存对象
 - Notifier 依赖 Trader 私有内存态作为唯一数据源
+- Notifier 直接调用 OKX 或直接改 Trader 内存
 - 恢复逻辑跳过检查点直接按当前猜测状态继续运行
 - `Redis` 中缓存对象被视为唯一真相来源
 
@@ -565,13 +595,12 @@ AI 故障治理时序定义为：
 到这一层，`V1 live core` 的详细设计已经形成一个清晰实现目标：
 
 - `Trader Service` 作为唯一热路径交易核心
-- `Governor Service` 作为正式 AI 治理核心
-- `Notifier Service` 作为运行观察面和人工接管入口
-- `Redis / PostgreSQL / Qdrant` 按强约束分工
-- `StrategyConfigSnapshot` 作为治理和执行之间的唯一正式桥梁
+- `Notifier Service` 作为运行观察面和人工控制入口
+- `Redis / PostgreSQL` 按强约束分工
+- 固定 `StrategyConfigSnapshot` 作为策略发布和执行之间的唯一正式桥梁
 - `ExecutionCheckpoint + Reconcile` 作为恢复链路核心
 - 单机部署前提下仍保持逻辑边界清晰
 
 因此，`玄枢 V1 live core` 的详细设计定位是：
 
-**一个可以直接进入实现阶段的单机 `live core` 工程模型，围绕状态对象、治理快照、风控决策、事件闭环和恢复链路组织，而不是一组原则性描述。**
+**一个可以直接进入实现阶段的单机 `live core` 工程模型，围绕状态对象、固定策略快照、人工控制、风控决策、事件闭环和恢复链路组织，而不是一组原则性描述。**

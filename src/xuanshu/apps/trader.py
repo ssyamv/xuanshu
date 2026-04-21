@@ -241,15 +241,22 @@ def _now_timestamp() -> str:
 
 
 def _build_runtime_budget_summary(runtime: TraderRuntime) -> dict[str, object]:
-    return {
+    summary = {
         "max_daily_loss": runtime.startup_checkpoint.budget_state.max_daily_loss,
         "remaining_daily_loss": runtime.startup_checkpoint.budget_state.remaining_daily_loss,
         "remaining_notional": runtime.startup_checkpoint.budget_state.remaining_notional,
         "remaining_order_count": runtime.startup_checkpoint.budget_state.remaining_order_count,
         "current_mode": runtime.current_mode.value,
         "starting_nav": runtime.starting_nav,
+        "strategy_total_amount": runtime.components.risk_kernel.nav,
         **runtime.components.state_engine.build_budget_pool_summary(),
     }
+    existing = runtime.runtime_store.get_budget_pool_summary()
+    if isinstance(existing, dict) and existing.get("manual_strategy_total_amount_override") is True:
+        if "strategy_total_amount" in existing:
+            summary["strategy_total_amount"] = existing["strategy_total_amount"]
+        summary["manual_strategy_total_amount_override"] = True
+    return summary
 
 
 def _build_execution_checkpoint(runtime: TraderRuntime, *, checkpoint_id: str) -> ExecutionCheckpoint:
@@ -452,7 +459,76 @@ def _can_relax_to_snapshot_mode(runtime: TraderRuntime, snapshot: StrategyConfig
     )
 
 
+def _can_apply_manual_release(runtime: TraderRuntime, target_mode: RunMode) -> bool:
+    return (
+        _RUN_MODE_PRIORITY[target_mode] < _RUN_MODE_PRIORITY[runtime.current_mode]
+        and target_mode != RunMode.HALTED
+        and runtime.startup_snapshot.approval_state == ApprovalState.APPROVED
+        and runtime.components.checkpoint_service.can_open_new_risk(runtime.startup_checkpoint)
+        and not runtime.components.state_engine.fault_flags
+    )
+
+
+def _positive_float(value: object) -> float | None:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    if parsed <= 0:
+        return None
+    return parsed
+
+
+def _sync_manual_strategy_capital(runtime: TraderRuntime) -> None:
+    summary = runtime.runtime_store.get_budget_pool_summary()
+    if not isinstance(summary, dict):
+        return
+    if summary.get("manual_strategy_total_amount_override") is not True:
+        return
+    strategy_total_amount = _positive_float(summary.get("strategy_total_amount"))
+    if strategy_total_amount is None:
+        return
+    runtime.starting_nav = strategy_total_amount
+    runtime.components.risk_kernel.nav = strategy_total_amount
+
+
+def _sync_manual_runtime_controls(runtime: TraderRuntime) -> None:
+    _sync_manual_strategy_capital(runtime)
+    requested_mode = runtime.runtime_store.get_run_mode()
+    if requested_mode is not None and _RUN_MODE_PRIORITY[requested_mode] > _RUN_MODE_PRIORITY[runtime.current_mode]:
+        _tighten_runtime_mode(runtime, requested_mode)
+        _publish_runtime_state(runtime)
+
+    release_target = runtime.runtime_store.get_manual_release_target()
+    if not release_target:
+        return
+    try:
+        target_mode = RunMode(release_target)
+    except ValueError:
+        runtime.runtime_store.clear_manual_release_target()
+        return
+    if not _can_apply_manual_release(runtime, target_mode):
+        return
+    previous_mode = runtime.current_mode
+    runtime.current_mode = target_mode
+    runtime.components.state_engine.set_run_mode(target_mode)
+    runtime.startup_checkpoint.current_mode = target_mode
+    runtime.opening_allowed = target_mode not in {RunMode.REDUCE_ONLY, RunMode.HALTED}
+    runtime.runtime_store.clear_manual_release_target()
+    _publish_runtime_state(runtime)
+    runtime.history_store.append_risk_event(
+        {
+            "event_type": "manual_release_applied",
+            "symbol": "system",
+            "detail": f"released {previous_mode.value} to {target_mode.value}",
+        }
+    )
+
+
 async def _evaluate_symbol(runtime: TraderRuntime, symbol: str) -> None:
+    _sync_manual_runtime_controls(runtime)
+    if runtime.current_mode == RunMode.HALTED:
+        return
     if not _uses_fixed_strategy_snapshot(runtime):
         latest_snapshot = runtime.snapshot_store.get_latest_snapshot()
         if latest_snapshot is not None:
@@ -567,6 +643,7 @@ async def _consume_stream(runtime: TraderRuntime, adapter: object, **kwargs: obj
 
 
 async def _dispatch_runtime_event(runtime: TraderRuntime, event: object) -> None:
+    _sync_manual_runtime_controls(runtime)
     dispatch_event(runtime.components.state_engine, event)
     symbol = getattr(event, "symbol", None)
     if isinstance(event, (OrderbookTopEvent, MarketTradeEvent)) and symbol is not None:

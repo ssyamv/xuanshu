@@ -112,6 +112,9 @@ class RuntimeStateReader(Protocol):
     def get_budget_pool_summary(self) -> dict[str, object] | None:
         ...
 
+    def set_budget_pool_summary(self, summary: dict[str, object]) -> None:
+        ...
+
     def set_manual_release_target(self, mode: str) -> None:
         ...
 
@@ -157,13 +160,15 @@ class NotifierService:
 
     async def handle_command(self, text: str) -> TextMessagePayload:
         command = self._normalize_command(text)
+        if command == "/help":
+            return render_text_message(self._render_help())
         if command == "/status":
             return render_text_message(self._render_status())
         if command == "/mode":
             return render_text_message(self._render_mode())
         if command == "/market":
             return render_text_message(self._render_market())
-        if command == "/positions":
+        if command in {"/positions", "/position"}:
             return render_text_message(self._render_positions())
         if command == "/orders":
             return render_text_message(self._render_orders())
@@ -173,9 +178,13 @@ class NotifierService:
             return render_text_message(self._handle_takeover_command(text))
         if command == "/release":
             return render_text_message(self._handle_release_command(text))
-        return render_text_message(
-            "支持的命令：/status /positions /orders /risk /mode /market /takeover /release"
-        )
+        if command == "/pause":
+            return render_text_message(self._handle_pause_command(text))
+        if command in {"/start", "/resume"}:
+            return render_text_message(self._handle_start_command(text))
+        if command in {"/capital", "/amount"}:
+            return render_text_message(self._handle_capital_command(text))
+        return render_text_message(self._render_help())
 
     async def flush_pending_notifications(self, *, adapter: object, limit: int = 20) -> int:
         pending = self._collect_pending_notifications(limit=limit)
@@ -261,6 +270,21 @@ class NotifierService:
         command = text.strip().split(maxsplit=1)[0].lower()
         return command.split("@", 1)[0]
 
+    def _render_help(self) -> str:
+        return "\n".join(
+            [
+                "支持的命令：",
+                "/status - 查看服务状态、策略、账户权益和持仓摘要",
+                "/positions - 查看当前运行态持仓",
+                "/orders - 查看最近订单",
+                "/risk - 查看最近风控事件",
+                "/market - 查看行情摘要",
+                "/pause [reason] - 暂停交易并切换为 halted",
+                "/start [reason] - 请求恢复交易到 normal",
+                "/capital <amount> [reason] - 调整当前策略总金额",
+            ]
+        )
+
     def _handle_takeover_command(self, text: str) -> str:
         parts = text.strip().split(maxsplit=2)
         if len(parts) < 2:
@@ -290,6 +314,43 @@ class NotifierService:
         )
         return f"已请求人工接管：{effective_mode.value}（原因：{reason}）"
 
+    def _handle_pause_command(self, text: str) -> str:
+        parts = text.strip().split(maxsplit=1)
+        reason = parts[1].strip() if len(parts) >= 2 and parts[1].strip() else "operator requested pause"
+        fault_flags = dict(self._runtime_store.get_fault_flags() or {})
+        fault_flags["manual_pause"] = {
+            "requested_mode": RunMode.HALTED.value,
+            "reason": reason,
+        }
+        self._runtime_store.set_run_mode(RunMode.HALTED)
+        self._runtime_store.set_fault_flags(fault_flags)
+        self._history_store.append_risk_event(
+            {
+                "event_type": "manual_pause_requested",
+                "symbol": "system",
+                "detail": f"requested halted: {reason}",
+            }
+        )
+        return f"已暂停交易：halted（原因：{reason}）"
+
+    def _handle_start_command(self, text: str) -> str:
+        parts = text.strip().split(maxsplit=1)
+        reason = parts[1].strip() if len(parts) >= 2 and parts[1].strip() else "operator requested start"
+        fault_flags = dict(self._runtime_store.get_fault_flags() or {})
+        fault_flags.pop("manual_takeover", None)
+        fault_flags.pop("manual_pause", None)
+        self._runtime_store.set_fault_flags(fault_flags)
+        self._runtime_store.set_run_mode(RunMode.NORMAL)
+        self._runtime_store.set_manual_release_target(RunMode.NORMAL.value)
+        self._history_store.append_risk_event(
+            {
+                "event_type": "manual_start_requested",
+                "symbol": "system",
+                "detail": f"requested normal: {reason}",
+            }
+        )
+        return f"已请求启动交易：normal（原因：{reason}）"
+
     def _handle_release_command(self, text: str) -> str:
         parts = text.strip().split(maxsplit=2)
         if len(parts) < 2:
@@ -308,23 +369,59 @@ class NotifierService:
         )
         return f"已请求人工解除：{requested_mode}（原因：{reason}）"
 
+    def _handle_capital_command(self, text: str) -> str:
+        parts = text.strip().split(maxsplit=2)
+        if len(parts) < 2:
+            return "用法：/capital <amount> [reason]"
+        amount = self._parse_positive_float(parts[1])
+        if amount is None:
+            return "用法：/capital <amount> [reason]"
+        reason = parts[2].strip() if len(parts) >= 3 and parts[2].strip() else "operator adjusted strategy capital"
+        summary = dict(self._runtime_store.get_budget_pool_summary() or {})
+        summary["strategy_total_amount"] = amount
+        summary["manual_strategy_total_amount_override"] = True
+        self._runtime_store.set_budget_pool_summary(summary)
+        self._history_store.append_risk_event(
+            {
+                "event_type": "manual_strategy_capital_adjusted",
+                "symbol": "system",
+                "detail": f"strategy_total_amount={amount}: {reason}",
+            }
+        )
+        return f"已调整当前策略总金额：{amount}（原因：{reason}）"
+
+    @staticmethod
+    def _parse_positive_float(raw: str) -> float | None:
+        try:
+            value = float(raw)
+        except ValueError:
+            return None
+        if value <= 0:
+            return None
+        return value
+
     def _render_status(self) -> str:
         mode = self._render_mode()
         snapshot = self._snapshot_store.get_latest_snapshot()
-        snapshot_version = getattr(snapshot, "version_id", "none")
+        checkpoint = self._latest_checkpoint()
+        snapshot_version = getattr(snapshot, "version_id", None) or checkpoint.get("active_snapshot_version", "none")
         faults = self._runtime_store.get_fault_flags() or {}
         fault_labels = ", ".join(sorted(faults)) if faults else "none"
         lines = [mode, f"快照版本：{snapshot_version}", f"故障标记：{fault_labels}"]
         budget = self._runtime_store.get_budget_pool_summary()
         if isinstance(budget, dict):
-            lines.append(
-                "预算："
-                f"remaining_notional={budget.get('remaining_notional', 'n/a')} "
-                f"remaining_order_count={budget.get('remaining_order_count', 'n/a')}"
-            )
+            lines.append(f"账户权益：{budget.get('equity', 'n/a')}")
+            lines.append(f"策略总金额：{budget.get('strategy_total_amount', budget.get('starting_nav', 'n/a'))}")
+            lines.append(f"运行控制：{budget.get('current_mode', 'n/a')}")
         strategy_summary_lines = self._render_strategy_summary(snapshot)
+        if not strategy_summary_lines:
+            strategy_summary_lines = self._render_runtime_strategy_summary()
         if strategy_summary_lines:
             lines.extend(strategy_summary_lines)
+        position_lines = list(self._render_symbol_summaries())
+        if position_lines:
+            lines.append("运行摘要：")
+            lines.extend(position_lines)
         return "\n".join(lines)
 
     def _render_mode(self) -> str:
@@ -338,14 +435,27 @@ class NotifierService:
         return "\n".join(lines)
 
     def _render_positions(self) -> str:
+        runtime_lines = []
+        for symbol in self._okx_symbols:
+            summary = self._runtime_store.get_symbol_runtime_summary(symbol)
+            if summary is None:
+                continue
+            runtime_lines.append(
+                f"{symbol}: 当前净持仓={summary.get('net_quantity', 'n/a')} "
+                f"中间价={summary.get('mid_price', 'n/a')} "
+                f"运行模式={summary.get('run_mode', 'n/a')} "
+                f"挂单数={summary.get('open_order_count', 'n/a')}"
+            )
+        if runtime_lines:
+            return "\n".join(runtime_lines)
         rows = self._history_store.list_recent_rows("positions", limit=5)
         if not rows:
-            return "仓位：暂无最近仓位记录"
+            return "持仓：暂无当前运行态或最近仓位记录"
         return "\n".join(
             f"{row.get('symbol', 'unknown')}: "
-            f"net={row.get('net_quantity', row.get('quantity', 'n/a'))} "
-            f"avg={row.get('average_price', 'n/a')} "
-            f"upnl={row.get('unrealized_pnl', 'n/a')}"
+            f"净持仓={row.get('net_quantity', row.get('quantity', 'n/a'))} "
+            f"均价={row.get('average_price', 'n/a')} "
+            f"未实现盈亏={row.get('unrealized_pnl', 'n/a')}"
             for row in rows
         )
 
@@ -372,14 +482,6 @@ class NotifierService:
             )
         else:
             lines.append("风控：暂无最近风控事件")
-        budget = self._runtime_store.get_budget_pool_summary()
-        if isinstance(budget, dict):
-            lines.append(
-                "预算："
-                f"remaining_notional={budget.get('remaining_notional', 'n/a')} "
-                f"remaining_order_count={budget.get('remaining_order_count', 'n/a')} "
-                f"current_mode={budget.get('current_mode', 'n/a')}"
-            )
         return "\n".join(lines)
 
     def _render_symbol_summaries(self) -> Iterable[str]:
@@ -590,6 +692,41 @@ class NotifierService:
             f"标的：{summary['symbols']}",
         ]
 
+    def _latest_checkpoint(self) -> dict[str, object]:
+        rows = self._history_store.list_recent_rows("execution_checkpoints", limit=1)
+        row = rows[0] if rows else {}
+        return row if isinstance(row, dict) else {}
+
+    def _render_runtime_strategy_summary(self) -> list[str]:
+        rows = self._history_store.list_recent_rows("orders", limit=20)
+        strategy_by_symbol: dict[str, dict[str, str]] = {}
+        for row in rows:
+            symbol = str(row.get("symbol") or "").strip()
+            if not symbol or symbol in strategy_by_symbol:
+                continue
+            strategy_id = row.get("strategy_id") or _infer_strategy_id_from_client_order_id(row.get("client_order_id"))
+            if strategy_id is None:
+                continue
+            strategy_logic = row.get("strategy_logic") or _default_strategy_logic(strategy_id) or "未提供"
+            strategy_by_symbol[symbol] = {
+                "strategy_id": str(strategy_id),
+                "strategy_logic": str(strategy_logic),
+            }
+        if not strategy_by_symbol:
+            return [f"标的：{','.join(self._okx_symbols)}"]
+        strategies = ", ".join(sorted({item["strategy_id"] for item in strategy_by_symbol.values()}))
+        lines = [
+            f"当前策略：{strategies}",
+            f"标的：{','.join(self._okx_symbols)}",
+            "策略逻辑：",
+        ]
+        for symbol in self._okx_symbols:
+            strategy = strategy_by_symbol.get(symbol)
+            if strategy is None:
+                continue
+            lines.append(f"{symbol}: {strategy['strategy_logic']}")
+        return lines
+
     def _extract_snapshot_strategy_summary(self, snapshot: object) -> dict[str, str] | None:
         if snapshot is None:
             return None
@@ -663,6 +800,8 @@ class NotifierService:
             if not isinstance(event_type, str):
                 continue
             if "recovery_failed" in event_type:
+                continue
+            if event_type.startswith("manual_"):
                 continue
             if event_type in {"account_snapshot_updated", "signal_blocked"}:
                 continue

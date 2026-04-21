@@ -34,6 +34,9 @@ class _FakeRedis:
     def get(self, key: str) -> bytes | None:
         return self.values.get(key)
 
+    def delete(self, key: str) -> int:
+        return 1 if self.values.pop(key, None) is not None else 0
+
 
 class _FakeRestClient:
     def __init__(self) -> None:
@@ -137,6 +140,49 @@ def test_trader_entrypoint_loads_settings_and_threads_it_into_components(monkeyp
     assert seen_components.history_store.dsn == "postgresql+psycopg://xuanshu:xuanshu@localhost:5432/xuanshu"
     assert seen_components.components.okx_public_stream.url.endswith("/public")
     assert seen_components.components.okx_private_stream.url.endswith("/private")
+
+
+def test_trader_syncs_manual_runtime_controls_from_redis(monkeypatch) -> None:
+    _set_required_settings_env(monkeypatch)
+    fake_redis = _FakeRedis()
+    monkeypatch.setattr(
+        trader_app,
+        "build_snapshot_store",
+        lambda settings: RedisSnapshotStore(redis_client=fake_redis),
+    )
+    monkeypatch.setattr(
+        trader_app,
+        "build_runtime_state_store",
+        lambda settings: RedisRuntimeStateStore(redis_client=fake_redis),
+    )
+    runtime = trader_app.build_trader_runtime()
+    runtime.runtime_store.set_run_mode(RunMode.HALTED)
+
+    trader_app._sync_manual_runtime_controls(runtime)
+
+    assert runtime.current_mode == RunMode.HALTED
+    assert runtime.opening_allowed is False
+
+    runtime.components.state_engine.fault_flags.clear()
+    runtime.runtime_store.set_run_mode(RunMode.NORMAL)
+    runtime.runtime_store.set_manual_release_target(RunMode.NORMAL.value)
+
+    trader_app._sync_manual_runtime_controls(runtime)
+
+    assert runtime.current_mode == RunMode.NORMAL
+    assert runtime.opening_allowed is True
+    assert runtime.runtime_store.get_manual_release_target() is None
+
+    runtime.runtime_store.set_budget_pool_summary(
+        {
+            "strategy_total_amount": 5_000.0,
+            "manual_strategy_total_amount_override": True,
+        }
+    )
+    trader_app._sync_manual_runtime_controls(runtime)
+
+    assert runtime.starting_nav == 5_000.0
+    assert runtime.components.risk_kernel.nav == 5_000.0
 
 
 def test_trader_entrypoint_threads_demo_account_mode_into_okx_clients(monkeypatch) -> None:
