@@ -1418,6 +1418,83 @@ def test_governor_service_rejects_binding_for_symbol_not_in_whitelist() -> None:
 
 
 @pytest.mark.asyncio
+async def test_governor_service_filters_approved_bindings_after_approval_guardrails() -> None:
+    service = GovernorService()
+    now = datetime.now(UTC)
+    last_snapshot = StrategyConfigSnapshot(
+        version_id="snap-last",
+        generated_at=now,
+        effective_from=now,
+        expires_at=now + timedelta(minutes=5),
+        symbol_whitelist=["BTC-USDT-SWAP", "ETH-USDT-SWAP"],
+        strategy_enable_flags={"breakout": True, "mean_reversion": False, "risk_pause": True},
+        risk_multiplier=0.5,
+        per_symbol_max_position=0.12,
+        max_leverage=3,
+        market_mode=RunMode.NORMAL,
+        approval_state=ApprovalState.APPROVED,
+        source_reason="cached",
+        ttl_sec=300,
+    )
+    candidate_snapshot = last_snapshot.model_copy(
+        update={
+            "version_id": "snap-candidate",
+            "source_reason": "candidate",
+        }
+    )
+    approval_record = ApprovalRecord(
+        approval_record_id="apr-guarded",
+        strategy_package_id="pkg-1",
+        backtest_report_id="bt-1",
+        decision=ApprovalDecision.APPROVED_WITH_GUARDRAILS,
+        decision_reason="only btc allowed",
+        guardrails={"symbol_whitelist": ["BTC-USDT-SWAP"]},
+        reviewed_by="committee",
+        review_source="system",
+        created_at=now,
+    )
+    published: list[StrategyConfigSnapshot] = []
+
+    result = await service.run_cycle(
+        state_summary={
+            "scope": "governor",
+            "approval_required": True,
+            "approval_record": approval_record.model_dump(mode="json"),
+            "approved_source_reason": "approved research package",
+            "approved_symbol_strategy_bindings": {
+                "BTC-USDT-SWAP": {
+                    "strategy_def_id": "strat-btc",
+                    "strategy_package_id": "pkg-btc",
+                    "backtest_report_id": "bt-btc",
+                    "score": 67.5,
+                    "score_basis": "backtest_return_percent",
+                    "approval_record_id": "apr-guarded",
+                    "activated_at": now,
+                },
+                "ETH-USDT-SWAP": {
+                    "strategy_def_id": "strat-eth",
+                    "strategy_package_id": "pkg-eth",
+                    "backtest_report_id": "bt-eth",
+                    "score": 68.5,
+                    "score_basis": "backtest_return_percent",
+                    "approval_record_id": "apr-guarded",
+                    "activated_at": now,
+                },
+            },
+        },
+        last_snapshot=last_snapshot,
+        governor_client=_GovernorClientReturning(candidate_snapshot),
+        publish_snapshot=published.append,
+        trigger_reason="schedule",
+    )
+
+    assert result.status == "published"
+    assert len(published) == 1
+    assert published[0].symbol_whitelist == ["BTC-USDT-SWAP"]
+    assert list(published[0].symbol_strategy_bindings) == ["BTC-USDT-SWAP"]
+
+
+@pytest.mark.asyncio
 async def test_governor_service_blocks_rejected_research_snapshot_publication() -> None:
     service = GovernorService()
     published: list[str] = []

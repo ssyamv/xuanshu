@@ -33,7 +33,7 @@ from xuanshu.ops.runtime_logging import configure_runtime_logger
 
 _LOGGER = configure_runtime_logger("xuanshu.governor")
 _OKX_REST_BASE_URL = "https://www.okx.com"
-_MIN_RESEARCH_NET_PNL = 50.0
+_MIN_RESEARCH_RETURN_PERCENT = 50.0
 _SEARCH_MODE_ACTIVE = "search_until_qualified"
 _SEARCH_MODE_OBSERVE = "observe_until_invalidated"
 _SEARCH_RETRY_DELAY_SEC = 5
@@ -68,7 +68,7 @@ _RESEARCH_MARKET_ENVIRONMENTS = ("trend", "range", "mean_reversion")
 
 
 def _candidate_clears_return_gate(return_percent: float) -> bool:
-    return return_percent > _MIN_RESEARCH_NET_PNL
+    return return_percent > _MIN_RESEARCH_RETURN_PERCENT
 
 
 def build_governor_service() -> GovernorService:
@@ -509,7 +509,7 @@ async def _run_governor_cycle(runtime: GovernorRuntime) -> None:
                     candidate, backtest_report = best_report_under_threshold
                     validation_error = (
                         f"best candidate return_percent {backtest_report.return_percent} "
-                        f"did not exceed minimum quality threshold {_MIN_RESEARCH_NET_PNL}"
+                        f"did not exceed minimum quality threshold {_MIN_RESEARCH_RETURN_PERCENT}"
                     )
                     runtime.runtime_store.set_pending_approval_summary(
                         {
@@ -523,7 +523,7 @@ async def _run_governor_cycle(runtime: GovernorRuntime) -> None:
                             "status": "candidate_rejected_low_quality",
                             "candidate_strategy_package_id": candidate.strategy_package_id,
                             "candidate_backtest_report_id": backtest_report.backtest_report_id,
-                            "minimum_return_percent": _MIN_RESEARCH_NET_PNL,
+                            "minimum_return_percent": _MIN_RESEARCH_RETURN_PERCENT,
                             "best_return_percent": backtest_report.return_percent,
                         }
                     )

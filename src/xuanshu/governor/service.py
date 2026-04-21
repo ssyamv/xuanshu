@@ -776,7 +776,11 @@ class GovernorService:
                 and isinstance(approved_bindings, Mapping)
             ):
                 for symbol, binding_payload in approved_bindings.items():
-                    if isinstance(symbol, str) and isinstance(binding_payload, Mapping):
+                    if (
+                        isinstance(symbol, str)
+                        and symbol.strip() in snapshot.symbol_whitelist
+                        and isinstance(binding_payload, Mapping)
+                    ):
                         snapshot = self.bind_symbol_strategy(
                             snapshot=snapshot,
                             symbol=symbol,
