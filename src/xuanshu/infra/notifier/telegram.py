@@ -18,6 +18,12 @@ class TelegramInboundMessage:
     text: str
 
 
+@dataclass(frozen=True, slots=True)
+class TelegramBotCommand:
+    command: str
+    description: str
+
+
 def render_text_message(text: str) -> TextMessagePayload:
     return TextMessagePayload(text=text)
 
@@ -35,6 +41,19 @@ class TelegramNotifier:
         response = await self.client.post(
             f"https://api.telegram.org/bot{self.bot_token.get_secret_value()}/sendMessage",
             json=body,
+        )
+        if hasattr(response, "raise_for_status"):
+            response.raise_for_status()
+
+    async def set_commands(self, commands: list[TelegramBotCommand]) -> None:
+        response = await self.client.post(
+            f"https://api.telegram.org/bot{self.bot_token.get_secret_value()}/setMyCommands",
+            json={
+                "commands": [
+                    {"command": command.command, "description": command.description}
+                    for command in commands
+                ]
+            },
         )
         if hasattr(response, "raise_for_status"):
             response.raise_for_status()

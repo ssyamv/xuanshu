@@ -6,7 +6,7 @@ from typing import Protocol
 
 from xuanshu.config.settings import NotifierRuntimeSettings
 from xuanshu.core.enums import RunMode
-from xuanshu.infra.notifier.telegram import TelegramInboundMessage, TextMessagePayload
+from xuanshu.infra.notifier.telegram import TelegramBotCommand, TelegramInboundMessage, TextMessagePayload
 from xuanshu.ops.runtime_logging import configure_runtime_logger
 from xuanshu.infra.storage.postgres_store import PostgresRuntimeStore
 from xuanshu.infra.storage.redis_store import RedisRuntimeStateStore, RedisSnapshotStore
@@ -17,6 +17,9 @@ _LOGGER = configure_runtime_logger("xuanshu.notifier")
 
 class NotifierAdapter(Protocol):
     async def send_text(self, payload: TextMessagePayload) -> None:
+        ...
+
+    async def set_commands(self, commands: list[TelegramBotCommand]) -> None:
         ...
 
     async def fetch_updates(
@@ -161,6 +164,12 @@ async def _run_command_loop(runtime: NotifierRuntime) -> None:
 
 async def _run_notifier(runtime: NotifierRuntime) -> None:
     _LOGGER.info("runtime_started", extra={"service": "notifier", "mode": runtime.mode.value})
+    if hasattr(runtime.adapter, "set_commands"):
+        try:
+            await runtime.adapter.set_commands(runtime.service.telegram_bot_commands())
+        except Exception:
+            _LOGGER.exception("telegram_command_registration_failed", extra={"service": "notifier"})
+
     try:
         await runtime.service.deliver_text(
             adapter=runtime.adapter,

@@ -75,6 +75,22 @@ class _FakeEventStream:
         return _generator()
 
 
+class _FailingWebsocketConnect:
+    def __init__(self, error: Exception) -> None:
+        self.error = error
+        self.calls = 0
+
+    def __call__(self, *_args: object, **_kwargs: object):
+        self.calls += 1
+        return self
+
+    async def __aenter__(self):
+        raise self.error
+
+    async def __aexit__(self, *_args: object) -> None:
+        return None
+
+
 def _replace_runtime_streams_with_empty_event_streams(runtime: trader_app.TraderRuntime) -> None:
     runtime.components = trader_app.TraderComponents(
         state_engine=runtime.components.state_engine,
@@ -1113,6 +1129,56 @@ def test_trader_runtime_dispatches_fault_event_updates_fault_flags(monkeypatch) 
     assert runtime.runtime_store.get_run_mode() == RunMode.DEGRADED
 
 
+def test_public_stream_failure_degrades_runtime_without_reduce_only(monkeypatch) -> None:
+    _set_required_settings_env(monkeypatch)
+    fake_redis = _FakeRedis()
+    history_store = PostgresRuntimeStore(dsn="postgresql://xuanshu:xuanshu@localhost:5432/xuanshu")
+    public_connect = _FailingWebsocketConnect(RuntimeError("keepalive ping timeout"))
+
+    monkeypatch.setattr(
+        trader_app,
+        "build_snapshot_store",
+        lambda settings: RedisSnapshotStore(redis_client=fake_redis),
+    )
+    monkeypatch.setattr(
+        trader_app,
+        "build_runtime_state_store",
+        lambda settings: RedisRuntimeStateStore(redis_client=fake_redis),
+    )
+    monkeypatch.setattr(trader_app, "build_history_store", lambda settings: history_store)
+
+    runtime = trader_app.build_trader_runtime()
+    public_stream = OkxPublicStream(
+        url="wss://ws.okx.com:8443/ws/v5/public",
+        connect_factory=public_connect,
+    )
+
+    async def _exercise_runtime() -> None:
+        try:
+            consumed = await trader_app._consume_stream(
+                runtime,
+                public_stream,
+                symbols=("BTC-USDT-SWAP",),
+                reconnect_delay_seconds=0,
+                max_reconnect_attempts=1,
+            )
+            assert consumed is False
+        finally:
+            await runtime.components.aclose()
+
+    asyncio.run(_exercise_runtime())
+
+    assert public_connect.calls == 1
+    assert runtime.runtime_store.get_run_mode() == RunMode.DEGRADED
+    assert runtime.components.state_engine.fault_flags["okxpublicstream_stream_failed"] == {
+        "severity": "warn",
+        "detail": "keepalive ping timeout",
+    }
+    assert history_store.written_rows["risk_events"][-1]["detail"] == (
+        "okxpublicstream_stream_failed: keepalive ping timeout"
+    )
+
+
 def test_trader_runtime_rejects_unsupported_dispatch_event(monkeypatch) -> None:
     _set_required_settings_env(monkeypatch)
     fake_redis = _FakeRedis()
@@ -1327,6 +1393,16 @@ def test_trader_runtime_consumes_public_and_private_streams_and_persists_runtime
                     generated_at=datetime.now(UTC),
                     public_sequence="pub-2",
                     price=100.3,
+                    size=1.0,
+                    side="buy",
+                ),
+                MarketTradeEvent(
+                    event_type=TraderEventType.MARKET_TRADE,
+                    symbol="BTC-USDT-SWAP",
+                    exchange="okx",
+                    generated_at=datetime.now(UTC),
+                    public_sequence="pub-3",
+                    price=100.4,
                     size=1.0,
                     side="buy",
                 ),
@@ -2032,6 +2108,389 @@ def test_trader_runtime_does_not_treat_existing_short_as_long_reversal(monkeypat
     asyncio.run(_exercise_runtime())
 
     assert fake_rest.placed_orders == []
+
+
+def test_trader_runtime_keeps_short_when_vol_breakout_signal_arrives(monkeypatch) -> None:
+    _set_required_settings_env(monkeypatch)
+    fake_redis = _FakeRedis()
+    fake_rest = _FakeRestClient()
+    monkeypatch.setattr(
+        trader_app,
+        "build_snapshot_store",
+        lambda settings: RedisSnapshotStore(redis_client=fake_redis),
+    )
+    monkeypatch.setattr(
+        trader_app,
+        "build_runtime_state_store",
+        lambda settings: RedisRuntimeStateStore(redis_client=fake_redis),
+    )
+
+    runtime = trader_app.build_trader_runtime()
+    runtime.components = trader_app.TraderComponents(
+        state_engine=runtime.components.state_engine,
+        risk_kernel=runtime.components.risk_kernel,
+        checkpoint_service=runtime.components.checkpoint_service,
+        okx_rest_client=fake_rest,
+        okx_public_stream=runtime.components.okx_public_stream,
+        okx_private_stream=runtime.components.okx_private_stream,
+        client_order_id_builder=runtime.components.client_order_id_builder,
+    )
+    runtime.execution_coordinator = trader_app.ExecutionCoordinator(rest_client=fake_rest)
+    now = datetime.now(UTC)
+    runtime.startup_snapshot = runtime.startup_snapshot.model_copy(
+        update={
+            "version_id": "snap-live",
+            "market_mode": RunMode.NORMAL,
+            "approval_state": ApprovalState.APPROVED,
+            "strategy_enable_flags": {"vol_breakout": True, "short_momentum": True, "risk_pause": True},
+            "symbol_strategy_bindings": {
+                "BTC-USDT-SWAP": trader_app.ApprovedStrategyBinding(
+                    strategy_def_id="vol-breakout-btc-usdt-swap-4h-test",
+                    strategy_package_id="fixed-vol-breakout-btc-usdt-swap-4h-test",
+                    backtest_report_id="bt-vol-breakout-btc",
+                    score=52.6,
+                    score_basis="backtest_return_percent",
+                    approval_record_id="fixed-vol-breakout-btc-usdt-swap-4h-test",
+                    activated_at=now,
+                )
+            },
+            "strategy_bindings": {
+                "BTC-USDT-SWAP:short_momentum": trader_app.ApprovedStrategyBinding(
+                    strategy_def_id="short-momentum-btc-usdt-swap-4h-lb4-th25-sl300-tp800-h12",
+                    strategy_package_id="fixed-short-momentum-btc-usdt-swap-4h-lb4-th25-sl300-tp800-h12",
+                    backtest_report_id="bt-short-momentum-btc",
+                    score=75.62,
+                    score_basis="backtest_return_percent",
+                    approval_record_id="fixed-short-momentum-btc-usdt-swap-4h-lb4-th25-sl300-tp800-h12",
+                    activated_at=now,
+                )
+            },
+        }
+    )
+
+    async def _exercise_runtime() -> None:
+        await trader_app._dispatch_runtime_event(
+            runtime,
+            PositionUpdateEvent(
+                event_type=TraderEventType.POSITION_UPDATE,
+                symbol="BTC-USDT-SWAP",
+                exchange="okx",
+                generated_at=now,
+                private_sequence="pri-1",
+                position_side="short",
+                net_quantity=3.5,
+                average_price=100.0,
+                mark_price=100.1,
+                unrealized_pnl=-0.1,
+            ),
+        )
+        await trader_app._dispatch_runtime_event(
+            runtime,
+            OrderbookTopEvent(
+                event_type=TraderEventType.ORDERBOOK_TOP,
+                symbol="BTC-USDT-SWAP",
+                exchange="okx",
+                generated_at=now,
+                public_sequence="pub-1",
+                bid_price=100.0,
+                ask_price=100.2,
+                bid_size=5.0,
+                ask_size=6.0,
+            ),
+        )
+        await trader_app._dispatch_runtime_event(
+            runtime,
+            MarketTradeEvent(
+                event_type=TraderEventType.MARKET_TRADE,
+                symbol="BTC-USDT-SWAP",
+                exchange="okx",
+                generated_at=now,
+                public_sequence="pub-2",
+                price=100.3,
+                size=5.0,
+                side="buy",
+            ),
+        )
+
+    asyncio.run(_exercise_runtime())
+
+    assert fake_rest.placed_orders == []
+
+
+def test_trader_runtime_ignores_disabled_mean_reversion_for_long_close(monkeypatch) -> None:
+    _set_required_settings_env(monkeypatch)
+    fake_redis = _FakeRedis()
+    fake_rest = _FakeRestClient()
+    monkeypatch.setattr(
+        trader_app,
+        "build_snapshot_store",
+        lambda settings: RedisSnapshotStore(redis_client=fake_redis),
+    )
+    monkeypatch.setattr(
+        trader_app,
+        "build_runtime_state_store",
+        lambda settings: RedisRuntimeStateStore(redis_client=fake_redis),
+    )
+
+    runtime = trader_app.build_trader_runtime()
+    runtime.components = trader_app.TraderComponents(
+        state_engine=runtime.components.state_engine,
+        risk_kernel=runtime.components.risk_kernel,
+        checkpoint_service=runtime.components.checkpoint_service,
+        okx_rest_client=fake_rest,
+        okx_public_stream=runtime.components.okx_public_stream,
+        okx_private_stream=runtime.components.okx_private_stream,
+        client_order_id_builder=runtime.components.client_order_id_builder,
+    )
+    runtime.execution_coordinator = trader_app.ExecutionCoordinator(rest_client=fake_rest)
+    now = datetime.now(UTC)
+    runtime.startup_snapshot = runtime.startup_snapshot.model_copy(
+        update={
+            "version_id": "snap-live",
+            "market_mode": RunMode.NORMAL,
+            "approval_state": ApprovalState.APPROVED,
+            "strategy_enable_flags": {"vol_breakout": True, "short_momentum": True, "risk_pause": True},
+        }
+    )
+
+    async def _exercise_runtime() -> None:
+        await trader_app._dispatch_runtime_event(
+            runtime,
+            PositionUpdateEvent(
+                event_type=TraderEventType.POSITION_UPDATE,
+                symbol="BTC-USDT-SWAP",
+                exchange="okx",
+                generated_at=now,
+                private_sequence="pri-1",
+                position_side="long",
+                net_quantity=3.5,
+                average_price=100.0,
+                mark_price=100.1,
+                unrealized_pnl=0.1,
+            ),
+        )
+        await trader_app._dispatch_runtime_event(
+            runtime,
+            OrderbookTopEvent(
+                event_type=TraderEventType.ORDERBOOK_TOP,
+                symbol="BTC-USDT-SWAP",
+                exchange="okx",
+                generated_at=now,
+                public_sequence="pub-1",
+                bid_price=100.0,
+                ask_price=100.1,
+                bid_size=5.0,
+                ask_size=6.0,
+            ),
+        )
+        await trader_app._dispatch_runtime_event(
+            runtime,
+            MarketTradeEvent(
+                event_type=TraderEventType.MARKET_TRADE,
+                symbol="BTC-USDT-SWAP",
+                exchange="okx",
+                generated_at=now,
+                public_sequence="pub-2",
+                price=100.0,
+                size=5.0,
+                side="buy",
+            ),
+        )
+        await trader_app._dispatch_runtime_event(
+            runtime,
+            MarketTradeEvent(
+                event_type=TraderEventType.MARKET_TRADE,
+                symbol="BTC-USDT-SWAP",
+                exchange="okx",
+                generated_at=now,
+                public_sequence="pub-3",
+                price=100.0,
+                size=5.0,
+                side="sell",
+            ),
+        )
+
+    asyncio.run(_exercise_runtime())
+
+    assert fake_rest.placed_orders == []
+
+
+def test_trader_runtime_closes_long_on_vol_breakout_take_profit(monkeypatch) -> None:
+    _set_required_settings_env(monkeypatch)
+    fake_redis = _FakeRedis()
+    fake_rest = _FakeRestClient()
+    monkeypatch.setattr(
+        trader_app,
+        "build_snapshot_store",
+        lambda settings: RedisSnapshotStore(redis_client=fake_redis),
+    )
+    monkeypatch.setattr(
+        trader_app,
+        "build_runtime_state_store",
+        lambda settings: RedisRuntimeStateStore(redis_client=fake_redis),
+    )
+
+    runtime = trader_app.build_trader_runtime()
+    runtime.components = trader_app.TraderComponents(
+        state_engine=runtime.components.state_engine,
+        risk_kernel=runtime.components.risk_kernel,
+        checkpoint_service=runtime.components.checkpoint_service,
+        okx_rest_client=fake_rest,
+        okx_public_stream=runtime.components.okx_public_stream,
+        okx_private_stream=runtime.components.okx_private_stream,
+        client_order_id_builder=runtime.components.client_order_id_builder,
+    )
+    runtime.execution_coordinator = trader_app.ExecutionCoordinator(rest_client=fake_rest)
+    now = datetime.now(UTC)
+    runtime.startup_snapshot = runtime.startup_snapshot.model_copy(
+        update={
+            "version_id": "snap-live",
+            "market_mode": RunMode.NORMAL,
+            "approval_state": ApprovalState.APPROVED,
+            "strategy_enable_flags": {"vol_breakout": True, "risk_pause": True},
+            "symbol_strategy_bindings": {
+                "BTC-USDT-SWAP": trader_app.ApprovedStrategyBinding(
+                    strategy_def_id="vol-breakout-btc-usdt-swap-4h-test",
+                    strategy_package_id="fixed-vol-breakout-btc-usdt-swap-4h-test",
+                    backtest_report_id="bt-vol-breakout-btc",
+                    score=52.6,
+                    score_basis="backtest_return_percent",
+                    approval_record_id="fixed-vol-breakout-btc-usdt-swap-4h-test",
+                    activated_at=now,
+                )
+            },
+        }
+    )
+
+    async def _exercise_runtime() -> None:
+        await trader_app._dispatch_runtime_event(
+            runtime,
+            PositionUpdateEvent(
+                event_type=TraderEventType.POSITION_UPDATE,
+                symbol="BTC-USDT-SWAP",
+                exchange="okx",
+                generated_at=now,
+                private_sequence="pri-1",
+                position_side="long",
+                net_quantity=3.5,
+                average_price=100.0,
+                mark_price=109.0,
+                unrealized_pnl=9.0,
+            ),
+        )
+        await trader_app._dispatch_runtime_event(
+            runtime,
+            OrderbookTopEvent(
+                event_type=TraderEventType.ORDERBOOK_TOP,
+                symbol="BTC-USDT-SWAP",
+                exchange="okx",
+                generated_at=now,
+                public_sequence="pub-1",
+                bid_price=108.9,
+                ask_price=109.1,
+                bid_size=5.0,
+                ask_size=6.0,
+            ),
+        )
+
+    asyncio.run(_exercise_runtime())
+
+    assert len(fake_rest.placed_orders) == 1
+    assert fake_rest.placed_orders[0][0]["side"] == "sell"
+    assert fake_rest.placed_orders[0][0]["posSide"] == "long"
+    assert fake_rest.placed_orders[0][0]["reduceOnly"] == "true"
+    assert runtime.history_store.written_rows["orders"][-1]["intent"] == "close"
+    assert runtime.history_store.written_rows["orders"][-1]["strategy_id"] == "vol_breakout"
+    assert "vol_breakout_take_profit" in runtime.history_store.written_rows["orders"][-1]["strategy_logic"]
+
+
+def test_trader_runtime_closes_short_on_short_momentum_take_profit(monkeypatch) -> None:
+    _set_required_settings_env(monkeypatch)
+    fake_redis = _FakeRedis()
+    fake_rest = _FakeRestClient()
+    monkeypatch.setattr(
+        trader_app,
+        "build_snapshot_store",
+        lambda settings: RedisSnapshotStore(redis_client=fake_redis),
+    )
+    monkeypatch.setattr(
+        trader_app,
+        "build_runtime_state_store",
+        lambda settings: RedisRuntimeStateStore(redis_client=fake_redis),
+    )
+
+    runtime = trader_app.build_trader_runtime()
+    runtime.components = trader_app.TraderComponents(
+        state_engine=runtime.components.state_engine,
+        risk_kernel=runtime.components.risk_kernel,
+        checkpoint_service=runtime.components.checkpoint_service,
+        okx_rest_client=fake_rest,
+        okx_public_stream=runtime.components.okx_public_stream,
+        okx_private_stream=runtime.components.okx_private_stream,
+        client_order_id_builder=runtime.components.client_order_id_builder,
+    )
+    runtime.execution_coordinator = trader_app.ExecutionCoordinator(rest_client=fake_rest)
+    now = datetime.now(UTC)
+    runtime.startup_snapshot = runtime.startup_snapshot.model_copy(
+        update={
+            "version_id": "snap-live",
+            "market_mode": RunMode.NORMAL,
+            "approval_state": ApprovalState.APPROVED,
+            "strategy_enable_flags": {"short_momentum": True, "risk_pause": True},
+            "strategy_bindings": {
+                "BTC-USDT-SWAP:short_momentum": trader_app.ApprovedStrategyBinding(
+                    strategy_def_id="short-momentum-btc-usdt-swap-4h-lb4-th25-sl300-tp800-h12",
+                    strategy_package_id="fixed-short-momentum-btc-usdt-swap-4h-lb4-th25-sl300-tp800-h12",
+                    backtest_report_id="bt-short-momentum-btc",
+                    score=75.62,
+                    score_basis="backtest_return_percent",
+                    approval_record_id="fixed-short-momentum-btc-usdt-swap-4h-lb4-th25-sl300-tp800-h12",
+                    activated_at=now,
+                )
+            },
+        }
+    )
+
+    async def _exercise_runtime() -> None:
+        await trader_app._dispatch_runtime_event(
+            runtime,
+            PositionUpdateEvent(
+                event_type=TraderEventType.POSITION_UPDATE,
+                symbol="BTC-USDT-SWAP",
+                exchange="okx",
+                generated_at=now,
+                private_sequence="pri-1",
+                position_side="short",
+                net_quantity=3.5,
+                average_price=100.0,
+                mark_price=91.0,
+                unrealized_pnl=9.0,
+            ),
+        )
+        await trader_app._dispatch_runtime_event(
+            runtime,
+            OrderbookTopEvent(
+                event_type=TraderEventType.ORDERBOOK_TOP,
+                symbol="BTC-USDT-SWAP",
+                exchange="okx",
+                generated_at=now,
+                public_sequence="pub-1",
+                bid_price=90.9,
+                ask_price=91.1,
+                bid_size=5.0,
+                ask_size=6.0,
+            ),
+        )
+
+    asyncio.run(_exercise_runtime())
+
+    assert len(fake_rest.placed_orders) == 1
+    assert fake_rest.placed_orders[0][0]["side"] == "buy"
+    assert fake_rest.placed_orders[0][0]["posSide"] == "short"
+    assert fake_rest.placed_orders[0][0]["reduceOnly"] == "true"
+    assert runtime.history_store.written_rows["orders"][-1]["intent"] == "close"
+    assert runtime.history_store.written_rows["orders"][-1]["strategy_id"] == "short_momentum"
+    assert "short_momentum_take_profit" in runtime.history_store.written_rows["orders"][-1]["strategy_logic"]
 
 
 def test_trader_runtime_records_trade_notification_metadata_for_order_and_position_events(monkeypatch) -> None:

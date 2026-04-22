@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>玄枢收益监控</title>
+    <link rel="stylesheet" href="/xuanshu/static/styles.css" />
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js" defer></script>
+    <script src="/xuanshu/static/app.js" defer></script>
+  </head>
+  <body>
+    <main class="shell">
+      <header class="topbar">
+        <div>
+          <p class="eyebrow">Xuanshu Live</p>
+          <h1>玄枢收益监控</h1>
+        </div>
+        <div class="status-strip">
+          <span id="modePill" class="mode-pill">--</span>
+          <span id="asOf">等待刷新</span>
+        </div>
+      </header>
+
+      <section class="metric-grid" aria-label="收益摘要">
+        <article class="metric primary">
+          <span>估算收益</span>
+          <strong id="pnlValue">--</strong>
+          <small id="pnlRate">--</small>
+        </article>
+        <article class="metric">
+          <span>账户权益</span>
+          <strong id="equityValue">--</strong>
+          <small>估算权益曲线口径</small>
+        </article>
+        <article class="metric">
+          <span>策略资金</span>
+          <strong id="strategyValue">--</strong>
+          <small id="baseValue">初始 --</small>
+        </article>
+        <article class="metric">
+          <span>保证金率</span>
+          <strong id="marginValue">--</strong>
+          <small id="availableValue">可用 --</small>
+        </article>
+      </section>
+
+      <section class="workspace">
+        <section class="chart-panel" aria-label="收益曲线">
+          <div class="panel-head">
+            <div>
+              <h2>收益曲线</h2>
+              <p>基于策略资金与持仓未实现盈亏估算</p>
+            </div>
+            <div class="controls">
+              <button class="toggle active" data-range="24h">24H</button>
+              <button class="toggle" data-range="7d">7D</button>
+              <button class="toggle" data-range="30d">30D</button>
+              <button class="toggle" data-range="all">ALL</button>
+              <button id="displayToggle" class="toggle accent" data-mode="money">金额</button>
+            </div>
+          </div>
+          <div class="chart-wrap">
+            <canvas id="equityChart" aria-label="收益曲线图"></canvas>
+          </div>
+        </section>
+
+        <aside class="positions-panel" aria-label="当前持仓">
+          <div class="panel-head compact">
+            <h2>当前持仓</h2>
+            <span id="positionCount">0</span>
+          </div>
+          <div id="positionsList" class="positions-list"></div>
+        </aside>
+      </section>
+
+      <section class="actions-panel" aria-label="最近交易动作">
+        <div class="panel-head">
+          <div>
+            <h2>开平仓与订单动作</h2>
+            <p>订单、成交与仓位变化的只读时间线</p>
+          </div>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>时间</th>
+                <th>动作</th>
+                <th>标的</th>
+                <th>方向</th>
+                <th>数量</th>
+                <th>价格</th>
+                <th>策略</th>
+                <th>订单号</th>
+              </tr>
+            </thead>
+            <tbody id="actionsBody"></tbody>
+          </table>
+        </div>
+      </section>
+    </main>
+  </body>
+</html>

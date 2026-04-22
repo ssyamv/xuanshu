@@ -7,7 +7,7 @@ from pydantic import ValidationError
 import xuanshu.apps.notifier as notifier_app
 from xuanshu.core.enums import RunMode
 from xuanshu.infra.storage.postgres_store import PostgresRuntimeStore
-from xuanshu.infra.notifier.telegram import TextMessagePayload
+from xuanshu.infra.notifier.telegram import TelegramBotCommand, TextMessagePayload
 from xuanshu.infra.storage.redis_store import RedisRuntimeStateStore, RedisSnapshotStore
 
 
@@ -88,8 +88,12 @@ def test_notifier_runtime_sends_payload_via_adapter(monkeypatch) -> None:
     _clear_unrelated_settings_env(monkeypatch)
 
     delivered = []
+    commands = []
 
     class _Adapter:
+        async def set_commands(self, payload: list[TelegramBotCommand]):
+            commands.extend(payload)
+
         async def send_text(self, payload: TextMessagePayload):
             delivered.append(payload.text)
 
@@ -103,6 +107,7 @@ def test_notifier_runtime_sends_payload_via_adapter(monkeypatch) -> None:
     asyncio.run(notifier_app._run_notifier(runtime))
 
     assert delivered == ["通知服务已启动"]
+    assert TelegramBotCommand(command="help", description="查看支持的命令") in commands
 
 
 class _FakeRedis:

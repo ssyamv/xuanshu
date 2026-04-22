@@ -3,7 +3,7 @@ from pydantic import SecretStr
 
 from xuanshu.core.enums import RunMode
 from xuanshu.infra.storage.postgres_store import PostgresRuntimeStore
-from xuanshu.infra.notifier.telegram import TelegramNotifier, TextMessagePayload, render_text_message
+from xuanshu.infra.notifier.telegram import TelegramBotCommand, TelegramNotifier, TextMessagePayload, render_text_message
 from xuanshu.notifier.service import NotifierService, format_mode_change
 
 
@@ -146,6 +146,22 @@ async def test_notifier_service_returns_chinese_help_for_english_commands() -> N
     assert "/start [reason] - 请求恢复交易到 normal" in payload.text
     assert "/capital <amount> [reason] - 调整当前策略总金额" in payload.text
     assert "/budget" not in payload.text
+
+
+def test_notifier_service_exposes_telegram_bot_commands() -> None:
+    service = NotifierService(
+        okx_symbols=("BTC-USDT-SWAP",),
+        runtime_store=_RuntimeStore(),
+        snapshot_store=_SnapshotStore(),
+        history_store=PostgresRuntimeStore(dsn="postgresql://xuanshu:xuanshu@localhost:5432/xuanshu"),
+    )
+
+    commands = service.telegram_bot_commands()
+
+    assert TelegramBotCommand(command="status", description="查看服务、策略、权益和持仓摘要") in commands
+    assert TelegramBotCommand(command="takeover", description="请求人工接管到保守模式") in commands
+    assert all(command.command == command.command.lower() for command in commands)
+    assert all(not command.command.startswith("/") for command in commands)
 
 
 @pytest.mark.asyncio
@@ -866,3 +882,37 @@ async def test_telegram_notifier_send_text_makes_http_request() -> None:
         "https://api.telegram.org/bottoken/sendMessage",
         {"chat_id": "123", "text": "hello"},
     )]
+
+
+@pytest.mark.asyncio
+async def test_telegram_notifier_set_commands_makes_http_request() -> None:
+    calls = []
+
+    class _Client:
+        async def post(self, url, json):
+            calls.append((url, json))
+
+    notifier = TelegramNotifier(
+        bot_token=SecretStr("token"),
+        chat_id="123",
+        client=_Client(),
+    )
+
+    await notifier.set_commands(
+        [
+            TelegramBotCommand(command="status", description="查看服务状态"),
+            TelegramBotCommand(command="pause", description="暂停交易"),
+        ]
+    )
+
+    assert calls == [
+        (
+            "https://api.telegram.org/bottoken/setMyCommands",
+            {
+                "commands": [
+                    {"command": "status", "description": "查看服务状态"},
+                    {"command": "pause", "description": "暂停交易"},
+                ]
+            },
+        )
+    ]

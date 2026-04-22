@@ -4,7 +4,7 @@ from collections.abc import Iterable
 from typing import Literal, Protocol
 
 from xuanshu.core.enums import RunMode
-from xuanshu.infra.notifier.telegram import TextMessagePayload, render_text_message
+from xuanshu.infra.notifier.telegram import TelegramBotCommand, TextMessagePayload, render_text_message
 
 
 _MODE_LABELS: dict[RunMode, str] = {
@@ -33,6 +33,21 @@ _PROACTIVE_CATEGORY_PRIORITY: dict[str, int] = {
     "recovery_failed": 5,
     "risk_event": 6,
 }
+TELEGRAM_BOT_COMMANDS: tuple[TelegramBotCommand, ...] = (
+    TelegramBotCommand(command="help", description="查看支持的命令"),
+    TelegramBotCommand(command="status", description="查看服务、策略、权益和持仓摘要"),
+    TelegramBotCommand(command="mode", description="查看当前运行模式"),
+    TelegramBotCommand(command="market", description="查看行情摘要"),
+    TelegramBotCommand(command="positions", description="查看当前运行态持仓"),
+    TelegramBotCommand(command="orders", description="查看最近订单"),
+    TelegramBotCommand(command="risk", description="查看最近风控事件"),
+    TelegramBotCommand(command="pause", description="暂停交易，可附原因"),
+    TelegramBotCommand(command="start", description="请求恢复交易到 normal，可附原因"),
+    TelegramBotCommand(command="resume", description="同 start，请求恢复交易"),
+    TelegramBotCommand(command="takeover", description="请求人工接管到保守模式"),
+    TelegramBotCommand(command="release", description="请求人工解除到 degraded"),
+    TelegramBotCommand(command="capital", description="调整当前策略总金额"),
+)
 
 
 def format_mode_change(mode: RunMode) -> str:
@@ -161,6 +176,9 @@ class NotifierService:
         self._runtime_store = runtime_store
         self._snapshot_store = snapshot_store
         self._history_store = history_store
+
+    def telegram_bot_commands(self) -> list[TelegramBotCommand]:
+        return list(TELEGRAM_BOT_COMMANDS)
 
     async def handle_command(self, text: str) -> TextMessagePayload:
         command = self._normalize_command(text)

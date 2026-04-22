@@ -5,10 +5,20 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+import re
 
 from xuanshu.checkpoints.service import CheckpointService
 from xuanshu.config.settings import TraderRuntimeSettings
-from xuanshu.core.enums import ApprovalState, EntryType, OkxAccountMode, OrderSide, RunMode, StrategyId, TraderEventType
+from xuanshu.core.enums import (
+    ApprovalState,
+    EntryType,
+    OkxAccountMode,
+    OrderSide,
+    RunMode,
+    SignalUrgency,
+    StrategyId,
+    TraderEventType,
+)
 from xuanshu.contracts.checkpoint import (
     CheckpointBudgetState,
     CheckpointOrder,
@@ -57,6 +67,26 @@ _RUN_MODE_PRIORITY = {
     RunMode.REDUCE_ONLY: 2,
     RunMode.HALTED: 3,
 }
+_SHORT_MOMENTUM_EXIT_PATTERN = re.compile(r"(?:^|-)sl(?P<stop>\d+)-tp(?P<take>\d+)-h(?P<hold>\d+)(?:-|$)")
+_BAR_PATTERN = re.compile(r"(?P<count>\d+)(?P<unit>[mhd])", re.IGNORECASE)
+_DEFAULT_VOL_BREAKOUT_STOP_LOSS_BPS = 300
+_DEFAULT_VOL_BREAKOUT_TAKE_PROFIT_BPS = 800
+_DEFAULT_VOL_BREAKOUT_TRAILING_DRAWDOWN_BPS = 250
+_DEFAULT_VOL_BREAKOUT_MAX_HOLD_BARS = 12
+_LONG_ENTRY_CONFIRMATION_TICKS = 2
+
+
+@dataclass(slots=True)
+class PositionEntryContext:
+    symbol: str
+    position_side: str
+    quantity: float
+    entry_price: float
+    entered_at: datetime
+    strategy_id: str
+    strategy_logic: str
+    highest_mark_price: float
+    lowest_mark_price: float
 
 
 @dataclass(frozen=True, slots=True)
@@ -87,6 +117,9 @@ class TraderRuntime:
     startup_checkpoint: ExecutionCheckpoint
     active_symbol_strategies: dict[str, ApprovedStrategyBinding] = field(default_factory=dict)
     symbol_handover_state: dict[str, dict[str, object]] = field(default_factory=dict)
+    position_entry_contexts: dict[str, PositionEntryContext] = field(default_factory=dict)
+    pending_position_actions: dict[str, str] = field(default_factory=dict)
+    long_entry_confirmations: dict[str, int] = field(default_factory=dict)
     current_mode: RunMode = RunMode.NORMAL
     opening_allowed: bool = True
     execution_sequence: int = 0
@@ -358,10 +391,10 @@ def _tighten_runtime_mode(runtime: TraderRuntime, target_mode: RunMode) -> None:
 
 
 def _fault_mode(event: FaultEvent) -> RunMode:
-    if "private" in event.code or event.severity == "critical":
-        return RunMode.REDUCE_ONLY
     if "public" in event.code or event.severity == "warn":
         return RunMode.DEGRADED
+    if "private" in event.code or event.severity == "critical":
+        return RunMode.REDUCE_ONLY
     return RunMode.NORMAL
 
 
@@ -385,6 +418,250 @@ def _is_short_priority_long_close(signal: CandidateSignal, position: object | No
     )
 
 
+def _position_side_for_signal(signal: CandidateSignal) -> str | None:
+    if signal.side == OrderSide.BUY:
+        return "long"
+    if signal.side == OrderSide.SELL:
+        return "short"
+    return None
+
+
+def _closing_order_side(position_side: str) -> OrderSide:
+    return OrderSide.SELL if position_side == "long" else OrderSide.BUY
+
+
+def _strategy_id_for_position_side(position_side: str) -> StrategyId:
+    return StrategyId.VOL_BREAKOUT if position_side == "long" else StrategyId.SHORT_MOMENTUM
+
+
+def _binding_for_position_side(
+    snapshot: StrategyConfigSnapshot,
+    symbol: str,
+    position_side: str,
+) -> ApprovedStrategyBinding | None:
+    return snapshot.strategy_binding_for(symbol, _strategy_id_for_position_side(position_side).value)
+
+
+def _extract_short_momentum_exit_rules(binding: ApprovedStrategyBinding | None) -> tuple[int, int, int] | None:
+    if binding is None:
+        return None
+    match = _SHORT_MOMENTUM_EXIT_PATTERN.search(binding.strategy_def_id)
+    if match is None:
+        return None
+    return int(match.group("stop")), int(match.group("take")), int(match.group("hold"))
+
+
+def _extract_bar_duration(strategy_def_id: object) -> timedelta:
+    for part in str(strategy_def_id or "").split("-"):
+        match = _BAR_PATTERN.fullmatch(part)
+        if match is None:
+            continue
+        count = int(match.group("count"))
+        unit = match.group("unit").lower()
+        if unit == "m":
+            return timedelta(minutes=count)
+        if unit == "h":
+            return timedelta(hours=count)
+        if unit == "d":
+            return timedelta(days=count)
+    return timedelta(hours=4)
+
+
+def _vol_breakout_exit_reason(
+    *,
+    binding: ApprovedStrategyBinding | None,
+    position: object,
+    context: PositionEntryContext | None,
+) -> str | None:
+    active_return = _active_position_return(position, "long")
+    if active_return is None:
+        return None
+    if active_return <= -(_DEFAULT_VOL_BREAKOUT_STOP_LOSS_BPS / 10_000):
+        return f"vol_breakout_stop_loss_{_DEFAULT_VOL_BREAKOUT_STOP_LOSS_BPS}bps"
+    if active_return >= _DEFAULT_VOL_BREAKOUT_TAKE_PROFIT_BPS / 10_000:
+        return f"vol_breakout_take_profit_{_DEFAULT_VOL_BREAKOUT_TAKE_PROFIT_BPS}bps"
+    if context is None:
+        return None
+    mark_price = float(getattr(position, "mark_price", 0.0) or 0.0)
+    if context.highest_mark_price > 0.0 and mark_price > 0.0:
+        drawdown = (context.highest_mark_price - mark_price) / context.highest_mark_price
+        if drawdown >= _DEFAULT_VOL_BREAKOUT_TRAILING_DRAWDOWN_BPS / 10_000:
+            return f"vol_breakout_trailing_drawdown_{_DEFAULT_VOL_BREAKOUT_TRAILING_DRAWDOWN_BPS}bps"
+    max_hold = _extract_bar_duration(getattr(binding, "strategy_def_id", "")) * _DEFAULT_VOL_BREAKOUT_MAX_HOLD_BARS
+    if datetime.now(UTC) - context.entered_at >= max_hold:
+        return f"vol_breakout_max_hold_{_DEFAULT_VOL_BREAKOUT_MAX_HOLD_BARS}bars"
+    return None
+
+
+def _active_position_return(position: object, position_side: str) -> float | None:
+    average_price = getattr(position, "average_price", 0.0)
+    mark_price = getattr(position, "mark_price", 0.0)
+    try:
+        average = float(average_price)
+        mark = float(mark_price)
+    except (TypeError, ValueError):
+        return None
+    if average <= 0.0 or mark <= 0.0:
+        return None
+    if position_side == "short":
+        return (average / mark) - 1.0
+    return (mark / average) - 1.0
+
+
+def _position_exit_reason(runtime: TraderRuntime, symbol: str, position: object) -> str | None:
+    position_side = str(getattr(position, "position_side", "long") or "long")
+    position_quantity = float(getattr(position, "net_quantity", 0.0) or 0.0)
+    if position_quantity == 0.0:
+        return None
+    binding = _binding_for_position_side(runtime.startup_snapshot, symbol, position_side)
+    context = runtime.position_entry_contexts.get(symbol)
+    if position_side == "long":
+        return _vol_breakout_exit_reason(binding=binding, position=position, context=context)
+    if position_side == "short":
+        rules = _extract_short_momentum_exit_rules(binding)
+        active_return = _active_position_return(position, position_side)
+        if rules is not None and active_return is not None:
+            stop_loss_bps, take_profit_bps, max_hold_hours = rules
+            if active_return <= -(stop_loss_bps / 10_000):
+                return f"short_momentum_stop_loss_{stop_loss_bps}bps"
+            if active_return >= take_profit_bps / 10_000:
+                return f"short_momentum_take_profit_{take_profit_bps}bps"
+            if context is not None and datetime.now(UTC) - context.entered_at >= timedelta(hours=max_hold_hours):
+                return f"short_momentum_max_hold_{max_hold_hours}h"
+    return None
+
+
+def _opposite_signal(
+    position_side: str,
+    signals: list[CandidateSignal],
+    snapshot: StrategyConfigSnapshot,
+) -> CandidateSignal | None:
+    if position_side == "short":
+        return None
+    for signal in signals:
+        signal_position_side = _position_side_for_signal(signal)
+        if (
+            signal.entry_type == EntryType.MARKET
+            and signal_position_side is not None
+            and signal_position_side != position_side
+            and signal.strategy_id == StrategyId.SHORT_MOMENTUM
+            and snapshot.is_strategy_enabled(signal.strategy_id.value)
+        ):
+            return signal
+    return None
+
+
+def _prioritize_strategy_signals(signals: list[CandidateSignal]) -> list[CandidateSignal]:
+    priority = {
+        StrategyId.SHORT_MOMENTUM: 0,
+        StrategyId.VOL_BREAKOUT: 1,
+    }
+    return sorted(signals, key=lambda signal: priority.get(signal.strategy_id, 10))
+
+
+def _long_entry_confirmed(runtime: TraderRuntime, signal: CandidateSignal) -> bool:
+    if signal.strategy_id != StrategyId.VOL_BREAKOUT or signal.side != OrderSide.BUY:
+        runtime.long_entry_confirmations.pop(signal.symbol, None)
+        return True
+    confirmations = runtime.long_entry_confirmations.get(signal.symbol, 0) + 1
+    runtime.long_entry_confirmations[signal.symbol] = confirmations
+    return confirmations >= _LONG_ENTRY_CONFIRMATION_TICKS
+
+
+async def _submit_position_close(
+    runtime: TraderRuntime,
+    *,
+    symbol: str,
+    position: object,
+    strategy_id: StrategyId,
+    strategy_logic: str,
+) -> bool:
+    position_side = str(getattr(position, "position_side", "long") or "long")
+    position_quantity = abs(float(getattr(position, "net_quantity", 0.0) or 0.0))
+    if position_quantity <= 0.0:
+        return False
+    signal = CandidateSignal(
+        symbol=symbol,
+        strategy_id=strategy_id,
+        side=_closing_order_side(position_side),
+        entry_type=EntryType.MARKET,
+        urgency=SignalUrgency.IMMEDIATE,
+        confidence=1.0,
+        max_hold_ms=1,
+        cancel_after_ms=1,
+        risk_tag=f"close_{position_side}",
+    )
+    decision = runtime.components.risk_kernel.evaluate(signal, runtime.startup_snapshot)
+    client_order_id = _next_client_order_id(runtime, signal)
+    runtime.components.state_engine.stage_order_submission(
+        symbol,
+        client_order_id=client_order_id,
+        side=signal.side.value,
+        size=position_quantity,
+        intent="close",
+        strategy_id=strategy_id.value,
+        strategy_logic=strategy_logic,
+    )
+    runtime.pending_position_actions[symbol] = "close"
+    try:
+        response = await runtime.execution_coordinator.submit_market_close(
+            symbol=symbol,
+            side=signal.side.value,
+            size=position_quantity,
+            client_order_id=client_order_id,
+            decision=decision,
+            timestamp=_now_timestamp(),
+            position_side=position_side,
+        )
+    except Exception as exc:
+        runtime.pending_position_actions.pop(symbol, None)
+        runtime.components.state_engine.clear_order_submission(symbol, client_order_id)
+        runtime.history_store.append_risk_event(
+            {
+                "event_type": "execution_submission_failed",
+                "symbol": symbol,
+                "detail": str(exc),
+            }
+        )
+        return False
+    if response is None:
+        runtime.pending_position_actions.pop(symbol, None)
+        runtime.components.state_engine.clear_order_submission(symbol, client_order_id)
+        runtime.history_store.append_risk_event(
+            {
+                "event_type": "signal_blocked",
+                "symbol": symbol,
+                "detail": ",".join(decision.reason_codes),
+            }
+        )
+        return False
+    for row in response:
+        runtime.history_store.append_order_fact(
+            {
+                "symbol": symbol,
+                "side": signal.side.value,
+                "status": "submitted",
+                "client_order_id": str(row.get("clOrdId") or ""),
+                "order_id": str(row.get("ordId") or ""),
+                "intent": "close",
+                "strategy_id": strategy_id.value,
+                "strategy_logic": strategy_logic,
+            }
+        )
+    _LOGGER.info(
+        "order_submitted",
+        extra={
+            "service": "trader",
+            "symbol": symbol,
+            "strategy_id": strategy_id.value,
+            "side": signal.side.value,
+            "client_order_id": response[0].get("clOrdId") or "",
+            "run_mode": runtime.current_mode.value,
+        },
+    )
+    return True
+
+
 def _build_strategy_logic(signal: CandidateSignal, snapshot: StrategyConfigSnapshot) -> str:
     if signal.strategy_id == StrategyId.VOL_BREAKOUT:
         binding = snapshot.strategy_binding_for(signal.symbol, signal.strategy_id.value)
@@ -397,6 +674,65 @@ def _build_strategy_logic(signal: CandidateSignal, snapshot: StrategyConfigSnaps
     if signal.strategy_id == StrategyId.MEAN_REVERSION:
         return "均值回归，价格偏离后尝试反向回补。"
     return "风险暂停信号，当前不执行新开仓。"
+
+
+def _build_position_strategy_logic(symbol: str, position_side: str, snapshot: StrategyConfigSnapshot) -> tuple[str, str]:
+    strategy_id = _strategy_id_for_position_side(position_side)
+    signal_side = OrderSide.BUY if position_side == "long" else OrderSide.SELL
+    signal = CandidateSignal(
+        symbol=symbol,
+        strategy_id=strategy_id,
+        side=signal_side,
+        entry_type=EntryType.MARKET,
+        urgency=SignalUrgency.NORMAL,
+        confidence=1.0,
+        max_hold_ms=1,
+        cancel_after_ms=1,
+        risk_tag=f"{strategy_id.value}_position",
+    )
+    return strategy_id.value, _build_strategy_logic(signal, snapshot)
+
+
+def _sync_position_entry_context(runtime: TraderRuntime, event: PositionUpdateEvent) -> None:
+    pending_action = runtime.pending_position_actions.get(event.symbol)
+    if pending_action == "open" and event.net_quantity != 0.0:
+        runtime.pending_position_actions.pop(event.symbol, None)
+    elif pending_action == "close" and event.net_quantity == 0.0:
+        runtime.pending_position_actions.pop(event.symbol, None)
+    if event.net_quantity == 0.0:
+        runtime.position_entry_contexts.pop(event.symbol, None)
+        return
+    mark_price = event.mark_price if event.mark_price > 0.0 else event.average_price
+    existing = runtime.position_entry_contexts.get(event.symbol)
+    if existing is not None and existing.position_side == event.position_side:
+        existing.quantity = event.net_quantity
+        existing.entry_price = event.average_price
+        existing.highest_mark_price = max(existing.highest_mark_price, mark_price)
+        lowest = existing.lowest_mark_price if existing.lowest_mark_price > 0.0 else mark_price
+        existing.lowest_mark_price = min(lowest, mark_price)
+        return
+    trade_context = runtime.components.state_engine.trade_context_by_symbol.get(event.symbol, {})
+    strategy_id = trade_context.get("strategy_id")
+    strategy_logic = trade_context.get("strategy_logic")
+    if strategy_id is None or strategy_logic is None:
+        inferred_strategy_id, inferred_logic = _build_position_strategy_logic(
+            event.symbol,
+            event.position_side,
+            runtime.startup_snapshot,
+        )
+        strategy_id = strategy_id or inferred_strategy_id
+        strategy_logic = strategy_logic or inferred_logic
+    runtime.position_entry_contexts[event.symbol] = PositionEntryContext(
+        symbol=event.symbol,
+        position_side=event.position_side,
+        quantity=event.net_quantity,
+        entry_price=event.average_price,
+        entered_at=event.generated_at,
+        strategy_id=strategy_id,
+        strategy_logic=strategy_logic,
+        highest_mark_price=mark_price,
+        lowest_mark_price=mark_price,
+    )
 
 
 def _extract_vol_breakout_bar(strategy_def_id: object) -> str:
@@ -569,11 +905,36 @@ async def _evaluate_symbol(runtime: TraderRuntime, symbol: str) -> None:
     open_orders = runtime.components.state_engine.open_orders_by_symbol.get(symbol, {})
     position = runtime.components.state_engine.positions_by_symbol.get(symbol)
     position_quantity = position.net_quantity if position is not None else 0.0
+    position_side = position.position_side if position is not None else "long"
     has_open_orders = bool(open_orders)
+    if symbol in runtime.pending_position_actions:
+        return
     has_exposure = has_open_orders or position_quantity != 0.0
-    for signal in signals:
+    if position is not None and position_quantity != 0.0 and not has_open_orders:
+        exit_reason = _position_exit_reason(runtime, symbol, position)
+        if exit_reason is not None:
+            await _submit_position_close(
+                runtime,
+                symbol=symbol,
+                position=position,
+                strategy_id=_strategy_id_for_position_side(position_side),
+                strategy_logic=f"{symbol} {position_side} 持仓触发退出：{exit_reason}。",
+            )
+            return
+        reverse_signal = _opposite_signal(position_side, signals, runtime.startup_snapshot)
+        if reverse_signal is not None:
+            await _submit_position_close(
+                runtime,
+                symbol=symbol,
+                position=position,
+                strategy_id=reverse_signal.strategy_id,
+                strategy_logic=f"{symbol} 反向信号触发，先平 {position_side} 持仓，等待仓位归零后再开反向仓。",
+            )
+            return
+    for signal in _prioritize_strategy_signals(signals):
         decision = runtime.components.risk_kernel.evaluate(signal, runtime.startup_snapshot)
         if signal.entry_type != EntryType.MARKET or signal.side not in {OrderSide.BUY, OrderSide.SELL}:
+            runtime.long_entry_confirmations.pop(symbol, None)
             continue
         if has_open_orders:
             continue
@@ -655,6 +1016,16 @@ async def _evaluate_symbol(runtime: TraderRuntime, symbol: str) -> None:
             has_exposure = True
             continue
         if has_exposure:
+            runtime.long_entry_confirmations.pop(signal.symbol, None)
+            continue
+        if not _long_entry_confirmed(runtime, signal):
+            runtime.history_store.append_risk_event(
+                {
+                    "event_type": "signal_blocked",
+                    "symbol": signal.symbol,
+                    "detail": "waiting_long_entry_confirmation",
+                }
+            )
             continue
         client_order_id = _next_client_order_id(runtime, signal)
         order_size = max(1.0, decision.max_order_size)
@@ -668,6 +1039,7 @@ async def _evaluate_symbol(runtime: TraderRuntime, symbol: str) -> None:
             strategy_id=signal.strategy_id.value,
             strategy_logic=strategy_logic,
         )
+        runtime.pending_position_actions[signal.symbol] = "open"
         try:
             response = await runtime.execution_coordinator.submit_market_open(
                 symbol=signal.symbol,
@@ -678,6 +1050,7 @@ async def _evaluate_symbol(runtime: TraderRuntime, symbol: str) -> None:
                 timestamp=_now_timestamp(),
             )
         except Exception as exc:
+            runtime.pending_position_actions.pop(signal.symbol, None)
             runtime.components.state_engine.clear_order_submission(signal.symbol, client_order_id)
             runtime.history_store.append_risk_event(
                 {
@@ -688,6 +1061,7 @@ async def _evaluate_symbol(runtime: TraderRuntime, symbol: str) -> None:
             )
             continue
         if response is None:
+            runtime.pending_position_actions.pop(signal.symbol, None)
             runtime.components.state_engine.clear_order_submission(signal.symbol, client_order_id)
             runtime.history_store.append_risk_event(
                 {
@@ -722,31 +1096,60 @@ async def _evaluate_symbol(runtime: TraderRuntime, symbol: str) -> None:
             },
         )
         has_exposure = True
+        runtime.long_entry_confirmations.pop(signal.symbol, None)
 
 
-async def _consume_stream(runtime: TraderRuntime, adapter: object, **kwargs: object) -> bool:
+def _stream_failure_severity(adapter: object) -> str:
+    if isinstance(adapter, OkxPublicStream):
+        return "warn"
+    return "critical"
+
+
+async def _consume_stream(
+    runtime: TraderRuntime,
+    adapter: object,
+    *,
+    reconnect_delay_seconds: float = 5.0,
+    max_reconnect_attempts: int | None = None,
+    **kwargs: object,
+) -> bool:
     iterator_factory = getattr(adapter, "iter_events", None)
     if not callable(iterator_factory):
         return False
     consumed_any = False
-    try:
-        async for event in iterator_factory(**kwargs):
-            consumed_any = True
-            await _dispatch_runtime_event(runtime, event)
-    except Exception as exc:
-        await _dispatch_runtime_event(
-            runtime,
-            FaultEvent(
-                event_type=TraderEventType.RUNTIME_FAULT,
-                exchange="okx",
-                generated_at=datetime.now(UTC),
-                severity="critical",
-                code=f"{adapter.__class__.__name__.lower()}_stream_failed",
-                detail=str(exc),
-            ),
-        )
-        return False
-    return consumed_any
+    reconnect_attempts = 0
+    while True:
+        try:
+            async for event in iterator_factory(**kwargs):
+                consumed_any = True
+                reconnect_attempts = 0
+                await _dispatch_runtime_event(runtime, event)
+            return consumed_any
+        except Exception as exc:
+            reconnect_attempts += 1
+            await _dispatch_runtime_event(
+                runtime,
+                FaultEvent(
+                    event_type=TraderEventType.RUNTIME_FAULT,
+                    exchange="okx",
+                    generated_at=datetime.now(UTC),
+                    severity=_stream_failure_severity(adapter),
+                    code=f"{adapter.__class__.__name__.lower()}_stream_failed",
+                    detail=str(exc),
+                ),
+            )
+            if max_reconnect_attempts is not None and reconnect_attempts >= max_reconnect_attempts:
+                return consumed_any
+            _LOGGER.warning(
+                "stream_reconnect_scheduled",
+                extra={
+                    "service": "trader",
+                    "adapter": adapter.__class__.__name__,
+                    "attempt": reconnect_attempts,
+                    "delay_seconds": reconnect_delay_seconds,
+                },
+            )
+            await asyncio.sleep(reconnect_delay_seconds)
 
 
 async def _dispatch_runtime_event(runtime: TraderRuntime, event: object) -> None:
@@ -788,6 +1191,7 @@ async def _dispatch_runtime_event(runtime: TraderRuntime, event: object) -> None
                 }
             )
     elif isinstance(event, PositionUpdateEvent):
+        _sync_position_entry_context(runtime, event)
         trade_context = runtime.components.state_engine.trade_context_by_symbol.get(event.symbol, {})
         runtime.history_store.append_position_fact(
             {

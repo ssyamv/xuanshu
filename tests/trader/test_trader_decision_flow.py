@@ -3,6 +3,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 import xuanshu.apps.trader as trader_app
+from xuanshu.contracts.risk import CandidateSignal
 from xuanshu.contracts.strategy import ApprovedStrategyBinding, StrategyConfigSnapshot
 from xuanshu.core.enums import (
     ApprovalState,
@@ -193,6 +194,29 @@ def test_trader_build_strategy_handover_events_respects_required_order() -> None
         "mark_replaced_by_stronger_strategy",
         "activate_new_strategy",
     ]
+
+
+def test_trader_requires_two_confirmations_before_long_entry(monkeypatch) -> None:
+    monkeypatch.setenv("XUANSHU_OKX_SYMBOLS", "BTC-USDT-SWAP")
+    monkeypatch.setenv("XUANSHU_TRADER_STARTING_NAV", "250000")
+    monkeypatch.setenv("OKX_API_KEY", "api-key")
+    monkeypatch.setenv("OKX_API_SECRET", "api-secret")
+    monkeypatch.setenv("OKX_API_PASSPHRASE", "api-passphrase")
+    runtime = trader_app.build_trader_runtime()
+    signal = CandidateSignal(
+        symbol="BTC-USDT-SWAP",
+        strategy_id=StrategyId.VOL_BREAKOUT,
+        side=OrderSide.BUY,
+        entry_type=EntryType.MARKET,
+        urgency=SignalUrgency.HIGH,
+        confidence=0.7,
+        max_hold_ms=3000,
+        cancel_after_ms=750,
+        risk_tag="vol_breakout",
+    )
+
+    assert trader_app._long_entry_confirmed(runtime, signal) is False
+    assert trader_app._long_entry_confirmed(runtime, signal) is True
 
 
 def test_trader_runtime_defaults_track_active_symbol_strategies_and_handover_state(monkeypatch) -> None:

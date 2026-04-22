@@ -150,3 +150,12 @@ class NotifierRuntimeSettings(_XuanshuBaseSettings):
         default="postgresql+psycopg://xuanshu:xuanshu@postgres:5432/xuanshu",
         validation_alias="POSTGRES_DSN",
     )
+
+
+class DashboardRuntimeSettings(_XuanshuBaseSettings):
+    okx_symbols: tuple[str, ...] = Field(default=("BTC-USDT-SWAP", "ETH-USDT-SWAP"), min_length=1)
+    redis_url: RedisDsn = Field(default="redis://redis:6379/0", validation_alias="REDIS_URL")
+    postgres_dsn: PostgresDsn = Field(
+        default="postgresql+psycopg://xuanshu:xuanshu@postgres:5432/xuanshu",
+        validation_alias="POSTGRES_DSN",
+    )
