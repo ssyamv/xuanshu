@@ -322,7 +322,13 @@ async def test_okx_private_stream_demo_mode_sets_simulated_markers() -> None:
 
     assert events == []
     assert login_payload["args"][0]["simulatedTrading"] == "1"
-    assert connect.calls[0][1] == {"additional_headers": {"x-simulated-trading": "1"}}
+    assert connect.calls[0][1] == {
+        "additional_headers": {"x-simulated-trading": "1"},
+        "open_timeout": 30.0,
+        "ping_interval": 30.0,
+        "ping_timeout": 90.0,
+        "close_timeout": 20.0,
+    }
 
 
 def test_okx_private_stream_normalizes_fault_payloads() -> None:
@@ -486,6 +492,34 @@ def test_okx_private_stream_accepts_blank_available_equity_in_account_updates() 
     assert account_events[0].available_balance == 0.0
 
 
+def test_okx_private_stream_uses_usdt_detail_available_equity() -> None:
+    stream = OkxPrivateStream(url="wss://ws.okx.com:8443/ws/v5/private")
+
+    account_events = stream.decode_message(
+        {
+            "arg": {"channel": "account"},
+            "data": [
+                {
+                    "totalEq": "667.08",
+                    "availEq": "",
+                    "mgnRatio": "54.1",
+                    "uTime": "1713484810000",
+                    "details": [
+                        {"ccy": "BTC", "availEq": "0"},
+                        {"ccy": "USDT", "availEq": "119.29"},
+                    ],
+                }
+            ],
+        },
+        sequence="pri-3",
+    )
+
+    assert len(account_events) == 1
+    assert isinstance(account_events[0], AccountSnapshotEvent)
+    assert account_events[0].equity == 667.08
+    assert account_events[0].available_balance == 119.29
+
+
 def test_okx_private_stream_accepts_blank_margin_ratio_in_account_updates() -> None:
     stream = OkxPrivateStream(url="wss://ws.okx.com:8443/ws/v5/private")
 
@@ -609,6 +643,10 @@ async def test_okx_public_stream_iter_events_subscribes_and_decodes_messages() -
     assert events[1].public_sequence == "pub-2"
     assert json.loads(websocket.sent[0]) == stream.build_subscribe_payload(("BTC-USDT-SWAP",))
     assert connect.calls[0][0] == "wss://ws.okx.com:8443/ws/v5/public"
+    assert connect.calls[0][1]["open_timeout"] == 30.0
+    assert connect.calls[0][1]["ping_interval"] == 30.0
+    assert connect.calls[0][1]["ping_timeout"] == 90.0
+    assert connect.calls[0][1]["close_timeout"] == 20.0
 
 
 @pytest.mark.asyncio
@@ -664,6 +702,10 @@ async def test_okx_private_stream_iter_events_logs_in_subscribes_and_decodes_mes
         epoch_seconds=1713484800,
     )
     assert subscribe_payload == stream.build_subscribe_payload(("BTC-USDT-SWAP",))
+    assert connect.calls[0][1]["open_timeout"] == 30.0
+    assert connect.calls[0][1]["ping_interval"] == 30.0
+    assert connect.calls[0][1]["ping_timeout"] == 90.0
+    assert connect.calls[0][1]["close_timeout"] == 20.0
 
 
 @pytest.mark.asyncio
@@ -1020,6 +1062,75 @@ def test_okx_rest_client_place_order_treats_non_zero_scode_as_failure() -> None:
 
     with pytest.raises(OkxBusinessError, match="51008"):
         asyncio.run(client.place_order(payload, timestamp))
+
+    asyncio.run(client.aclose())
+
+
+def test_okx_rest_client_place_order_preserves_sub_error_when_top_level_fails() -> None:
+    client = OkxRestClient(
+        base_url="https://www.okx.com",
+        api_key="api-key",
+        api_secret="api-secret",
+        passphrase="api-passphrase",
+    )
+    payload = {
+        "instId": "ETH-USDT-SWAP",
+        "tdMode": "cross",
+        "side": "buy",
+        "posSide": "long",
+        "ordType": "market",
+        "sz": "3.5",
+        "clOrdId": "ETHUSDTSWAPvolbreakout000001",
+    }
+    timestamp = "2026-04-19T00:00:00.000Z"
+
+    class DummyResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, object]:
+            return {
+                "code": "1",
+                "msg": "All operations failed",
+                "data": [
+                    {
+                        "ordId": "",
+                        "clOrdId": "ETHUSDTSWAPvolbreakout000001",
+                        "sCode": "51008",
+                        "sMsg": "Insufficient balance",
+                    }
+                ],
+            }
+
+    async def fake_post(path: str, *, content: str, headers: dict[str, str]) -> DummyResponse:
+        return DummyResponse()
+
+    client.client.post = fake_post  # type: ignore[method-assign]
+
+    with pytest.raises(OkxBusinessError, match="51008") as exc_info:
+        asyncio.run(client.place_order(payload, timestamp))
+
+    assert exc_info.value.message == "Insufficient balance"
+    assert exc_info.value.payload == {
+        "response": {
+            "code": "1",
+            "msg": "All operations failed",
+            "data": [
+                {
+                    "ordId": "",
+                    "clOrdId": "ETHUSDTSWAPvolbreakout000001",
+                    "sCode": "51008",
+                    "sMsg": "Insufficient balance",
+                }
+            ],
+        },
+        "item": {
+            "ordId": "",
+            "clOrdId": "ETHUSDTSWAPvolbreakout000001",
+            "sCode": "51008",
+            "sMsg": "Insufficient balance",
+        },
+    }
 
     asyncio.run(client.aclose())
 

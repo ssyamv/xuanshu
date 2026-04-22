@@ -172,7 +172,6 @@ class OkxRestClient:
 
     def _extract_order_data_payload(self, payload: object) -> list[dict[str, object]]:
         payload_object = self._validate_payload_object(payload)
-        self._raise_for_business_error(payload_object)
         data = self._extract_data_list(payload_object)
         if any(not isinstance(item, dict) for item in data):
             raise ValueError("OKX response payload data items must be objects")
@@ -181,9 +180,14 @@ class OkxRestClient:
             if status_code is not None and str(status_code) != "0":
                 raise OkxBusinessError(
                     code=str(status_code),
-                    message=str(item.get("sMsg") or payload_object.get("msg") or "order rejected"),
-                    payload=item,
+                    message=str(
+                        item.get("sMsg")
+                        or payload_object.get("msg")
+                        or "order rejected"
+                    ),
+                    payload={"response": payload_object, "item": item},
                 )
+        self._raise_for_business_error(payload_object)
         return data
 
     def _extract_candle_data_payload(self, payload: object) -> list[dict[str, object]]:

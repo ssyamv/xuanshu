@@ -17,6 +17,10 @@ from xuanshu.core.enums import TraderEventType
 class OkxPublicStream:
     url: str
     connect_factory: Callable[..., object] = websockets.connect
+    open_timeout: float = 30.0
+    ping_interval: float = 30.0
+    ping_timeout: float = 90.0
+    close_timeout: float = 20.0
 
     def build_subscribe_payload(self, symbols: tuple[str, ...]) -> dict[str, object]:
         return {
@@ -30,7 +34,13 @@ class OkxPublicStream:
 
     async def iter_events(self, *, symbols: tuple[str, ...]):
         sequence = 0
-        async with self.connect_factory(self.url) as websocket:
+        async with self.connect_factory(
+            self.url,
+            open_timeout=self.open_timeout,
+            ping_interval=self.ping_interval,
+            ping_timeout=self.ping_timeout,
+            close_timeout=self.close_timeout,
+        ) as websocket:
             await websocket.send(json.dumps(self.build_subscribe_payload(symbols)))
             async for raw_payload in websocket:
                 sequence += 1

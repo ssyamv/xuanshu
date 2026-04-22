@@ -18,7 +18,7 @@ from xuanshu.contracts.risk import CandidateSignal
 from xuanshu.core.enums import ApprovalState, EntryType, OrderSide, RunMode, SignalUrgency, StrategyId, TraderEventType
 from xuanshu.infra.okx.private_ws import OkxPrivateStream
 from xuanshu.infra.okx.public_ws import OkxPublicStream
-from xuanshu.infra.okx.rest import OkxRestClient
+from xuanshu.infra.okx.rest import OkxBusinessError, OkxRestClient
 from xuanshu.infra.storage.postgres_store import PostgresRuntimeStore
 from xuanshu.infra.storage.redis_store import RedisRuntimeStateStore, RedisSnapshotStore
 
@@ -149,6 +149,8 @@ def test_trader_entrypoint_loads_settings_and_threads_it_into_components(monkeyp
     assert isinstance(seen_components.components.okx_rest_client, OkxRestClient)
     assert isinstance(seen_components.components.okx_public_stream, OkxPublicStream)
     assert isinstance(seen_components.components.okx_private_stream, OkxPrivateStream)
+    assert seen_components.components.okx_public_stream.ping_timeout == 90.0
+    assert seen_components.components.okx_private_stream.ping_timeout == 90.0
     assert seen_components.components.client_order_id_builder("BTC-USDT-SWAP", "vol_breakout", 1) == "BTCUSDTSWAPvolbreakout000001"
     assert seen_components.settings.okx_api_key.get_secret_value() == "api-key"
     assert seen_components.components.okx_rest_client.api_key == "api-key"
@@ -1129,7 +1131,7 @@ def test_trader_runtime_dispatches_fault_event_updates_fault_flags(monkeypatch) 
     assert runtime.runtime_store.get_run_mode() == RunMode.DEGRADED
 
 
-def test_public_stream_failure_degrades_runtime_without_reduce_only(monkeypatch) -> None:
+def test_public_stream_timeout_retries_without_degrading_runtime(monkeypatch) -> None:
     _set_required_settings_env(monkeypatch)
     fake_redis = _FakeRedis()
     history_store = PostgresRuntimeStore(dsn="postgresql://xuanshu:xuanshu@localhost:5432/xuanshu")
@@ -1169,14 +1171,9 @@ def test_public_stream_failure_degrades_runtime_without_reduce_only(monkeypatch)
     asyncio.run(_exercise_runtime())
 
     assert public_connect.calls == 1
-    assert runtime.runtime_store.get_run_mode() == RunMode.DEGRADED
-    assert runtime.components.state_engine.fault_flags["okxpublicstream_stream_failed"] == {
-        "severity": "warn",
-        "detail": "keepalive ping timeout",
-    }
-    assert history_store.written_rows["risk_events"][-1]["detail"] == (
-        "okxpublicstream_stream_failed: keepalive ping timeout"
-    )
+    assert runtime.current_mode == RunMode.NORMAL
+    assert runtime.components.state_engine.fault_flags == {}
+    assert history_store.written_rows["risk_events"] == []
 
 
 def test_trader_runtime_rejects_unsupported_dispatch_event(monkeypatch) -> None:
@@ -1676,6 +1673,324 @@ def test_trader_runtime_keeps_public_stream_healthy_when_order_submission_fails(
     assert runtime.runtime_store.get_fault_flags() == {}
 
 
+def test_trader_runtime_cools_down_rejected_open_orders(monkeypatch) -> None:
+    _set_required_settings_env(monkeypatch)
+    fake_redis = _FakeRedis()
+
+    class _RejectingRestClient(_FakeRestClient):
+        def __init__(self) -> None:
+            super().__init__()
+            self.attempts = 0
+
+        async def place_order(self, payload: dict[str, str], timestamp: str) -> list[dict[str, object]]:
+            self.attempts += 1
+            raise OkxBusinessError(
+                code="51008",
+                message="Insufficient balance",
+                payload={
+                    "response": {"code": "1", "msg": "All operations failed"},
+                    "item": {"sCode": "51008", "sMsg": "Insufficient balance"},
+                },
+            )
+
+    fake_rest = _RejectingRestClient()
+
+    monkeypatch.setattr(
+        trader_app,
+        "build_snapshot_store",
+        lambda settings: RedisSnapshotStore(redis_client=fake_redis),
+    )
+    monkeypatch.setattr(
+        trader_app,
+        "build_runtime_state_store",
+        lambda settings: RedisRuntimeStateStore(redis_client=fake_redis),
+    )
+
+    async def _noop_wait_forever() -> None:
+        return None
+
+    monkeypatch.setattr(trader_app, "_wait_forever", _noop_wait_forever)
+
+    runtime = trader_app.build_trader_runtime()
+    _replace_runtime_streams_with_empty_event_streams(runtime)
+    runtime.components = trader_app.TraderComponents(
+        state_engine=runtime.components.state_engine,
+        risk_kernel=runtime.components.risk_kernel,
+        checkpoint_service=runtime.components.checkpoint_service,
+        okx_rest_client=fake_rest,
+        okx_public_stream=runtime.components.okx_public_stream,
+        okx_private_stream=runtime.components.okx_private_stream,
+        client_order_id_builder=runtime.components.client_order_id_builder,
+    )
+    runtime.execution_coordinator = trader_app.ExecutionCoordinator(rest_client=fake_rest)
+    runtime.snapshot_store.set_latest_snapshot(
+        "snap-live",
+        runtime.startup_snapshot.model_copy(
+            update={
+                "version_id": "snap-live",
+                "market_mode": RunMode.NORMAL,
+                "approval_state": ApprovalState.APPROVED,
+                "symbol_whitelist": ["ETH-USDT-SWAP"],
+                "strategy_enable_flags": {"vol_breakout": True, "risk_pause": True},
+            }
+        ),
+    )
+
+    async def _exercise_runtime() -> None:
+        try:
+            await trader_app._run_trader(runtime)
+            await trader_app._dispatch_runtime_event(
+                runtime,
+                OrderbookTopEvent(
+                    event_type=TraderEventType.ORDERBOOK_TOP,
+                    symbol="ETH-USDT-SWAP",
+                    exchange="okx",
+                    generated_at=datetime.now(UTC),
+                    public_sequence="pub-bbo",
+                    bid_price=100.0,
+                    ask_price=100.3,
+                    bid_size=5.0,
+                    ask_size=6.0,
+                ),
+            )
+            for index in range(4):
+                await trader_app._dispatch_runtime_event(
+                    runtime,
+                    MarketTradeEvent(
+                        event_type=TraderEventType.MARKET_TRADE,
+                        symbol="ETH-USDT-SWAP",
+                        exchange="okx",
+                        generated_at=datetime.now(UTC),
+                        public_sequence=f"pub-{index}",
+                        price=100.3 + index,
+                        size=5.0,
+                        side="buy",
+                    ),
+                )
+        finally:
+            await runtime.components.aclose()
+
+    asyncio.run(_exercise_runtime())
+
+    assert fake_rest.attempts == 1
+    risk_events = runtime.history_store.written_rows["risk_events"]
+    assert [row["event_type"] for row in risk_events] == [
+        "signal_blocked",
+        "execution_submission_failed",
+    ]
+    assert risk_events[-1]["strategy_id"] == "vol_breakout"
+    assert risk_events[-1]["cooldown_until"]
+    assert "51008" in risk_events[-1]["detail"]
+    assert "Insufficient balance" in risk_events[-1]["detail"]
+
+
+def test_trader_runtime_blocks_open_when_available_margin_is_too_low(monkeypatch) -> None:
+    _set_required_settings_env(monkeypatch)
+    fake_redis = _FakeRedis()
+    fake_rest = _FakeRestClient()
+
+    monkeypatch.setattr(
+        trader_app,
+        "build_snapshot_store",
+        lambda settings: RedisSnapshotStore(redis_client=fake_redis),
+    )
+    monkeypatch.setattr(
+        trader_app,
+        "build_runtime_state_store",
+        lambda settings: RedisRuntimeStateStore(redis_client=fake_redis),
+    )
+
+    async def _noop_wait_forever() -> None:
+        return None
+
+    monkeypatch.setattr(trader_app, "_wait_forever", _noop_wait_forever)
+
+    runtime = trader_app.build_trader_runtime()
+    _replace_runtime_streams_with_empty_event_streams(runtime)
+    runtime.components = trader_app.TraderComponents(
+        state_engine=runtime.components.state_engine,
+        risk_kernel=runtime.components.risk_kernel,
+        checkpoint_service=runtime.components.checkpoint_service,
+        okx_rest_client=fake_rest,
+        okx_public_stream=runtime.components.okx_public_stream,
+        okx_private_stream=runtime.components.okx_private_stream,
+        client_order_id_builder=runtime.components.client_order_id_builder,
+    )
+    runtime.execution_coordinator = trader_app.ExecutionCoordinator(rest_client=fake_rest)
+    runtime.snapshot_store.set_latest_snapshot(
+        "snap-live",
+        runtime.startup_snapshot.model_copy(
+            update={
+                "version_id": "snap-live",
+                "market_mode": RunMode.NORMAL,
+                "approval_state": ApprovalState.APPROVED,
+                "symbol_whitelist": ["ETH-USDT-SWAP"],
+                "strategy_enable_flags": {"short_momentum": True, "risk_pause": True},
+                "max_leverage": 3,
+            }
+        ),
+    )
+    now = datetime.now(UTC)
+
+    async def _exercise_runtime() -> None:
+        try:
+            await trader_app._run_trader(runtime)
+            await trader_app._dispatch_runtime_event(
+                runtime,
+                AccountSnapshotEvent(
+                    event_type=TraderEventType.ACCOUNT_SNAPSHOT,
+                    exchange="okx",
+                    generated_at=now,
+                    private_sequence="pri-account",
+                    equity=667.0,
+                    available_balance=50.0,
+                    margin_ratio=54.0,
+                ),
+            )
+            await trader_app._dispatch_runtime_event(
+                runtime,
+                OrderbookTopEvent(
+                    event_type=TraderEventType.ORDERBOOK_TOP,
+                    symbol="ETH-USDT-SWAP",
+                    exchange="okx",
+                    generated_at=now,
+                    public_sequence="pub-bbo",
+                    bid_price=2396.7,
+                    ask_price=2397.0,
+                    bid_size=5.0,
+                    ask_size=6.0,
+                ),
+            )
+            await trader_app._dispatch_runtime_event(
+                runtime,
+                MarketTradeEvent(
+                    event_type=TraderEventType.MARKET_TRADE,
+                    symbol="ETH-USDT-SWAP",
+                    exchange="okx",
+                    generated_at=now,
+                    public_sequence="pub-sell",
+                    price=2396.7,
+                    size=5.0,
+                    side="sell",
+                ),
+            )
+        finally:
+            await runtime.components.aclose()
+
+    asyncio.run(_exercise_runtime())
+
+    assert fake_rest.placed_orders == []
+    assert runtime.history_store.written_rows["risk_events"][-1] == {
+        "event_type": "signal_blocked",
+        "symbol": "ETH-USDT-SWAP",
+        "detail": "insufficient_available_margin",
+        "strategy_id": "short_momentum",
+        "requested_size": 875.0,
+        "available_balance": 50.0,
+    }
+
+
+def test_trader_runtime_shrinks_open_size_to_available_margin(monkeypatch) -> None:
+    _set_required_settings_env(monkeypatch)
+    fake_redis = _FakeRedis()
+    fake_rest = _FakeRestClient()
+
+    monkeypatch.setattr(
+        trader_app,
+        "build_snapshot_store",
+        lambda settings: RedisSnapshotStore(redis_client=fake_redis),
+    )
+    monkeypatch.setattr(
+        trader_app,
+        "build_runtime_state_store",
+        lambda settings: RedisRuntimeStateStore(redis_client=fake_redis),
+    )
+
+    async def _noop_wait_forever() -> None:
+        return None
+
+    monkeypatch.setattr(trader_app, "_wait_forever", _noop_wait_forever)
+
+    runtime = trader_app.build_trader_runtime()
+    _replace_runtime_streams_with_empty_event_streams(runtime)
+    runtime.components = trader_app.TraderComponents(
+        state_engine=runtime.components.state_engine,
+        risk_kernel=runtime.components.risk_kernel,
+        checkpoint_service=runtime.components.checkpoint_service,
+        okx_rest_client=fake_rest,
+        okx_public_stream=runtime.components.okx_public_stream,
+        okx_private_stream=runtime.components.okx_private_stream,
+        client_order_id_builder=runtime.components.client_order_id_builder,
+    )
+    runtime.execution_coordinator = trader_app.ExecutionCoordinator(rest_client=fake_rest)
+    runtime.snapshot_store.set_latest_snapshot(
+        "snap-live",
+        runtime.startup_snapshot.model_copy(
+            update={
+                "version_id": "snap-live",
+                "market_mode": RunMode.NORMAL,
+                "approval_state": ApprovalState.APPROVED,
+                "symbol_whitelist": ["ETH-USDT-SWAP"],
+                "strategy_enable_flags": {"short_momentum": True, "risk_pause": True},
+                "max_leverage": 3,
+            }
+        ),
+    )
+    now = datetime.now(UTC)
+
+    async def _exercise_runtime() -> None:
+        try:
+            await trader_app._run_trader(runtime)
+            await trader_app._dispatch_runtime_event(
+                runtime,
+                AccountSnapshotEvent(
+                    event_type=TraderEventType.ACCOUNT_SNAPSHOT,
+                    exchange="okx",
+                    generated_at=now,
+                    private_sequence="pri-account",
+                    equity=667.0,
+                    available_balance=119.29,
+                    margin_ratio=54.0,
+                ),
+            )
+            await trader_app._dispatch_runtime_event(
+                runtime,
+                OrderbookTopEvent(
+                    event_type=TraderEventType.ORDERBOOK_TOP,
+                    symbol="ETH-USDT-SWAP",
+                    exchange="okx",
+                    generated_at=now,
+                    public_sequence="pub-bbo",
+                    bid_price=2396.7,
+                    ask_price=2397.0,
+                    bid_size=5.0,
+                    ask_size=6.0,
+                ),
+            )
+            await trader_app._dispatch_runtime_event(
+                runtime,
+                MarketTradeEvent(
+                    event_type=TraderEventType.MARKET_TRADE,
+                    symbol="ETH-USDT-SWAP",
+                    exchange="okx",
+                    generated_at=now,
+                    public_sequence="pub-sell",
+                    price=2396.7,
+                    size=5.0,
+                    side="sell",
+                ),
+            )
+        finally:
+            await runtime.components.aclose()
+
+    asyncio.run(_exercise_runtime())
+
+    assert len(fake_rest.placed_orders) == 1
+    assert fake_rest.placed_orders[0][0]["sz"] == "1.19"
+    assert fake_rest.placed_orders[0][0]["side"] == "sell"
+    assert fake_rest.placed_orders[0][0]["posSide"] == "short"
+
+
 def test_trader_runtime_logs_order_submission(monkeypatch) -> None:
     _set_required_settings_env(monkeypatch)
     fake_redis = _FakeRedis()
@@ -1999,16 +2314,36 @@ def test_trader_runtime_closes_long_before_short_momentum_open(monkeypatch) -> N
                     side="sell",
                 ),
             )
+            await trader_app._dispatch_runtime_event(
+                runtime,
+                PositionUpdateEvent(
+                    event_type=TraderEventType.POSITION_UPDATE,
+                    symbol="BTC-USDT-SWAP",
+                    exchange="okx",
+                    generated_at=now,
+                    private_sequence="pri-2",
+                    position_side="long",
+                    net_quantity=0.0,
+                    average_price=0.0,
+                    mark_price=99.7,
+                    unrealized_pnl=0.0,
+                ),
+            )
         finally:
             await runtime.components.aclose()
 
     asyncio.run(_exercise_runtime())
 
-    assert len(fake_rest.placed_orders) == 1
+    assert len(fake_rest.placed_orders) == 2
     assert fake_rest.placed_orders[0][0]["side"] == "sell"
     assert fake_rest.placed_orders[0][0]["posSide"] == "long"
     assert fake_rest.placed_orders[0][0]["reduceOnly"] == "true"
-    assert runtime.history_store.written_rows["orders"][-1]["intent"] == "close"
+    assert fake_rest.placed_orders[1][0]["side"] == "sell"
+    assert fake_rest.placed_orders[1][0]["posSide"] == "short"
+    assert "reduceOnly" not in fake_rest.placed_orders[1][0]
+    assert runtime.history_store.written_rows["orders"][-2]["intent"] == "close"
+    assert runtime.history_store.written_rows["orders"][-2]["strategy_id"] == "short_momentum"
+    assert runtime.history_store.written_rows["orders"][-1]["intent"] == "open"
     assert runtime.history_store.written_rows["orders"][-1]["strategy_id"] == "short_momentum"
 
 

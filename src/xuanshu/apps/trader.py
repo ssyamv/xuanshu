@@ -39,7 +39,7 @@ from xuanshu.execution.coordinator import ExecutionCoordinator
 from xuanshu.execution.engine import build_client_order_id
 from xuanshu.infra.okx.private_ws import OkxPrivateStream
 from xuanshu.infra.okx.public_ws import OkxPublicStream
-from xuanshu.infra.okx.rest import OkxRestClient
+from xuanshu.infra.okx.rest import OkxBusinessError, OkxRestClient
 from xuanshu.infra.storage.postgres_store import PostgresRuntimeStore
 from xuanshu.infra.storage.redis_store import (
     RedisRuntimeStateStore,
@@ -74,6 +74,21 @@ _DEFAULT_VOL_BREAKOUT_TAKE_PROFIT_BPS = 800
 _DEFAULT_VOL_BREAKOUT_TRAILING_DRAWDOWN_BPS = 250
 _DEFAULT_VOL_BREAKOUT_MAX_HOLD_BARS = 12
 _LONG_ENTRY_CONFIRMATION_TICKS = 2
+_OPEN_EXECUTION_FAILURE_COOLDOWN = timedelta(minutes=15)
+_MARGIN_USAGE_BUFFER = 0.80
+_CONTRACT_VALUE_BY_SYMBOL = {
+    "BTC-USDT-SWAP": 0.01,
+    "ETH-USDT-SWAP": 0.1,
+}
+_LOT_SIZE_BY_SYMBOL = {
+    "BTC-USDT-SWAP": 0.01,
+    "ETH-USDT-SWAP": 0.01,
+}
+_TRANSIENT_STREAM_TIMEOUT_MARKERS = (
+    "timeout",
+    "timed out",
+    "keepalive ping timeout",
+)
 
 
 @dataclass(slots=True)
@@ -119,7 +134,9 @@ class TraderRuntime:
     symbol_handover_state: dict[str, dict[str, object]] = field(default_factory=dict)
     position_entry_contexts: dict[str, PositionEntryContext] = field(default_factory=dict)
     pending_position_actions: dict[str, str] = field(default_factory=dict)
+    pending_reverse_signals: dict[str, CandidateSignal] = field(default_factory=dict)
     long_entry_confirmations: dict[str, int] = field(default_factory=dict)
+    open_execution_failure_cooldowns: dict[str, datetime] = field(default_factory=dict)
     current_mode: RunMode = RunMode.NORMAL
     opening_allowed: bool = True
     execution_sequence: int = 0
@@ -579,6 +596,172 @@ def _long_entry_confirmed(runtime: TraderRuntime, signal: CandidateSignal) -> bo
     return confirmations >= _LONG_ENTRY_CONFIRMATION_TICKS
 
 
+def _open_failure_cooldown_key(signal: CandidateSignal) -> str:
+    return f"{signal.symbol}:{signal.strategy_id.value}:{signal.side.value}:open"
+
+
+def _is_open_execution_failure_cooling_down(runtime: TraderRuntime, signal: CandidateSignal) -> bool:
+    cooldown_until = runtime.open_execution_failure_cooldowns.get(_open_failure_cooldown_key(signal))
+    if cooldown_until is None:
+        return False
+    if datetime.now(UTC) < cooldown_until:
+        return True
+    runtime.open_execution_failure_cooldowns.pop(_open_failure_cooldown_key(signal), None)
+    return False
+
+
+def _start_open_execution_failure_cooldown(runtime: TraderRuntime, signal: CandidateSignal) -> str:
+    cooldown_until = datetime.now(UTC) + _OPEN_EXECUTION_FAILURE_COOLDOWN
+    runtime.open_execution_failure_cooldowns[_open_failure_cooldown_key(signal)] = cooldown_until
+    runtime.long_entry_confirmations.pop(signal.symbol, None)
+    return cooldown_until.isoformat()
+
+
+def _format_execution_error(exc: Exception) -> str:
+    if not isinstance(exc, OkxBusinessError):
+        return str(exc)
+    detail = {
+        "code": exc.code,
+        "message": exc.message,
+        "payload": exc.payload,
+    }
+    return str(detail)
+
+
+async def _submit_signal_open(runtime: TraderRuntime, signal: CandidateSignal) -> bool:
+    decision = runtime.components.risk_kernel.evaluate(signal, runtime.startup_snapshot)
+    if _is_open_execution_failure_cooling_down(runtime, signal):
+        runtime.long_entry_confirmations.pop(signal.symbol, None)
+        return False
+    client_order_id = _next_client_order_id(runtime, signal)
+    requested_order_size = max(1.0, decision.max_order_size)
+    order_size, margin_block_reason = _margin_adjusted_open_order_size(
+        runtime,
+        signal.symbol,
+        requested_order_size,
+    )
+    if margin_block_reason is not None:
+        runtime.history_store.append_risk_event(
+            {
+                "event_type": "signal_blocked",
+                "symbol": signal.symbol,
+                "detail": margin_block_reason,
+                "strategy_id": signal.strategy_id.value,
+                "requested_size": requested_order_size,
+                "available_balance": runtime.components.state_engine.account_state.available_balance,
+            }
+        )
+        return False
+    strategy_logic = _build_strategy_logic(signal, runtime.startup_snapshot)
+    runtime.components.state_engine.stage_order_submission(
+        signal.symbol,
+        client_order_id=client_order_id,
+        side=signal.side.value,
+        size=order_size,
+        intent="open",
+        strategy_id=signal.strategy_id.value,
+        strategy_logic=strategy_logic,
+    )
+    runtime.pending_position_actions[signal.symbol] = "open"
+    try:
+        response = await runtime.execution_coordinator.submit_market_open(
+            symbol=signal.symbol,
+            side=signal.side.value,
+            size=order_size,
+            client_order_id=client_order_id,
+            decision=decision,
+            timestamp=_now_timestamp(),
+        )
+    except Exception as exc:
+        runtime.pending_position_actions.pop(signal.symbol, None)
+        runtime.components.state_engine.clear_order_submission(signal.symbol, client_order_id)
+        cooldown_until = _start_open_execution_failure_cooldown(runtime, signal)
+        runtime.history_store.append_risk_event(
+            {
+                "event_type": "execution_submission_failed",
+                "symbol": signal.symbol,
+                "detail": _format_execution_error(exc),
+                "cooldown_until": cooldown_until,
+                "strategy_id": signal.strategy_id.value,
+            }
+        )
+        return False
+    if response is None:
+        runtime.pending_position_actions.pop(signal.symbol, None)
+        runtime.components.state_engine.clear_order_submission(signal.symbol, client_order_id)
+        runtime.history_store.append_risk_event(
+            {
+                "event_type": "signal_blocked",
+                "symbol": signal.symbol,
+                "detail": ",".join(decision.reason_codes),
+            }
+        )
+        return False
+    for row in response:
+        runtime.history_store.append_order_fact(
+            {
+                "symbol": signal.symbol,
+                "side": signal.side.value,
+                "status": "submitted",
+                "client_order_id": str(row.get("clOrdId") or ""),
+                "order_id": str(row.get("ordId") or ""),
+                "intent": "open",
+                "strategy_id": signal.strategy_id.value,
+                "strategy_logic": strategy_logic,
+            }
+        )
+    _LOGGER.info(
+        "order_submitted",
+        extra={
+            "service": "trader",
+            "symbol": signal.symbol,
+            "strategy_id": signal.strategy_id.value,
+            "side": signal.side.value,
+            "client_order_id": response[0].get("clOrdId") or "",
+            "run_mode": runtime.current_mode.value,
+        },
+    )
+    runtime.long_entry_confirmations.pop(signal.symbol, None)
+    return True
+
+
+def _floor_to_lot_size(size: float, lot_size: float) -> float:
+    if lot_size <= 0.0:
+        return size
+    return (size // lot_size) * lot_size
+
+
+def _margin_adjusted_open_order_size(
+    runtime: TraderRuntime,
+    symbol: str,
+    requested_size: float,
+) -> tuple[float, str | None]:
+    if requested_size <= 0.0:
+        return 0.0, "non_positive_requested_size"
+    account_state = runtime.components.state_engine.account_state
+    if account_state.equity <= 0.0 and account_state.available_balance <= 0.0:
+        return requested_size, None
+    if account_state.available_balance <= 0.0:
+        return 0.0, "insufficient_available_margin"
+    market_snapshot = runtime.components.state_engine.snapshot(symbol)
+    mark_price = market_snapshot.mid_price
+    contract_value = _CONTRACT_VALUE_BY_SYMBOL.get(symbol)
+    if contract_value is None or mark_price <= 0.0:
+        return requested_size, None
+    max_leverage = max(float(runtime.startup_snapshot.max_leverage), 1.0)
+    margin_per_contract = mark_price * contract_value / max_leverage
+    if margin_per_contract <= 0.0:
+        return requested_size, None
+    max_affordable_size = (
+        account_state.available_balance * _MARGIN_USAGE_BUFFER / margin_per_contract
+    )
+    lot_size = _LOT_SIZE_BY_SYMBOL.get(symbol, 0.01)
+    adjusted_size = _floor_to_lot_size(min(requested_size, max_affordable_size), lot_size)
+    if adjusted_size < 1.0:
+        return 0.0, "insufficient_available_margin"
+    return adjusted_size, None
+
+
 async def _submit_position_close(
     runtime: TraderRuntime,
     *,
@@ -631,7 +814,7 @@ async def _submit_position_close(
             {
                 "event_type": "execution_submission_failed",
                 "symbol": symbol,
-                "detail": str(exc),
+                "detail": _format_execution_error(exc),
             }
         )
         return False
@@ -956,6 +1139,24 @@ async def _evaluate_symbol(runtime: TraderRuntime, symbol: str) -> None:
     if symbol in runtime.pending_position_actions:
         return
     has_exposure = has_open_orders or position_quantity != 0.0
+    pending_reverse_signal = runtime.pending_reverse_signals.get(symbol)
+    if pending_reverse_signal is not None:
+        if has_exposure:
+            return
+        if not runtime.startup_snapshot.is_strategy_enabled(pending_reverse_signal.strategy_id.value):
+            runtime.pending_reverse_signals.pop(symbol, None)
+            runtime.history_store.append_risk_event(
+                {
+                    "event_type": "signal_blocked",
+                    "symbol": symbol,
+                    "detail": "pending_reverse_strategy_disabled",
+                    "strategy_id": pending_reverse_signal.strategy_id.value,
+                }
+            )
+            return
+        if await _submit_signal_open(runtime, pending_reverse_signal):
+            runtime.pending_reverse_signals.pop(symbol, None)
+        return
     if position is not None and position_quantity != 0.0 and not has_open_orders:
         exit_reason = _position_exit_reason(runtime, symbol, position)
         if exit_reason is not None:
@@ -969,13 +1170,14 @@ async def _evaluate_symbol(runtime: TraderRuntime, symbol: str) -> None:
             return
         reverse_signal = _opposite_signal(position_side, signals, runtime.startup_snapshot)
         if reverse_signal is not None:
-            await _submit_position_close(
+            if await _submit_position_close(
                 runtime,
                 symbol=symbol,
                 position=position,
                 strategy_id=reverse_signal.strategy_id,
                 strategy_logic=f"{symbol} 反向信号触发，先平 {position_side} 持仓，等待仓位归零后再开反向仓。",
-            )
+            ):
+                runtime.pending_reverse_signals[symbol] = reverse_signal
             return
     for signal in _prioritize_strategy_signals(signals):
         decision = runtime.components.risk_kernel.evaluate(signal, runtime.startup_snapshot)
@@ -1021,7 +1223,7 @@ async def _evaluate_symbol(runtime: TraderRuntime, symbol: str) -> None:
                     {
                         "event_type": "execution_submission_failed",
                         "symbol": signal.symbol,
-                        "detail": str(exc),
+                        "detail": _format_execution_error(exc),
                     }
                 )
                 continue
@@ -1059,9 +1261,13 @@ async def _evaluate_symbol(runtime: TraderRuntime, symbol: str) -> None:
                     "run_mode": runtime.current_mode.value,
                 },
             )
+            runtime.pending_reverse_signals[signal.symbol] = signal
             has_exposure = True
             continue
         if has_exposure:
+            runtime.long_entry_confirmations.pop(signal.symbol, None)
+            continue
+        if _is_open_execution_failure_cooling_down(runtime, signal):
             runtime.long_entry_confirmations.pop(signal.symbol, None)
             continue
         if not _long_entry_confirmed(runtime, signal):
@@ -1073,82 +1279,23 @@ async def _evaluate_symbol(runtime: TraderRuntime, symbol: str) -> None:
                 }
             )
             continue
-        client_order_id = _next_client_order_id(runtime, signal)
-        order_size = max(1.0, decision.max_order_size)
-        strategy_logic = _build_strategy_logic(signal, runtime.startup_snapshot)
-        runtime.components.state_engine.stage_order_submission(
-            signal.symbol,
-            client_order_id=client_order_id,
-            side=signal.side.value,
-            size=order_size,
-            intent="open",
-            strategy_id=signal.strategy_id.value,
-            strategy_logic=strategy_logic,
-        )
-        runtime.pending_position_actions[signal.symbol] = "open"
-        try:
-            response = await runtime.execution_coordinator.submit_market_open(
-                symbol=signal.symbol,
-                side=signal.side.value,
-                size=order_size,
-                client_order_id=client_order_id,
-                decision=decision,
-                timestamp=_now_timestamp(),
-            )
-        except Exception as exc:
-            runtime.pending_position_actions.pop(signal.symbol, None)
-            runtime.components.state_engine.clear_order_submission(signal.symbol, client_order_id)
-            runtime.history_store.append_risk_event(
-                {
-                    "event_type": "execution_submission_failed",
-                    "symbol": signal.symbol,
-                    "detail": str(exc),
-                }
-            )
-            continue
-        if response is None:
-            runtime.pending_position_actions.pop(signal.symbol, None)
-            runtime.components.state_engine.clear_order_submission(signal.symbol, client_order_id)
-            runtime.history_store.append_risk_event(
-                {
-                    "event_type": "signal_blocked",
-                    "symbol": signal.symbol,
-                    "detail": ",".join(decision.reason_codes),
-                }
-            )
-            continue
-        for row in response:
-            runtime.history_store.append_order_fact(
-                {
-                    "symbol": signal.symbol,
-                    "side": signal.side.value,
-                    "status": "submitted",
-                    "client_order_id": str(row.get("clOrdId") or ""),
-                    "order_id": str(row.get("ordId") or ""),
-                    "intent": "open",
-                    "strategy_id": signal.strategy_id.value,
-                    "strategy_logic": strategy_logic,
-                }
-            )
-        _LOGGER.info(
-            "order_submitted",
-            extra={
-                "service": "trader",
-                "symbol": signal.symbol,
-                "strategy_id": signal.strategy_id.value,
-                "side": signal.side.value,
-                "client_order_id": response[0].get("clOrdId") or "",
-                "run_mode": runtime.current_mode.value,
-            },
-        )
-        has_exposure = True
-        runtime.long_entry_confirmations.pop(signal.symbol, None)
+        if await _submit_signal_open(runtime, signal):
+            has_exposure = True
 
 
 def _stream_failure_severity(adapter: object) -> str:
     if isinstance(adapter, OkxPublicStream):
         return "warn"
     return "critical"
+
+
+def _is_retryable_public_stream_timeout(adapter: object, exc: Exception) -> bool:
+    if not isinstance(adapter, OkxPublicStream):
+        return False
+    if isinstance(exc, TimeoutError):
+        return True
+    detail = str(exc).lower()
+    return any(marker in detail for marker in _TRANSIENT_STREAM_TIMEOUT_MARKERS)
 
 
 async def _consume_stream(
@@ -1173,6 +1320,21 @@ async def _consume_stream(
             return consumed_any
         except Exception as exc:
             reconnect_attempts += 1
+            if _is_retryable_public_stream_timeout(adapter, exc):
+                if max_reconnect_attempts is not None and reconnect_attempts >= max_reconnect_attempts:
+                    return consumed_any
+                _LOGGER.warning(
+                    "stream_timeout_retry_scheduled",
+                    extra={
+                        "service": "trader",
+                        "adapter": adapter.__class__.__name__,
+                        "attempt": reconnect_attempts,
+                        "delay_seconds": reconnect_delay_seconds,
+                        "detail": str(exc),
+                    },
+                )
+                await asyncio.sleep(reconnect_delay_seconds)
+                continue
             await _dispatch_runtime_event(
                 runtime,
                 FaultEvent(
@@ -1250,6 +1412,8 @@ async def _dispatch_runtime_event(runtime: TraderRuntime, event: object) -> None
                 **trade_context,
             }
         )
+        if event.net_quantity == 0.0 and event.symbol in runtime.pending_reverse_signals:
+            await _evaluate_symbol(runtime, event.symbol)
     elif isinstance(event, FaultEvent):
         _tighten_runtime_mode(runtime, _fault_mode(event))
         runtime.history_store.append_risk_event(

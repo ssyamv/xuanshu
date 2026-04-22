@@ -27,6 +27,10 @@ class OkxPrivateStream:
     connect_factory: Callable[..., object] = websockets.connect
     epoch_seconds_factory: Callable[[], int] = lambda: int(datetime.now(UTC).timestamp())
     simulated_trading: bool = False
+    open_timeout: float = 30.0
+    ping_interval: float = 30.0
+    ping_timeout: float = 90.0
+    close_timeout: float = 20.0
 
     def build_login_payload(
         self,
@@ -77,6 +81,14 @@ class OkxPrivateStream:
             {"additional_headers": {"x-simulated-trading": "1"}}
             if self.simulated_trading
             else {}
+        )
+        connect_kwargs.update(
+            {
+                "open_timeout": self.open_timeout,
+                "ping_interval": self.ping_interval,
+                "ping_timeout": self.ping_timeout,
+                "close_timeout": self.close_timeout,
+            }
         )
         async with self.connect_factory(self.url, **connect_kwargs) as websocket:
             await websocket.send(
@@ -234,9 +246,24 @@ class OkxPrivateStream:
             generated_at=self._parse_timestamp(item["uTime"]),
             private_sequence=sequence,
             equity=self._required_float(item["totalEq"], field="totalEq"),
-            available_balance=self._optional_float(item.get("availEq"), default=0.0),
+            available_balance=self._account_available_balance(item),
             margin_ratio=self._optional_float(item.get("mgnRatio"), default=0.0),
         )
+
+    def _account_available_balance(self, item: dict[str, Any]) -> float:
+        top_level_available = self._optional_float(item.get("availEq"), default=0.0)
+        if top_level_available > 0.0:
+            return top_level_available
+        details = item.get("details")
+        if not isinstance(details, list):
+            return top_level_available
+        for detail in details:
+            if not isinstance(detail, dict):
+                continue
+            if str(detail.get("ccy") or "").upper() != "USDT":
+                continue
+            return self._optional_float(detail.get("availEq"), default=top_level_available)
+        return top_level_available
 
     def _build_fault(
         self,
