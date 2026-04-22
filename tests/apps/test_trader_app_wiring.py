@@ -2108,6 +2108,7 @@ def test_trader_runtime_does_not_treat_existing_short_as_long_reversal(monkeypat
     asyncio.run(_exercise_runtime())
 
     assert fake_rest.placed_orders == []
+    assert runtime.history_store.written_rows["risk_events"] == []
 
 
 def test_trader_runtime_keeps_short_when_vol_breakout_signal_arrives(monkeypatch) -> None:
@@ -2649,6 +2650,73 @@ def test_trader_runtime_records_trade_notification_metadata_for_order_and_positi
         "strategy_id": "vol_breakout",
         "strategy_logic": "BTC-USDT-SWAP 12H 波动率突破，价格突破 ATR 阈值后顺势开多。",
     }
+
+
+def test_trader_runtime_ignores_stale_disabled_position_context(monkeypatch) -> None:
+    _set_required_settings_env(monkeypatch)
+    fake_redis = _FakeRedis()
+
+    monkeypatch.setattr(
+        trader_app,
+        "build_snapshot_store",
+        lambda settings: RedisSnapshotStore(redis_client=fake_redis),
+    )
+    monkeypatch.setattr(
+        trader_app,
+        "build_runtime_state_store",
+        lambda settings: RedisRuntimeStateStore(redis_client=fake_redis),
+    )
+
+    runtime = trader_app.build_trader_runtime()
+    runtime.startup_snapshot = runtime.startup_snapshot.model_copy(
+        update={
+            "version_id": "snap-live",
+            "market_mode": RunMode.NORMAL,
+            "approval_state": ApprovalState.APPROVED,
+            "strategy_enable_flags": {"vol_breakout": True, "short_momentum": True, "risk_pause": True},
+            "strategy_bindings": {
+                "BTC-USDT-SWAP:short_momentum": trader_app.ApprovedStrategyBinding(
+                    strategy_def_id="short-momentum-btc-usdt-swap-4h-lb4-th25-sl300-tp800-h12",
+                    strategy_package_id="fixed-short-momentum-btc-usdt-swap-4h-lb4-th25-sl300-tp800-h12",
+                    backtest_report_id="bt-short-momentum-btc",
+                    score=75.62,
+                    score_basis="backtest_return_percent",
+                    approval_record_id="fixed-short-momentum-btc-usdt-swap-4h-lb4-th25-sl300-tp800-h12",
+                    activated_at=datetime.now(UTC),
+                )
+            },
+        }
+    )
+    runtime.components.state_engine.trade_context_by_symbol["BTC-USDT-SWAP"] = {
+        "intent": "open",
+        "strategy_id": "mean_reversion",
+        "strategy_logic": "均值回归，价格偏离后尝试反向回补。",
+    }
+
+    async def _exercise_runtime() -> None:
+        try:
+            await trader_app._dispatch_runtime_event(
+                runtime,
+                PositionUpdateEvent(
+                    event_type=TraderEventType.POSITION_UPDATE,
+                    symbol="BTC-USDT-SWAP",
+                    exchange="okx",
+                    generated_at=datetime.now(UTC),
+                    private_sequence="pri-1",
+                    position_side="short",
+                    net_quantity=3.5,
+                    average_price=77479.6,
+                    mark_price=77906.7,
+                    unrealized_pnl=-14.95,
+                ),
+            )
+        finally:
+            await runtime.components.aclose()
+
+    asyncio.run(_exercise_runtime())
+
+    assert runtime.history_store.written_rows["positions"][-1]["strategy_id"] == "short_momentum"
+    assert "空头动量破位" in runtime.history_store.written_rows["positions"][-1]["strategy_logic"]
 
 
 def test_trader_entrypoint_fails_fast_without_required_settings(monkeypatch) -> None:

@@ -559,6 +559,17 @@ def _prioritize_strategy_signals(signals: list[CandidateSignal]) -> list[Candida
     return sorted(signals, key=lambda signal: priority.get(signal.strategy_id, 10))
 
 
+def _enabled_candidate_signals(
+    signals: list[CandidateSignal],
+    snapshot: StrategyConfigSnapshot,
+) -> list[CandidateSignal]:
+    return [
+        signal
+        for signal in signals
+        if signal.strategy_id == StrategyId.RISK_PAUSE or snapshot.is_strategy_enabled(signal.strategy_id.value)
+    ]
+
+
 def _long_entry_confirmed(runtime: TraderRuntime, signal: CandidateSignal) -> bool:
     if signal.strategy_id != StrategyId.VOL_BREAKOUT or signal.side != OrderSide.BUY:
         runtime.long_entry_confirmations.pop(signal.symbol, None)
@@ -693,6 +704,41 @@ def _build_position_strategy_logic(symbol: str, position_side: str, snapshot: St
     return strategy_id.value, _build_strategy_logic(signal, snapshot)
 
 
+def _position_context_from_runtime(runtime: TraderRuntime, event: PositionUpdateEvent) -> dict[str, str]:
+    context = runtime.position_entry_contexts.get(event.symbol)
+    if context is not None and context.position_side == event.position_side:
+        return {
+            "intent": "open",
+            "strategy_id": context.strategy_id,
+            "strategy_logic": context.strategy_logic,
+        }
+    return {}
+
+
+def _state_trade_context_for_position(
+    runtime: TraderRuntime,
+    symbol: str,
+    position_side: str,
+) -> dict[str, str]:
+    trade_context = runtime.components.state_engine.trade_context_by_symbol.get(symbol, {})
+    strategy_id = trade_context.get("strategy_id")
+    strategy_logic = trade_context.get("strategy_logic")
+    expected_strategy_id = _strategy_id_for_position_side(position_side).value
+    if (
+        strategy_id != expected_strategy_id
+        or strategy_logic is None
+        or not runtime.startup_snapshot.is_strategy_enabled(expected_strategy_id)
+    ):
+        return {}
+    context = {}
+    intent = trade_context.get("intent")
+    if intent is not None:
+        context["intent"] = intent
+    context["strategy_id"] = strategy_id
+    context["strategy_logic"] = strategy_logic
+    return context
+
+
 def _sync_position_entry_context(runtime: TraderRuntime, event: PositionUpdateEvent) -> None:
     pending_action = runtime.pending_position_actions.get(event.symbol)
     if pending_action == "open" and event.net_quantity != 0.0:
@@ -711,7 +757,7 @@ def _sync_position_entry_context(runtime: TraderRuntime, event: PositionUpdateEv
         lowest = existing.lowest_mark_price if existing.lowest_mark_price > 0.0 else mark_price
         existing.lowest_mark_price = min(lowest, mark_price)
         return
-    trade_context = runtime.components.state_engine.trade_context_by_symbol.get(event.symbol, {})
+    trade_context = _state_trade_context_for_position(runtime, event.symbol, event.position_side)
     strategy_id = trade_context.get("strategy_id")
     strategy_logic = trade_context.get("strategy_logic")
     if strategy_id is None or strategy_logic is None:
@@ -901,7 +947,7 @@ async def _evaluate_symbol(runtime: TraderRuntime, symbol: str) -> None:
     if runtime.startup_snapshot.version_id == "bootstrap":
         return
     snapshot = runtime.components.state_engine.snapshot(symbol)
-    signals = build_candidate_signals(snapshot)
+    signals = _enabled_candidate_signals(build_candidate_signals(snapshot), runtime.startup_snapshot)
     open_orders = runtime.components.state_engine.open_orders_by_symbol.get(symbol, {})
     position = runtime.components.state_engine.positions_by_symbol.get(symbol)
     position_quantity = position.net_quantity if position is not None else 0.0
@@ -1192,7 +1238,7 @@ async def _dispatch_runtime_event(runtime: TraderRuntime, event: object) -> None
             )
     elif isinstance(event, PositionUpdateEvent):
         _sync_position_entry_context(runtime, event)
-        trade_context = runtime.components.state_engine.trade_context_by_symbol.get(event.symbol, {})
+        trade_context = _position_context_from_runtime(runtime, event)
         runtime.history_store.append_position_fact(
             {
                 "symbol": event.symbol,

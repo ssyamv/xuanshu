@@ -112,23 +112,7 @@ async def _poll_notifier_once(runtime: NotifierRuntime) -> None:
     try:
         updates = await runtime.adapter.fetch_updates(offset=runtime.next_update_offset)
     except Exception as exc:
-        if isinstance(exc, TimeoutError):
-            return
-        try:
-            import httpx  # local import keeps notifier adapter protocol lightweight
-        except ImportError:
-            httpx = None
-        if httpx is not None and isinstance(exc, httpx.ReadTimeout):
-            return
-        if httpx is not None and isinstance(exc, httpx.HTTPStatusError):
-            _LOGGER.warning(
-                "poll_updates_failed",
-                extra={
-                    "service": "notifier",
-                    "error": str(exc),
-                    "status_code": exc.response.status_code,
-                },
-            )
+        if _is_recoverable_poll_error(exc):
             return
         raise
     if not updates:
@@ -154,11 +138,50 @@ async def _poll_notifier_once(runtime: NotifierRuntime) -> None:
             continue
 
 
+def _is_recoverable_poll_error(exc: Exception) -> bool:
+    if isinstance(exc, TimeoutError):
+        return True
+    try:
+        import httpx  # local import keeps notifier adapter protocol lightweight
+    except ImportError:
+        return False
+    if isinstance(exc, httpx.TimeoutException):
+        return True
+    if isinstance(exc, httpx.HTTPStatusError):
+        _LOGGER.warning(
+            "poll_updates_failed",
+            extra={
+                "service": "notifier",
+                "error": str(exc),
+                "status_code": exc.response.status_code,
+            },
+        )
+        return True
+    return False
+
+
+async def _flush_notifications_safely(runtime: NotifierRuntime) -> None:
+    try:
+        await runtime.service.flush_proactive_notifications(adapter=runtime.adapter)
+        await runtime.service.flush_pending_notifications(adapter=runtime.adapter)
+    except Exception as exc:
+        try:
+            import httpx
+        except ImportError:
+            httpx = None
+        if isinstance(exc, TimeoutError) or (httpx is not None and isinstance(exc, httpx.TimeoutException)):
+            _LOGGER.warning(
+                "notification_flush_timed_out",
+                extra={"service": "notifier", "error": str(exc)},
+            )
+            return
+        raise
+
+
 async def _run_command_loop(runtime: NotifierRuntime) -> None:
     while True:
         await _poll_notifier_once(runtime)
-        await runtime.service.flush_proactive_notifications(adapter=runtime.adapter)
-        await runtime.service.flush_pending_notifications(adapter=runtime.adapter)
+        await _flush_notifications_safely(runtime)
         await _wait_for_next_poll()
 
 

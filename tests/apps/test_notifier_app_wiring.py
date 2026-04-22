@@ -279,6 +279,49 @@ def test_notifier_runtime_ignores_fetch_update_read_timeout(monkeypatch) -> None
     assert runtime.next_update_offset is None
 
 
+def test_notifier_runtime_ignores_fetch_update_connect_timeout(monkeypatch) -> None:
+    _set_required_settings_env(monkeypatch)
+    _clear_unrelated_settings_env(monkeypatch)
+    fake_redis = _FakeRedis()
+
+    class _Adapter:
+        def __init__(self) -> None:
+            self.sent: list[str] = []
+
+        async def send_text(self, payload: TextMessagePayload):
+            self.sent.append(payload.text)
+
+        async def fetch_updates(self, offset: int | None = None, limit: int = 20, timeout_sec: int = 30):
+            raise httpx.ConnectTimeout("telegram connect timeout")
+
+    adapter = _Adapter()
+    monkeypatch.setattr(notifier_app, "build_notifier_adapter", lambda settings: adapter)
+    monkeypatch.setattr(
+        notifier_app,
+        "build_snapshot_store",
+        lambda settings: RedisSnapshotStore(redis_client=fake_redis),
+    )
+    monkeypatch.setattr(
+        notifier_app,
+        "build_runtime_state_store",
+        lambda settings: RedisRuntimeStateStore(redis_client=fake_redis),
+    )
+    monkeypatch.setattr(
+        notifier_app,
+        "build_history_store",
+        lambda settings: PostgresRuntimeStore(
+            dsn="postgresql://xuanshu:xuanshu@localhost:5432/xuanshu"
+        ),
+    )
+
+    runtime = notifier_app.build_notifier_runtime()
+
+    asyncio.run(notifier_app._poll_notifier_once(runtime))
+
+    assert adapter.sent == []
+    assert runtime.next_update_offset is None
+
+
 def test_notifier_runtime_ignores_fetch_update_http_status_errors(monkeypatch) -> None:
     _set_required_settings_env(monkeypatch)
     _clear_unrelated_settings_env(monkeypatch)
