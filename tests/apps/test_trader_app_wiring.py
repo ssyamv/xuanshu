@@ -1131,11 +1131,189 @@ def test_trader_runtime_dispatches_fault_event_updates_fault_flags(monkeypatch) 
     assert runtime.runtime_store.get_run_mode() == RunMode.DEGRADED
 
 
+def test_trader_runtime_recovers_reduce_only_after_private_stream_resumes(monkeypatch) -> None:
+    _set_required_settings_env(monkeypatch)
+    fake_redis = _FakeRedis()
+    history_store = PostgresRuntimeStore(dsn="postgresql://xuanshu:xuanshu@localhost:5432/xuanshu")
+
+    monkeypatch.setattr(
+        trader_app,
+        "build_snapshot_store",
+        lambda settings: RedisSnapshotStore(redis_client=fake_redis),
+    )
+    monkeypatch.setattr(
+        trader_app,
+        "build_runtime_state_store",
+        lambda settings: RedisRuntimeStateStore(redis_client=fake_redis),
+    )
+    monkeypatch.setattr(trader_app, "build_history_store", lambda settings: history_store)
+
+    runtime = trader_app.build_trader_runtime()
+
+    async def _exercise_runtime() -> None:
+        try:
+            await trader_app._dispatch_runtime_event(
+                runtime,
+                FaultEvent(
+                    event_type=TraderEventType.RUNTIME_FAULT,
+                    exchange="okx",
+                    generated_at=datetime.now(UTC),
+                    severity="critical",
+                    code="okxprivatestream_stream_failed",
+                    detail="no close frame received or sent",
+                ),
+            )
+            assert runtime.current_mode == RunMode.REDUCE_ONLY
+
+            await trader_app._dispatch_runtime_event(
+                runtime,
+                AccountSnapshotEvent(
+                    event_type=TraderEventType.ACCOUNT_SNAPSHOT,
+                    exchange="okx",
+                    generated_at=datetime.now(UTC),
+                    private_sequence="pri-recovered",
+                    equity=918.27,
+                    available_balance=800.0,
+                    margin_ratio=0.15,
+                ),
+            )
+        finally:
+            await runtime.components.aclose()
+
+    asyncio.run(_exercise_runtime())
+
+    assert runtime.current_mode == RunMode.NORMAL
+    assert runtime.opening_allowed is True
+    assert runtime.components.state_engine.fault_flags == {}
+    assert runtime.runtime_store.get_run_mode() == RunMode.NORMAL
+    assert runtime.runtime_store.get_fault_flags() == {}
+    assert {
+        "event_type": "runtime_fault_recovered",
+        "symbol": "system",
+        "detail": "okxprivatestream_stream_failed",
+    } in history_store.written_rows["risk_events"]
+
+
+def test_trader_runtime_does_not_auto_recover_manual_takeover_after_stream_resumes(monkeypatch) -> None:
+    _set_required_settings_env(monkeypatch)
+    fake_redis = _FakeRedis()
+    history_store = PostgresRuntimeStore(dsn="postgresql://xuanshu:xuanshu@localhost:5432/xuanshu")
+
+    monkeypatch.setattr(
+        trader_app,
+        "build_snapshot_store",
+        lambda settings: RedisSnapshotStore(redis_client=fake_redis),
+    )
+    monkeypatch.setattr(
+        trader_app,
+        "build_runtime_state_store",
+        lambda settings: RedisRuntimeStateStore(redis_client=fake_redis),
+    )
+    monkeypatch.setattr(trader_app, "build_history_store", lambda settings: history_store)
+
+    runtime = trader_app.build_trader_runtime()
+
+    async def _exercise_runtime() -> None:
+        try:
+            await trader_app._dispatch_runtime_event(
+                runtime,
+                FaultEvent(
+                    event_type=TraderEventType.RUNTIME_FAULT,
+                    exchange="okx",
+                    generated_at=datetime.now(UTC),
+                    severity="critical",
+                    code="okxprivatestream_stream_failed",
+                    detail="no close frame received or sent",
+                ),
+            )
+            runtime.components.state_engine.fault_flags["manual_takeover"] = {
+                "severity": "critical",
+                "detail": "operator requested reduce_only",
+            }
+            await trader_app._dispatch_runtime_event(
+                runtime,
+                AccountSnapshotEvent(
+                    event_type=TraderEventType.ACCOUNT_SNAPSHOT,
+                    exchange="okx",
+                    generated_at=datetime.now(UTC),
+                    private_sequence="pri-recovered",
+                    equity=918.27,
+                    available_balance=800.0,
+                    margin_ratio=0.15,
+                ),
+            )
+        finally:
+            await runtime.components.aclose()
+
+    asyncio.run(_exercise_runtime())
+
+    assert runtime.current_mode == RunMode.REDUCE_ONLY
+    assert runtime.opening_allowed is False
+    assert runtime.components.state_engine.fault_flags == {
+        "manual_takeover": {
+            "severity": "critical",
+            "detail": "operator requested reduce_only",
+        }
+    }
+    assert runtime.runtime_store.get_run_mode() == RunMode.REDUCE_ONLY
+    assert runtime.runtime_store.get_fault_flags() == {
+        "manual_takeover": {
+            "severity": "critical",
+            "detail": "operator requested reduce_only",
+        }
+    }
+
+
 def test_public_stream_timeout_retries_without_degrading_runtime(monkeypatch) -> None:
     _set_required_settings_env(monkeypatch)
     fake_redis = _FakeRedis()
     history_store = PostgresRuntimeStore(dsn="postgresql://xuanshu:xuanshu@localhost:5432/xuanshu")
     public_connect = _FailingWebsocketConnect(RuntimeError("keepalive ping timeout"))
+
+    monkeypatch.setattr(
+        trader_app,
+        "build_snapshot_store",
+        lambda settings: RedisSnapshotStore(redis_client=fake_redis),
+    )
+    monkeypatch.setattr(
+        trader_app,
+        "build_runtime_state_store",
+        lambda settings: RedisRuntimeStateStore(redis_client=fake_redis),
+    )
+    monkeypatch.setattr(trader_app, "build_history_store", lambda settings: history_store)
+
+    runtime = trader_app.build_trader_runtime()
+    public_stream = OkxPublicStream(
+        url="wss://ws.okx.com:8443/ws/v5/public",
+        connect_factory=public_connect,
+    )
+
+    async def _exercise_runtime() -> None:
+        try:
+            consumed = await trader_app._consume_stream(
+                runtime,
+                public_stream,
+                symbols=("BTC-USDT-SWAP",),
+                reconnect_delay_seconds=0,
+                max_reconnect_attempts=1,
+            )
+            assert consumed is False
+        finally:
+            await runtime.components.aclose()
+
+    asyncio.run(_exercise_runtime())
+
+    assert public_connect.calls == 1
+    assert runtime.current_mode == RunMode.NORMAL
+    assert runtime.components.state_engine.fault_flags == {}
+    assert history_store.written_rows["risk_events"] == []
+
+
+def test_public_stream_close_without_frame_retries_without_degrading_runtime(monkeypatch) -> None:
+    _set_required_settings_env(monkeypatch)
+    fake_redis = _FakeRedis()
+    history_store = PostgresRuntimeStore(dsn="postgresql://xuanshu:xuanshu@localhost:5432/xuanshu")
+    public_connect = _FailingWebsocketConnect(RuntimeError("no close frame received or sent"))
 
     monkeypatch.setattr(
         trader_app,

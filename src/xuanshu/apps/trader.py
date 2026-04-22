@@ -84,10 +84,27 @@ _LOT_SIZE_BY_SYMBOL = {
     "BTC-USDT-SWAP": 0.01,
     "ETH-USDT-SWAP": 0.01,
 }
-_TRANSIENT_STREAM_TIMEOUT_MARKERS = (
+_PUBLIC_STREAM_RECONNECT_MARKERS = (
+    "closed",
+    "connection closed",
+    "connection reset",
+    "going away",
     "timeout",
     "timed out",
     "keepalive ping timeout",
+    "no close frame",
+)
+_PUBLIC_STREAM_FAULT_CODES = frozenset(
+    {
+        "okxpublicstream_stream_failed",
+        "public_ws_disconnected",
+    }
+)
+_PRIVATE_STREAM_FAULT_CODES = frozenset(
+    {
+        "okxprivatestream_stream_failed",
+        "private_ws_disconnected",
+    }
 )
 
 
@@ -407,12 +424,73 @@ def _tighten_runtime_mode(runtime: TraderRuntime, target_mode: RunMode) -> None:
         )
 
 
+def _relax_runtime_mode(runtime: TraderRuntime, target_mode: RunMode, *, detail: str) -> None:
+    previous_mode = runtime.current_mode
+    runtime.current_mode = target_mode
+    runtime.components.state_engine.set_run_mode(target_mode)
+    runtime.startup_checkpoint.current_mode = target_mode
+    runtime.opening_allowed = target_mode not in {RunMode.REDUCE_ONLY, RunMode.HALTED}
+    if target_mode != previous_mode:
+        _LOGGER.info(
+            "runtime_mode_changed",
+            extra={
+                "service": "trader",
+                "previous_mode": previous_mode.value,
+                "current_mode": target_mode.value,
+            },
+        )
+        runtime.history_store.append_risk_event(
+            {
+                "event_type": "runtime_mode_changed",
+                "symbol": "system",
+                "detail": detail,
+            }
+        )
+
+
 def _fault_mode(event: FaultEvent) -> RunMode:
     if "public" in event.code or event.severity == "warn":
         return RunMode.DEGRADED
     if "private" in event.code or event.severity == "critical":
         return RunMode.REDUCE_ONLY
     return RunMode.NORMAL
+
+
+def _clear_recovered_stream_faults(runtime: TraderRuntime, event: object) -> tuple[str, ...]:
+    if isinstance(event, (OrderbookTopEvent, MarketTradeEvent)):
+        recoverable_codes = _PUBLIC_STREAM_FAULT_CODES
+    elif isinstance(event, (OrderUpdateEvent, PositionUpdateEvent, AccountSnapshotEvent)):
+        recoverable_codes = _PRIVATE_STREAM_FAULT_CODES
+    else:
+        return ()
+
+    fault_flags = runtime.components.state_engine.fault_flags
+    cleared = tuple(code for code in recoverable_codes if code in fault_flags)
+    for code in cleared:
+        fault_flags.pop(code, None)
+    return cleared
+
+
+def _try_recover_runtime_after_stream_event(runtime: TraderRuntime, event: object) -> None:
+    cleared_codes = _clear_recovered_stream_faults(runtime, event)
+    if not cleared_codes:
+        return
+    runtime.history_store.append_risk_event(
+        {
+            "event_type": "runtime_fault_recovered",
+            "symbol": "system",
+            "detail": ",".join(sorted(cleared_codes)),
+        }
+    )
+    if _can_relax_to_snapshot_mode(runtime, runtime.startup_snapshot):
+        _relax_runtime_mode(
+            runtime,
+            runtime.startup_snapshot.market_mode,
+            detail=(
+                "stream fault recovered; "
+                f"released {runtime.current_mode.value} to {runtime.startup_snapshot.market_mode.value}"
+            ),
+        )
 
 
 def _next_client_order_id(runtime: TraderRuntime, signal: CandidateSignal) -> str:
@@ -1289,13 +1367,13 @@ def _stream_failure_severity(adapter: object) -> str:
     return "critical"
 
 
-def _is_retryable_public_stream_timeout(adapter: object, exc: Exception) -> bool:
+def _is_retryable_public_stream_disconnect(adapter: object, exc: Exception) -> bool:
     if not isinstance(adapter, OkxPublicStream):
         return False
     if isinstance(exc, TimeoutError):
         return True
     detail = str(exc).lower()
-    return any(marker in detail for marker in _TRANSIENT_STREAM_TIMEOUT_MARKERS)
+    return any(marker in detail for marker in _PUBLIC_STREAM_RECONNECT_MARKERS)
 
 
 async def _consume_stream(
@@ -1320,11 +1398,11 @@ async def _consume_stream(
             return consumed_any
         except Exception as exc:
             reconnect_attempts += 1
-            if _is_retryable_public_stream_timeout(adapter, exc):
+            if _is_retryable_public_stream_disconnect(adapter, exc):
                 if max_reconnect_attempts is not None and reconnect_attempts >= max_reconnect_attempts:
                     return consumed_any
                 _LOGGER.warning(
-                    "stream_timeout_retry_scheduled",
+                    "public_stream_reconnect_scheduled",
                     extra={
                         "service": "trader",
                         "adapter": adapter.__class__.__name__,
@@ -1363,6 +1441,7 @@ async def _consume_stream(
 async def _dispatch_runtime_event(runtime: TraderRuntime, event: object) -> None:
     _sync_manual_runtime_controls(runtime)
     dispatch_event(runtime.components.state_engine, event)
+    _try_recover_runtime_after_stream_event(runtime, event)
     symbol = getattr(event, "symbol", None)
     if isinstance(event, (OrderbookTopEvent, MarketTradeEvent)) and symbol is not None:
         _publish_runtime_state(runtime, symbol=symbol)
