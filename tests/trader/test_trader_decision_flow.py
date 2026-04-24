@@ -1,4 +1,6 @@
+import asyncio
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 
 import pytest
 
@@ -312,3 +314,78 @@ def test_trader_applies_strategy_specific_bindings_without_replacing_long_bindin
 
     assert runtime.active_symbol_strategies["BTC-USDT-SWAP"].strategy_def_id == "long-strat"
     assert runtime.active_symbol_strategies["BTC-USDT-SWAP:short_momentum"].strategy_def_id == "short-strat"
+
+
+def test_trader_parses_fixed_vol_breakout_parameters() -> None:
+    binding = _build_binding(
+        strategy_def_id="vol-breakout-btc-usdt-swap-1d-k125-ta15-h48-atr7-ema100",
+        strategy_package_id="pkg",
+    )
+
+    params = trader_app._parse_fixed_vol_breakout_parameters(binding)
+
+    assert params is not None
+    assert params.bar == "1D"
+    assert params.k == 1.25
+    assert params.trailing_atr == 1.5
+    assert params.max_hold_bars == 48
+    assert params.atr_period == 7
+    assert params.ema_period == 100
+
+
+def test_trader_fixed_vol_breakout_exit_uses_strategy_trailing_atr(monkeypatch) -> None:
+    monkeypatch.setenv("XUANSHU_OKX_SYMBOLS", "BTC-USDT-SWAP")
+    monkeypatch.setenv("XUANSHU_TRADER_STARTING_NAV", "250000")
+    monkeypatch.setenv("OKX_API_KEY", "api-key")
+    monkeypatch.setenv("OKX_API_SECRET", "api-secret")
+    monkeypatch.setenv("OKX_API_PASSPHRASE", "api-passphrase")
+    runtime = trader_app.build_trader_runtime()
+    runtime.startup_snapshot = runtime.startup_snapshot.model_copy(
+        update={
+                "symbol_strategy_bindings": {
+                    "BTC-USDT-SWAP": _build_binding(
+                        strategy_def_id="vol-breakout-btc-usdt-swap-1d-k09-ta05-h48-atr2-ema3",
+                        strategy_package_id="pkg",
+                    )
+                }
+        }
+    )
+
+    class _Rest:
+        async def fetch_history_candles(self, symbol: str, *, bar: str = "1H", after: str | None = None, before: str | None = None, limit: int = 100):
+            rows = [
+                {"ts": str(int((datetime(2026, 1, 1, tzinfo=UTC) + timedelta(days=index)).timestamp() * 1000)), "open": str(v - 0.2), "high": str(v + 1), "low": str(v - 1), "close": str(v)}
+                for index, v in enumerate([100, 100.1, 100.0, 100.2, 100.1, 100.0, 100.2, 100.1, 100.0, 103.0, 80.0])
+            ]
+            if after is None:
+                return rows[:limit]
+            timestamps = [row["ts"] for row in rows]
+            if after not in timestamps:
+                return []
+            return rows[timestamps.index(after) + 1 : timestamps.index(after) + 1 + limit]
+
+    runtime.components = runtime.components.__class__(
+        state_engine=runtime.components.state_engine,
+        risk_kernel=runtime.components.risk_kernel,
+        checkpoint_service=runtime.components.checkpoint_service,
+        okx_rest_client=_Rest(),
+        okx_public_stream=runtime.components.okx_public_stream,
+        okx_private_stream=runtime.components.okx_private_stream,
+        client_order_id_builder=runtime.components.client_order_id_builder,
+    )
+    runtime.position_entry_contexts["BTC-USDT-SWAP"] = trader_app.PositionEntryContext(
+        symbol="BTC-USDT-SWAP",
+        position_side="long",
+        quantity=1.0,
+        entry_price=103.0,
+        entered_at=datetime.now(UTC),
+        strategy_id="vol_breakout",
+        strategy_logic="test",
+        highest_mark_price=103.0,
+        lowest_mark_price=103.0,
+    )
+    position = SimpleNamespace(net_quantity=1.0, position_side="long", average_price=103.0, mark_price=100.0)
+
+    exit_reason = asyncio.run(trader_app._position_exit_reason(runtime, "BTC-USDT-SWAP", position))
+
+    assert exit_reason == "vol_breakout_trailing_atr_0.5x"

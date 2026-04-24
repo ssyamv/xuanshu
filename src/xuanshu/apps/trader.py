@@ -68,6 +68,10 @@ _RUN_MODE_PRIORITY = {
     RunMode.HALTED: 3,
 }
 _SHORT_MOMENTUM_EXIT_PATTERN = re.compile(r"(?:^|-)sl(?P<stop>\d+)-tp(?P<take>\d+)-h(?P<hold>\d+)(?:-|$)")
+_FIXED_VOL_BREAKOUT_PATTERN = re.compile(
+    r"(?:^|-)vol-breakout-.+-(?P<bar>\d+[mhd])-k(?P<k>\d+)-ta(?P<trailing>\d+)-h(?P<hold>\d+)-atr(?P<atr>\d+)-ema(?P<ema>\d+)(?:-|$)",
+    re.IGNORECASE,
+)
 _BAR_PATTERN = re.compile(r"(?P<count>\d+)(?P<unit>[mhd])", re.IGNORECASE)
 _DEFAULT_VOL_BREAKOUT_STOP_LOSS_BPS = 300
 _DEFAULT_VOL_BREAKOUT_TAKE_PROFIT_BPS = 800
@@ -75,6 +79,7 @@ _DEFAULT_VOL_BREAKOUT_TRAILING_DRAWDOWN_BPS = 250
 _DEFAULT_VOL_BREAKOUT_MAX_HOLD_BARS = 12
 _LONG_ENTRY_CONFIRMATION_TICKS = 2
 _OPEN_EXECUTION_FAILURE_COOLDOWN = timedelta(minutes=15)
+_POST_CLOSE_ENTRY_COOLDOWN = timedelta(minutes=15)
 _MARGIN_USAGE_BUFFER = 0.80
 _CONTRACT_VALUE_BY_SYMBOL = {
     "BTC-USDT-SWAP": 0.01,
@@ -84,6 +89,7 @@ _LOT_SIZE_BY_SYMBOL = {
     "BTC-USDT-SWAP": 0.01,
     "ETH-USDT-SWAP": 0.01,
 }
+_PORTFOLIO_MARGIN_FRACTION_PER_SYMBOL = 0.5
 _PUBLIC_STREAM_RECONNECT_MARKERS = (
     "closed",
     "connection closed",
@@ -154,6 +160,11 @@ class TraderRuntime:
     pending_reverse_signals: dict[str, CandidateSignal] = field(default_factory=dict)
     long_entry_confirmations: dict[str, int] = field(default_factory=dict)
     open_execution_failure_cooldowns: dict[str, datetime] = field(default_factory=dict)
+    post_close_entry_cooldowns: dict[str, datetime] = field(default_factory=dict)
+    vol_breakout_signal_candles: dict[str, str] = field(default_factory=dict)
+    vol_breakout_entry_candles: dict[str, str] = field(default_factory=dict)
+    vol_breakout_rows_cache: dict[str, tuple[datetime, list[dict[str, object]]]] = field(default_factory=dict)
+    vol_breakout_history_fetch_cooldowns: dict[str, datetime] = field(default_factory=dict)
     current_mode: RunMode = RunMode.NORMAL
     opening_allowed: bool = True
     execution_sequence: int = 0
@@ -562,9 +573,44 @@ def _extract_bar_duration(strategy_def_id: object) -> timedelta:
     return timedelta(hours=4)
 
 
-def _vol_breakout_exit_reason(
+@dataclass(frozen=True, slots=True)
+class FixedVolBreakoutParameters:
+    bar: str
+    k: float
+    trailing_atr: float
+    max_hold_bars: int
+    atr_period: int
+    ema_period: int
+
+
+def _decode_compact_decimal(value: str) -> float:
+    if len(value) <= 1:
+        return float(value)
+    if value.startswith("0"):
+        return int(value) / 10
+    if len(value) == 2:
+        return int(value) / 10
+    return int(value) / 100
+
+
+def _parse_fixed_vol_breakout_parameters(binding: ApprovedStrategyBinding | None) -> FixedVolBreakoutParameters | None:
+    if binding is None:
+        return None
+    match = _FIXED_VOL_BREAKOUT_PATTERN.search(binding.strategy_def_id)
+    if match is None:
+        return None
+    return FixedVolBreakoutParameters(
+        bar=match.group("bar").upper(),
+        k=_decode_compact_decimal(match.group("k")),
+        trailing_atr=_decode_compact_decimal(match.group("trailing")),
+        max_hold_bars=int(match.group("hold")),
+        atr_period=int(match.group("atr")),
+        ema_period=int(match.group("ema")),
+    )
+
+
+def _default_vol_breakout_exit_reason(
     *,
-    binding: ApprovedStrategyBinding | None,
     position: object,
     context: PositionEntryContext | None,
 ) -> str | None:
@@ -582,7 +628,7 @@ def _vol_breakout_exit_reason(
         drawdown = (context.highest_mark_price - mark_price) / context.highest_mark_price
         if drawdown >= _DEFAULT_VOL_BREAKOUT_TRAILING_DRAWDOWN_BPS / 10_000:
             return f"vol_breakout_trailing_drawdown_{_DEFAULT_VOL_BREAKOUT_TRAILING_DRAWDOWN_BPS}bps"
-    max_hold = _extract_bar_duration(getattr(binding, "strategy_def_id", "")) * _DEFAULT_VOL_BREAKOUT_MAX_HOLD_BARS
+    max_hold = timedelta(hours=4) * _DEFAULT_VOL_BREAKOUT_MAX_HOLD_BARS
     if datetime.now(UTC) - context.entered_at >= max_hold:
         return f"vol_breakout_max_hold_{_DEFAULT_VOL_BREAKOUT_MAX_HOLD_BARS}bars"
     return None
@@ -603,7 +649,51 @@ def _active_position_return(position: object, position_side: str) -> float | Non
     return (mark / average) - 1.0
 
 
-def _position_exit_reason(runtime: TraderRuntime, symbol: str, position: object) -> str | None:
+async def _fixed_vol_breakout_exit_reason(
+    runtime: TraderRuntime,
+    *,
+    symbol: str,
+    binding: ApprovedStrategyBinding,
+    position: object,
+    context: PositionEntryContext | None,
+) -> str | None:
+    parameters = _parse_fixed_vol_breakout_parameters(binding)
+    if parameters is None:
+        return _default_vol_breakout_exit_reason(position=position, context=context)
+    if context is None:
+        return None
+    rows = await _get_fixed_vol_breakout_rows(
+        runtime,
+        symbol=symbol,
+        parameters=parameters,
+        failure_detail_prefix="fixed_vol_breakout_exit_history_fetch_failed",
+    )
+    if rows is None:
+        return None
+    warmup = max(parameters.ema_period, parameters.atr_period + 1)
+    if len(rows) <= warmup:
+        return None
+    closes = [float(row["close"]) for row in rows]
+    highs = [float(row["high"]) for row in rows]
+    lows = [float(row["low"]) for row in rows]
+    atr_values = _atr(highs=highs, lows=lows, closes=closes, period=parameters.atr_period)
+    latest_close = closes[-1]
+    recent_closes = [
+        float(row["close"])
+        for row in rows
+        if isinstance(row.get("timestamp"), datetime) and row["timestamp"] >= context.entered_at
+    ]
+    highest_close = max([context.entry_price, *recent_closes]) if recent_closes else context.entry_price
+    trailing_stop = highest_close - parameters.trailing_atr * atr_values[-1]
+    if latest_close < trailing_stop:
+        return f"vol_breakout_trailing_atr_{parameters.trailing_atr:g}x"
+    max_hold = _extract_bar_duration(parameters.bar) * parameters.max_hold_bars
+    if datetime.now(UTC) - context.entered_at >= max_hold:
+        return f"vol_breakout_max_hold_{parameters.max_hold_bars}bars"
+    return None
+
+
+async def _position_exit_reason(runtime: TraderRuntime, symbol: str, position: object) -> str | None:
     position_side = str(getattr(position, "position_side", "long") or "long")
     position_quantity = float(getattr(position, "net_quantity", 0.0) or 0.0)
     if position_quantity == 0.0:
@@ -611,7 +701,15 @@ def _position_exit_reason(runtime: TraderRuntime, symbol: str, position: object)
     binding = _binding_for_position_side(runtime.startup_snapshot, symbol, position_side)
     context = runtime.position_entry_contexts.get(symbol)
     if position_side == "long":
-        return _vol_breakout_exit_reason(binding=binding, position=position, context=context)
+        if binding is not None:
+            return await _fixed_vol_breakout_exit_reason(
+                runtime,
+                symbol=symbol,
+                binding=binding,
+                position=position,
+                context=context,
+            )
+        return _default_vol_breakout_exit_reason(position=position, context=context)
     if position_side == "short":
         rules = _extract_short_momentum_exit_rules(binding)
         active_return = _active_position_return(position, position_side)
@@ -669,6 +767,9 @@ def _long_entry_confirmed(runtime: TraderRuntime, signal: CandidateSignal) -> bo
     if signal.strategy_id != StrategyId.VOL_BREAKOUT or signal.side != OrderSide.BUY:
         runtime.long_entry_confirmations.pop(signal.symbol, None)
         return True
+    if signal.symbol in runtime.vol_breakout_signal_candles:
+        runtime.long_entry_confirmations.pop(signal.symbol, None)
+        return True
     confirmations = runtime.long_entry_confirmations.get(signal.symbol, 0) + 1
     runtime.long_entry_confirmations[signal.symbol] = confirmations
     return confirmations >= _LONG_ENTRY_CONFIRMATION_TICKS
@@ -695,6 +796,32 @@ def _start_open_execution_failure_cooldown(runtime: TraderRuntime, signal: Candi
     return cooldown_until.isoformat()
 
 
+def _is_post_close_entry_cooling_down(runtime: TraderRuntime, symbol: str) -> bool:
+    cooldown_until = runtime.post_close_entry_cooldowns.get(symbol)
+    if cooldown_until is None:
+        return False
+    if datetime.now(UTC) < cooldown_until:
+        return True
+    runtime.post_close_entry_cooldowns.pop(symbol, None)
+    return False
+
+
+def _start_post_close_entry_cooldown(runtime: TraderRuntime, symbol: str) -> str:
+    cooldown_until = datetime.now(UTC) + _POST_CLOSE_ENTRY_COOLDOWN
+    runtime.post_close_entry_cooldowns[symbol] = cooldown_until
+    runtime.pending_reverse_signals.pop(symbol, None)
+    runtime.long_entry_confirmations.pop(symbol, None)
+    runtime.history_store.append_risk_event(
+        {
+            "event_type": "post_close_entry_cooldown_started",
+            "symbol": symbol,
+            "detail": "position closed flat; suppressing immediate re-entry",
+            "cooldown_until": cooldown_until.isoformat(),
+        }
+    )
+    return cooldown_until.isoformat()
+
+
 def _format_execution_error(exc: Exception) -> str:
     if not isinstance(exc, OkxBusinessError):
         return str(exc)
@@ -704,6 +831,181 @@ def _format_execution_error(exc: Exception) -> str:
         "payload": exc.payload,
     }
     return str(detail)
+
+
+def _normalize_okx_candle(row: dict[str, object]) -> dict[str, object]:
+    timestamp = row.get("ts")
+    if not isinstance(timestamp, str) or not timestamp.strip():
+        raise ValueError("OKX candle timestamp is missing")
+    return {
+        "timestamp": datetime.fromtimestamp(int(timestamp) / 1000, tz=UTC),
+        "open": float(row["open"]),
+        "high": float(row["high"]),
+        "low": float(row["low"]),
+        "close": float(row["close"]),
+    }
+
+
+def _fixed_vol_breakout_rows_limit(parameters: FixedVolBreakoutParameters) -> int:
+    warmup = max(parameters.ema_period, parameters.atr_period + 1)
+    return min(max(warmup + 3, 120), 300)
+
+
+def _fixed_vol_breakout_cache_key(symbol: str, parameters: FixedVolBreakoutParameters) -> str:
+    return (
+        f"{symbol}:{parameters.bar}:limit={_fixed_vol_breakout_rows_limit(parameters)}:"
+        f"atr={parameters.atr_period}:ema={parameters.ema_period}"
+    )
+
+
+def _fixed_vol_breakout_cache_ttl(parameters: FixedVolBreakoutParameters) -> timedelta:
+    bar_duration = _extract_bar_duration(parameters.bar)
+    return min(max(bar_duration / 20, timedelta(minutes=1)), timedelta(minutes=15))
+
+
+def _fixed_vol_breakout_failure_cooldown(parameters: FixedVolBreakoutParameters) -> timedelta:
+    bar_duration = _extract_bar_duration(parameters.bar)
+    return min(max(bar_duration / 10, timedelta(minutes=5)), timedelta(minutes=15))
+
+
+async def _fetch_fixed_vol_breakout_rows(
+    runtime: TraderRuntime,
+    *,
+    symbol: str,
+    parameters: FixedVolBreakoutParameters,
+) -> list[dict[str, object]]:
+    limit = _fixed_vol_breakout_rows_limit(parameters)
+    rows_by_timestamp: dict[datetime, dict[str, object]] = {}
+    after: str | None = None
+    remaining = limit
+    while remaining > 0:
+        request_limit = min(100, remaining)
+        batch = await runtime.components.okx_rest_client.fetch_history_candles(
+            symbol,
+            bar=parameters.bar,
+            after=after,
+            limit=request_limit,
+        )
+        if not batch:
+            break
+        for item in batch:
+            row = _normalize_okx_candle(item)
+            rows_by_timestamp[row["timestamp"]] = row
+        remaining = limit - len(rows_by_timestamp)
+        oldest_ts = min(str(item["ts"]) for item in batch if "ts" in item)
+        if after == oldest_ts or len(batch) < request_limit:
+            break
+        after = oldest_ts
+    return [rows_by_timestamp[key] for key in sorted(rows_by_timestamp)]
+
+
+async def _get_fixed_vol_breakout_rows(
+    runtime: TraderRuntime,
+    *,
+    symbol: str,
+    parameters: FixedVolBreakoutParameters,
+    failure_detail_prefix: str,
+) -> list[dict[str, object]] | None:
+    now = datetime.now(UTC)
+    cache_key = _fixed_vol_breakout_cache_key(symbol, parameters)
+    cached = runtime.vol_breakout_rows_cache.get(cache_key)
+    if cached is not None:
+        expires_at, rows = cached
+        if now < expires_at:
+            return rows
+        runtime.vol_breakout_rows_cache.pop(cache_key, None)
+
+    failure_cooldown_until = runtime.vol_breakout_history_fetch_cooldowns.get(cache_key)
+    if failure_cooldown_until is not None:
+        if now < failure_cooldown_until:
+            return None
+        runtime.vol_breakout_history_fetch_cooldowns.pop(cache_key, None)
+
+    try:
+        rows = await _fetch_fixed_vol_breakout_rows(runtime, symbol=symbol, parameters=parameters)
+    except Exception as exc:
+        cooldown_until = now + _fixed_vol_breakout_failure_cooldown(parameters)
+        runtime.vol_breakout_history_fetch_cooldowns[cache_key] = cooldown_until
+        runtime.history_store.append_risk_event(
+            {
+                "event_type": "signal_blocked",
+                "symbol": symbol,
+                "detail": f"{failure_detail_prefix}: {_format_execution_error(exc)}",
+                "strategy_id": StrategyId.VOL_BREAKOUT.value,
+                "cooldown_until": cooldown_until.isoformat(),
+            }
+        )
+        return None
+
+    runtime.vol_breakout_rows_cache[cache_key] = (now + _fixed_vol_breakout_cache_ttl(parameters), rows)
+    return rows
+
+
+def _ema(values: list[float], period: int) -> list[float]:
+    alpha = 2 / (period + 1)
+    output = [values[0]]
+    for value in values[1:]:
+        output.append(alpha * value + (1 - alpha) * output[-1])
+    return output
+
+
+def _atr(*, highs: list[float], lows: list[float], closes: list[float], period: int) -> list[float]:
+    true_ranges: list[float] = []
+    previous_close: float | None = None
+    for high, low, close in zip(highs, lows, closes, strict=True):
+        true_range = high - low if previous_close is None else max(
+            high - low,
+            abs(high - previous_close),
+            abs(low - previous_close),
+        )
+        true_ranges.append(true_range)
+        previous_close = close
+    return _ema(true_ranges, period)
+
+
+async def _fixed_vol_breakout_signals(runtime: TraderRuntime, symbol: str) -> list[CandidateSignal] | None:
+    binding = runtime.startup_snapshot.strategy_binding_for(symbol, StrategyId.VOL_BREAKOUT.value)
+    parameters = _parse_fixed_vol_breakout_parameters(binding)
+    if parameters is None:
+        return None
+    rows = await _get_fixed_vol_breakout_rows(
+        runtime,
+        symbol=symbol,
+        parameters=parameters,
+        failure_detail_prefix="fixed_vol_breakout_history_fetch_failed",
+    )
+    if rows is None:
+        return []
+    warmup = max(parameters.ema_period, parameters.atr_period + 1)
+    if len(rows) <= warmup:
+        return []
+    closes = [float(row["close"]) for row in rows]
+    highs = [float(row["high"]) for row in rows]
+    lows = [float(row["low"]) for row in rows]
+    ema_values = _ema(closes, parameters.ema_period)
+    atr_values = _atr(highs=highs, lows=lows, closes=closes, period=parameters.atr_period)
+    index = len(rows) - 1
+    candle_key = str(rows[index]["timestamp"])
+    runtime.vol_breakout_signal_candles[symbol] = candle_key
+    if runtime.vol_breakout_entry_candles.get(symbol) == candle_key:
+        return []
+    close = closes[index]
+    breakout_level = closes[index - 1] + parameters.k * atr_values[index - 1]
+    if close <= ema_values[index] or close <= breakout_level:
+        return []
+    return [
+        CandidateSignal(
+            symbol=symbol,
+            strategy_id=StrategyId.VOL_BREAKOUT,
+            side=OrderSide.BUY,
+            entry_type=EntryType.MARKET,
+            urgency=SignalUrgency.HIGH,
+            confidence=0.7,
+            max_hold_ms=3000,
+            cancel_after_ms=750,
+            risk_tag="vol_breakout",
+        )
+    ]
 
 
 async def _submit_signal_open(runtime: TraderRuntime, signal: CandidateSignal) -> bool:
@@ -800,6 +1102,10 @@ async def _submit_signal_open(runtime: TraderRuntime, signal: CandidateSignal) -
         },
     )
     runtime.long_entry_confirmations.pop(signal.symbol, None)
+    if signal.strategy_id == StrategyId.VOL_BREAKOUT:
+        candle_key = runtime.vol_breakout_signal_candles.get(signal.symbol)
+        if candle_key is not None:
+            runtime.vol_breakout_entry_candles[signal.symbol] = candle_key
     return True
 
 
@@ -830,11 +1136,12 @@ def _margin_adjusted_open_order_size(
     margin_per_contract = mark_price * contract_value / max_leverage
     if margin_per_contract <= 0.0:
         return requested_size, None
-    max_affordable_size = (
-        account_state.available_balance * _MARGIN_USAGE_BUFFER / margin_per_contract
-    )
+    target_margin_budget = max(account_state.equity, runtime.starting_nav) * _PORTFOLIO_MARGIN_FRACTION_PER_SYMBOL
+    target_notional = target_margin_budget * max_leverage
+    target_size = target_notional / (mark_price * contract_value)
+    max_affordable_size = account_state.available_balance * _MARGIN_USAGE_BUFFER / margin_per_contract
     lot_size = _LOT_SIZE_BY_SYMBOL.get(symbol, 0.01)
-    adjusted_size = _floor_to_lot_size(min(requested_size, max_affordable_size), lot_size)
+    adjusted_size = _floor_to_lot_size(min(requested_size, target_size, max_affordable_size), lot_size)
     if adjusted_size < 1.0:
         return 0.0, "insufficient_available_margin"
     return adjusted_size, None
@@ -1006,6 +1313,7 @@ def _sync_position_entry_context(runtime: TraderRuntime, event: PositionUpdateEv
         runtime.pending_position_actions.pop(event.symbol, None)
     elif pending_action == "close" and event.net_quantity == 0.0:
         runtime.pending_position_actions.pop(event.symbol, None)
+        _start_post_close_entry_cooldown(runtime, event.symbol)
     if event.net_quantity == 0.0:
         runtime.position_entry_contexts.pop(event.symbol, None)
         return
@@ -1208,7 +1516,11 @@ async def _evaluate_symbol(runtime: TraderRuntime, symbol: str) -> None:
     if runtime.startup_snapshot.version_id == "bootstrap":
         return
     snapshot = runtime.components.state_engine.snapshot(symbol)
-    signals = _enabled_candidate_signals(build_candidate_signals(snapshot), runtime.startup_snapshot)
+    fixed_vol_signals = await _fixed_vol_breakout_signals(runtime, symbol)
+    if fixed_vol_signals is None:
+        signals = _enabled_candidate_signals(build_candidate_signals(snapshot), runtime.startup_snapshot)
+    else:
+        signals = fixed_vol_signals
     open_orders = runtime.components.state_engine.open_orders_by_symbol.get(symbol, {})
     position = runtime.components.state_engine.positions_by_symbol.get(symbol)
     position_quantity = position.net_quantity if position is not None else 0.0
@@ -1217,6 +1529,10 @@ async def _evaluate_symbol(runtime: TraderRuntime, symbol: str) -> None:
     if symbol in runtime.pending_position_actions:
         return
     has_exposure = has_open_orders or position_quantity != 0.0
+    if not has_exposure and _is_post_close_entry_cooling_down(runtime, symbol):
+        runtime.pending_reverse_signals.pop(symbol, None)
+        runtime.long_entry_confirmations.pop(symbol, None)
+        return
     pending_reverse_signal = runtime.pending_reverse_signals.get(symbol)
     if pending_reverse_signal is not None:
         if has_exposure:
@@ -1236,7 +1552,7 @@ async def _evaluate_symbol(runtime: TraderRuntime, symbol: str) -> None:
             runtime.pending_reverse_signals.pop(symbol, None)
         return
     if position is not None and position_quantity != 0.0 and not has_open_orders:
-        exit_reason = _position_exit_reason(runtime, symbol, position)
+        exit_reason = await _position_exit_reason(runtime, symbol, position)
         if exit_reason is not None:
             await _submit_position_close(
                 runtime,

@@ -10,3 +10,8 @@ build/
 # Local runtime/editor state
 .xuanshu-state/
 .vscode/
+
+# Local research/backtest scratch artifacts
+ops/leveraged_long_backtest.py
+ops/long_strategy_research.py
+reports/

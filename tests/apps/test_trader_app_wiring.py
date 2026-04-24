@@ -43,6 +43,9 @@ class _FakeRestClient:
         self.placed_orders: list[tuple[dict[str, str], str]] = []
         self.open_orders_calls: list[tuple[str, str]] = []
         self.positions_calls: list[tuple[str, str]] = []
+        self.history_candles: list[dict[str, object]] = []
+        self.history_candle_calls: list[dict[str, object]] = []
+        self.history_error: Exception | None = None
 
     async def place_order(self, payload: dict[str, str], timestamp: str) -> list[dict[str, object]]:
         self.placed_orders.append((payload, timestamp))
@@ -55,6 +58,28 @@ class _FakeRestClient:
     async def fetch_positions(self, symbol: str, timestamp: str) -> list[dict[str, object]]:
         self.positions_calls.append((symbol, timestamp))
         return []
+
+    async def fetch_history_candles(
+        self,
+        symbol: str,
+        *,
+        bar: str = "1H",
+        after: str | None = None,
+        before: str | None = None,
+        limit: int = 100,
+    ) -> list[dict[str, object]]:
+        self.history_candle_calls.append(
+            {"symbol": symbol, "bar": bar, "after": after, "before": before, "limit": limit}
+        )
+        if self.history_error is not None:
+            raise self.history_error
+        if after is None:
+            return self.history_candles[:limit]
+        timestamps = [str(item["ts"]) for item in self.history_candles]
+        if after not in timestamps:
+            return []
+        start = timestamps.index(after) + 1
+        return self.history_candles[start : start + limit]
 
     async def aclose(self) -> None:
         return None
@@ -2392,7 +2417,172 @@ def test_trader_runtime_submits_short_momentum_sell_order(monkeypatch) -> None:
     )
 
 
-def test_trader_runtime_closes_long_before_short_momentum_open(monkeypatch) -> None:
+def _okx_candles(closes: list[float]) -> list[dict[str, object]]:
+    start = datetime(2026, 1, 1, tzinfo=UTC)
+    return [
+        {
+            "ts": str(int((start.timestamp() + index * 86_400) * 1000)),
+            "open": str(close - 0.2),
+            "high": str(close + 1.0),
+            "low": str(close - 1.0),
+            "close": str(close),
+        }
+        for index, close in enumerate(closes)
+    ]
+
+
+def _fixed_vol_snapshot(runtime: trader_app.TraderRuntime, *, strategy_def_id: str):
+    return runtime.startup_snapshot.model_copy(
+        update={
+            "version_id": "snap-live",
+            "market_mode": RunMode.NORMAL,
+            "approval_state": ApprovalState.APPROVED,
+            "strategy_enable_flags": {"vol_breakout": True, "short_momentum": False, "risk_pause": True},
+            "symbol_strategy_bindings": {
+                "BTC-USDT-SWAP": trader_app.ApprovedStrategyBinding(
+                    strategy_def_id=strategy_def_id,
+                    strategy_package_id=f"fixed-{strategy_def_id}",
+                    backtest_report_id="bt-fixed-vol",
+                    score=338.7,
+                    score_basis="backtest_return_percent",
+                    approval_record_id=f"fixed-{strategy_def_id}",
+                    activated_at=datetime.now(UTC),
+                )
+            },
+        }
+    )
+
+
+def test_trader_runtime_uses_fixed_vol_breakout_candles_for_live_open(monkeypatch) -> None:
+    _set_required_settings_env(monkeypatch)
+    fake_rest = _FakeRestClient()
+    fake_rest.history_candles = _okx_candles([100.0, 100.1, 100.0, 100.2, 100.1, 100.0, 100.2, 100.1, 100.0, 103.0])
+    runtime = trader_app.build_trader_runtime()
+    runtime.components = trader_app.TraderComponents(
+        state_engine=runtime.components.state_engine,
+        risk_kernel=runtime.components.risk_kernel,
+        checkpoint_service=runtime.components.checkpoint_service,
+        okx_rest_client=fake_rest,
+        okx_public_stream=runtime.components.okx_public_stream,
+        okx_private_stream=runtime.components.okx_private_stream,
+        client_order_id_builder=runtime.components.client_order_id_builder,
+    )
+    runtime.execution_coordinator = trader_app.ExecutionCoordinator(rest_client=fake_rest)
+    runtime.startup_snapshot = _fixed_vol_snapshot(
+        runtime,
+        strategy_def_id="vol-breakout-btc-usdt-swap-1d-k09-ta15-h48-atr2-ema3",
+    )
+    runtime.current_mode = RunMode.NORMAL
+    runtime.components.state_engine.set_run_mode(RunMode.NORMAL)
+
+    asyncio.run(trader_app._evaluate_symbol(runtime, "BTC-USDT-SWAP"))
+
+    assert len(fake_rest.placed_orders) == 1
+    assert fake_rest.placed_orders[0][0]["side"] == "buy"
+    assert fake_rest.history_candle_calls[0]["bar"] == "1D"
+    assert runtime.vol_breakout_entry_candles["BTC-USDT-SWAP"] == runtime.vol_breakout_signal_candles["BTC-USDT-SWAP"]
+
+
+def test_trader_runtime_does_not_fallback_to_realtime_signal_when_fixed_vol_breakout_does_not_trigger(
+    monkeypatch,
+) -> None:
+    _set_required_settings_env(monkeypatch)
+    fake_rest = _FakeRestClient()
+    fake_rest.history_candles = _okx_candles([100.0, 100.1, 100.0, 100.2, 100.1, 100.0, 100.2, 100.1, 100.0, 100.2])
+    runtime = trader_app.build_trader_runtime()
+    runtime.components = trader_app.TraderComponents(
+        state_engine=runtime.components.state_engine,
+        risk_kernel=runtime.components.risk_kernel,
+        checkpoint_service=runtime.components.checkpoint_service,
+        okx_rest_client=fake_rest,
+        okx_public_stream=runtime.components.okx_public_stream,
+        okx_private_stream=runtime.components.okx_private_stream,
+        client_order_id_builder=runtime.components.client_order_id_builder,
+    )
+    runtime.execution_coordinator = trader_app.ExecutionCoordinator(rest_client=fake_rest)
+    runtime.startup_snapshot = _fixed_vol_snapshot(
+        runtime,
+        strategy_def_id="vol-breakout-btc-usdt-swap-1d-k09-ta15-h48-atr2-ema3",
+    )
+    runtime.current_mode = RunMode.NORMAL
+    runtime.components.state_engine.set_run_mode(RunMode.NORMAL)
+    runtime.components.state_engine.on_bbo("BTC-USDT-SWAP", bid=100.0, ask=100.2)
+    runtime.components.state_engine.on_trade("BTC-USDT-SWAP", price=100.3, size=5.0, side="buy")
+    runtime.components.state_engine.on_trade("BTC-USDT-SWAP", price=100.4, size=5.0, side="buy")
+
+    asyncio.run(trader_app._evaluate_symbol(runtime, "BTC-USDT-SWAP"))
+
+    assert fake_rest.placed_orders == []
+    assert fake_rest.history_candle_calls
+
+
+def test_trader_runtime_reuses_fixed_vol_breakout_history_cache(monkeypatch) -> None:
+    _set_required_settings_env(monkeypatch)
+    fake_rest = _FakeRestClient()
+    fake_rest.history_candles = _okx_candles([100.0, 100.1, 100.0, 100.2, 100.1, 100.0, 100.2, 100.1, 100.0, 100.2])
+    runtime = trader_app.build_trader_runtime()
+    runtime.components = trader_app.TraderComponents(
+        state_engine=runtime.components.state_engine,
+        risk_kernel=runtime.components.risk_kernel,
+        checkpoint_service=runtime.components.checkpoint_service,
+        okx_rest_client=fake_rest,
+        okx_public_stream=runtime.components.okx_public_stream,
+        okx_private_stream=runtime.components.okx_private_stream,
+        client_order_id_builder=runtime.components.client_order_id_builder,
+    )
+    runtime.execution_coordinator = trader_app.ExecutionCoordinator(rest_client=fake_rest)
+    runtime.startup_snapshot = _fixed_vol_snapshot(
+        runtime,
+        strategy_def_id="vol-breakout-btc-usdt-swap-1d-k09-ta15-h48-atr2-ema3",
+    )
+    runtime.current_mode = RunMode.NORMAL
+    runtime.components.state_engine.set_run_mode(RunMode.NORMAL)
+
+    asyncio.run(trader_app._evaluate_symbol(runtime, "BTC-USDT-SWAP"))
+    asyncio.run(trader_app._evaluate_symbol(runtime, "BTC-USDT-SWAP"))
+
+    assert len(fake_rest.history_candle_calls) == 1
+    assert fake_rest.placed_orders == []
+
+
+def test_trader_runtime_backs_off_fixed_vol_breakout_history_failures(monkeypatch) -> None:
+    _set_required_settings_env(monkeypatch)
+    fake_rest = _FakeRestClient()
+    fake_rest.history_error = RuntimeError("429 Too Many Requests")
+    runtime = trader_app.build_trader_runtime()
+    runtime.components = trader_app.TraderComponents(
+        state_engine=runtime.components.state_engine,
+        risk_kernel=runtime.components.risk_kernel,
+        checkpoint_service=runtime.components.checkpoint_service,
+        okx_rest_client=fake_rest,
+        okx_public_stream=runtime.components.okx_public_stream,
+        okx_private_stream=runtime.components.okx_private_stream,
+        client_order_id_builder=runtime.components.client_order_id_builder,
+    )
+    runtime.execution_coordinator = trader_app.ExecutionCoordinator(rest_client=fake_rest)
+    runtime.startup_snapshot = _fixed_vol_snapshot(
+        runtime,
+        strategy_def_id="vol-breakout-btc-usdt-swap-1d-k09-ta15-h48-atr2-ema3",
+    )
+    runtime.current_mode = RunMode.NORMAL
+    runtime.components.state_engine.set_run_mode(RunMode.NORMAL)
+
+    asyncio.run(trader_app._evaluate_symbol(runtime, "BTC-USDT-SWAP"))
+    asyncio.run(trader_app._evaluate_symbol(runtime, "BTC-USDT-SWAP"))
+
+    assert len(fake_rest.history_candle_calls) == 1
+    assert runtime.history_store.written_rows["risk_events"] == [
+        {
+            "event_type": "signal_blocked",
+            "symbol": "BTC-USDT-SWAP",
+            "detail": "fixed_vol_breakout_history_fetch_failed: 429 Too Many Requests",
+            "strategy_id": "vol_breakout",
+            "cooldown_until": runtime.history_store.written_rows["risk_events"][0]["cooldown_until"],
+        }
+    ]
+
+
+def test_trader_runtime_cools_down_after_closing_long_before_short_momentum_open(monkeypatch) -> None:
     _set_required_settings_env(monkeypatch)
     fake_redis = _FakeRedis()
     fake_rest = _FakeRestClient()
@@ -2512,17 +2702,15 @@ def test_trader_runtime_closes_long_before_short_momentum_open(monkeypatch) -> N
 
     asyncio.run(_exercise_runtime())
 
-    assert len(fake_rest.placed_orders) == 2
+    assert len(fake_rest.placed_orders) == 1
     assert fake_rest.placed_orders[0][0]["side"] == "sell"
     assert fake_rest.placed_orders[0][0]["posSide"] == "long"
     assert fake_rest.placed_orders[0][0]["reduceOnly"] == "true"
-    assert fake_rest.placed_orders[1][0]["side"] == "sell"
-    assert fake_rest.placed_orders[1][0]["posSide"] == "short"
-    assert "reduceOnly" not in fake_rest.placed_orders[1][0]
-    assert runtime.history_store.written_rows["orders"][-2]["intent"] == "close"
-    assert runtime.history_store.written_rows["orders"][-2]["strategy_id"] == "short_momentum"
-    assert runtime.history_store.written_rows["orders"][-1]["intent"] == "open"
+    assert runtime.history_store.written_rows["orders"][-1]["intent"] == "close"
     assert runtime.history_store.written_rows["orders"][-1]["strategy_id"] == "short_momentum"
+    assert runtime.pending_reverse_signals == {}
+    assert "BTC-USDT-SWAP" in runtime.post_close_entry_cooldowns
+    assert runtime.history_store.written_rows["risk_events"][-1]["event_type"] == "post_close_entry_cooldown_started"
 
 
 def test_trader_runtime_does_not_treat_existing_short_as_long_reversal(monkeypatch) -> None:
