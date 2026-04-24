@@ -38,6 +38,7 @@ TELEGRAM_BOT_COMMANDS: tuple[TelegramBotCommand, ...] = (
     TelegramBotCommand(command="status", description="查看服务、策略、权益和持仓摘要"),
     TelegramBotCommand(command="mode", description="查看当前运行模式"),
     TelegramBotCommand(command="market", description="查看行情摘要"),
+    TelegramBotCommand(command="entrygap", description="查看行情距离开仓条件的差距"),
     TelegramBotCommand(command="positions", description="查看当前运行态持仓"),
     TelegramBotCommand(command="orders", description="查看最近订单"),
     TelegramBotCommand(command="risk", description="查看最近风控事件"),
@@ -149,6 +150,11 @@ class SnapshotReader(Protocol):
         ...
 
 
+class EntryGapProvider(Protocol):
+    async def render(self, *, snapshot: object | None, symbols: tuple[str, ...]) -> str:
+        ...
+
+
 class NotificationHistoryStore(Protocol):
     def append_risk_event(self, payload: dict[str, object]) -> None:
         ...
@@ -171,11 +177,15 @@ class NotifierService:
         runtime_store: RuntimeStateReader,
         snapshot_store: SnapshotReader,
         history_store: NotificationHistoryStore,
+        entry_gap_provider: EntryGapProvider | None = None,
+        fixed_strategy_snapshot: object | None = None,
     ) -> None:
         self._okx_symbols = okx_symbols
         self._runtime_store = runtime_store
         self._snapshot_store = snapshot_store
         self._history_store = history_store
+        self._entry_gap_provider = entry_gap_provider
+        self._fixed_strategy_snapshot = fixed_strategy_snapshot
 
     def telegram_bot_commands(self) -> list[TelegramBotCommand]:
         return list(TELEGRAM_BOT_COMMANDS)
@@ -190,6 +200,8 @@ class NotifierService:
             return render_text_message(self._render_mode())
         if command == "/market":
             return render_text_message(self._render_market())
+        if command in {"/entrygap", "/entry_gap", "/gap"}:
+            return render_text_message(await self._render_entry_gap())
         if command in {"/positions", "/position"}:
             return render_text_message(self._render_positions())
         if command == "/orders":
@@ -301,6 +313,7 @@ class NotifierService:
                 "/orders - 查看最近订单",
                 "/risk - 查看最近风控事件",
                 "/market - 查看行情摘要",
+                "/entrygap - 查看当前行情距离开仓条件的差距",
                 "/pause [reason] - 暂停交易并切换为 halted",
                 "/start [reason] - 请求恢复交易到 normal",
                 "/capital <amount> [reason] - 调整当前策略总金额",
@@ -424,7 +437,7 @@ class NotifierService:
 
     def _render_status(self) -> str:
         mode = self._render_mode()
-        snapshot = self._snapshot_store.get_latest_snapshot()
+        snapshot = self._latest_strategy_snapshot()
         checkpoint = self._latest_checkpoint()
         snapshot_version = getattr(snapshot, "version_id", None) or checkpoint.get("active_snapshot_version", "none")
         faults = self._runtime_store.get_fault_flags() or {}
@@ -455,6 +468,17 @@ class NotifierService:
         if not lines:
             return "行情：暂无运行摘要"
         return "\n".join(lines)
+
+    async def _render_entry_gap(self) -> str:
+        if self._entry_gap_provider is None:
+            return "开仓差距：当前通知服务未配置行情计算器"
+        return await self._entry_gap_provider.render(
+            snapshot=self._latest_strategy_snapshot(),
+            symbols=self._okx_symbols,
+        )
+
+    def _latest_strategy_snapshot(self) -> object | None:
+        return self._fixed_strategy_snapshot or self._snapshot_store.get_latest_snapshot()
 
     def _render_positions(self) -> str:
         runtime_lines = []

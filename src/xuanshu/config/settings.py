@@ -143,6 +143,7 @@ class TraderRuntimeSettings(_XuanshuBaseSettings):
 
 class NotifierRuntimeSettings(_XuanshuBaseSettings):
     okx_symbols: tuple[str, ...] = Field(default=("BTC-USDT-SWAP", "ETH-USDT-SWAP"), min_length=1)
+    fixed_strategy_snapshot_path: str | None = Field(default=None)
     telegram_bot_token: SecretStr = Field(validation_alias="TELEGRAM_BOT_TOKEN")
     telegram_chat_id: str = Field(min_length=1, validation_alias="TELEGRAM_CHAT_ID")
     redis_url: RedisDsn = Field(default="redis://redis:6379/0", validation_alias="REDIS_URL")

@@ -1,9 +1,13 @@
 import pytest
 from pydantic import SecretStr
+from datetime import UTC, datetime, timedelta
 
+from xuanshu.contracts.strategy import ApprovedStrategyBinding, StrategyConfigSnapshot
+from xuanshu.core.enums import ApprovalState
 from xuanshu.core.enums import RunMode
 from xuanshu.infra.storage.postgres_store import PostgresRuntimeStore
 from xuanshu.infra.notifier.telegram import TelegramBotCommand, TelegramNotifier, TextMessagePayload, render_text_message
+from xuanshu.notifier.entry_gap import EntryGapReporter
 from xuanshu.notifier.service import NotifierService, format_mode_change
 
 
@@ -80,6 +84,15 @@ class _SnapshotStore:
         return _Snapshot()
 
 
+class _EntryGapProvider:
+    def __init__(self) -> None:
+        self.calls: list[tuple[object | None, tuple[str, ...]]] = []
+
+    async def render(self, *, snapshot: object | None, symbols: tuple[str, ...]) -> str:
+        self.calls.append((snapshot, symbols))
+        return "开仓条件差距：BTC-USDT-SWAP 还差 5.0%"
+
+
 @pytest.mark.asyncio
 async def test_notifier_service_renders_status_and_market_queries_from_runtime_state() -> None:
     history = PostgresRuntimeStore(dsn="postgresql://xuanshu:xuanshu@localhost:5432/xuanshu")
@@ -131,6 +144,91 @@ async def test_notifier_service_renders_status_and_market_queries_from_runtime_s
 
 
 @pytest.mark.asyncio
+async def test_notifier_service_renders_entry_gap_command() -> None:
+    provider = _EntryGapProvider()
+    service = NotifierService(
+        okx_symbols=("BTC-USDT-SWAP",),
+        runtime_store=_RuntimeStore(),
+        snapshot_store=_SnapshotStore(),
+        history_store=PostgresRuntimeStore(dsn="postgresql://xuanshu:xuanshu@localhost:5432/xuanshu"),
+        entry_gap_provider=provider,
+    )
+
+    payload = await service.handle_command("/entrygap")
+
+    assert payload.text == "开仓条件差距：BTC-USDT-SWAP 还差 5.0%"
+    assert provider.calls[0][1] == ("BTC-USDT-SWAP",)
+    assert getattr(provider.calls[0][0], "version_id") == "snap-live"
+
+
+@pytest.mark.asyncio
+async def test_entry_gap_reporter_calculates_vol_breakout_distance() -> None:
+    class _FakeOkxRestClient:
+        def __init__(self) -> None:
+            start_ts = int(datetime(2026, 1, 1, tzinfo=UTC).timestamp() * 1000)
+            self.rows = [
+                {
+                    "ts": str(start_ts + index * 86_400_000),
+                    "open": "100",
+                    "high": "101",
+                    "low": "99",
+                    "close": "100",
+                }
+                for index in range(119)
+            ]
+            self.rows.append(
+                {
+                    "ts": str(start_ts + 119 * 86_400_000),
+                    "open": "100",
+                    "high": "104",
+                    "low": "99",
+                    "close": "103",
+                }
+            )
+
+        async def fetch_history_candles(self, symbol, *, bar="1H", after=None, before=None, limit=100):
+            return self.rows[:limit] if after is None else self.rows[100 : 100 + limit]
+
+    now = datetime.now(UTC)
+    snapshot = StrategyConfigSnapshot(
+        version_id="fixed-test",
+        generated_at=now,
+        effective_from=now - timedelta(minutes=1),
+        expires_at=now + timedelta(days=1),
+        symbol_whitelist=["BTC-USDT-SWAP"],
+        strategy_enable_flags={"vol_breakout": True},
+        risk_multiplier=0.25,
+        per_symbol_max_position=0.12,
+        max_leverage=3,
+        market_mode=RunMode.NORMAL,
+        approval_state=ApprovalState.APPROVED,
+        source_reason="test",
+        ttl_sec=86_400,
+        symbol_strategy_bindings={
+            "BTC-USDT-SWAP": ApprovedStrategyBinding(
+                strategy_def_id="vol-breakout-btc-usdt-swap-1d-k1-ta15-h48-atr2-ema3",
+                strategy_package_id="fixed-vol-breakout-btc-usdt-swap-1d-k1-ta15-h48-atr2-ema3",
+                backtest_report_id="bt-vol-breakout-btc",
+                score=1.0,
+                score_basis="backtest_return_percent",
+                approval_record_id="approval",
+                activated_at=now,
+            )
+        },
+    )
+    reporter = EntryGapReporter(_FakeOkxRestClient())
+
+    text = await reporter.render(snapshot=snapshot, symbols=("BTC-USDT-SWAP",))
+
+    assert "开仓条件差距：" in text
+    assert "BTC-USDT-SWAP: close=103.00" in text
+    assert "EMA3=" in text
+    assert "突破价=102.00（已满足）" in text
+    assert "还差=0.00 / 0.00%" in text
+    assert "公式=前收 100.00 + k1 * ATR2 2.00" in text
+
+
+@pytest.mark.asyncio
 async def test_notifier_service_returns_chinese_help_for_english_commands() -> None:
     service = NotifierService(
         okx_symbols=("BTC-USDT-SWAP",),
@@ -145,6 +243,7 @@ async def test_notifier_service_returns_chinese_help_for_english_commands() -> N
     assert "/pause [reason] - 暂停交易并切换为 halted" in payload.text
     assert "/start [reason] - 请求恢复交易到 normal" in payload.text
     assert "/capital <amount> [reason] - 调整当前策略总金额" in payload.text
+    assert "/entrygap - 查看当前行情距离开仓条件的差距" in payload.text
     assert "/budget" not in payload.text
 
 
@@ -159,6 +258,7 @@ def test_notifier_service_exposes_telegram_bot_commands() -> None:
     commands = service.telegram_bot_commands()
 
     assert TelegramBotCommand(command="status", description="查看服务、策略、权益和持仓摘要") in commands
+    assert TelegramBotCommand(command="entrygap", description="查看行情距离开仓条件的差距") in commands
     assert TelegramBotCommand(command="takeover", description="请求人工接管到保守模式") in commands
     assert all(command.command == command.command.lower() for command in commands)
     assert all(not command.command.startswith("/") for command in commands)

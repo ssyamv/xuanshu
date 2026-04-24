@@ -10,6 +10,7 @@ from xuanshu.infra.notifier.telegram import TelegramBotCommand, TelegramInboundM
 from xuanshu.ops.runtime_logging import configure_runtime_logger
 from xuanshu.infra.storage.postgres_store import PostgresRuntimeStore
 from xuanshu.infra.storage.redis_store import RedisRuntimeStateStore, RedisSnapshotStore
+from xuanshu.notifier.entry_gap import build_entry_gap_reporter, load_fixed_strategy_snapshot
 from xuanshu.notifier.service import NotifierService
 
 _LOGGER = configure_runtime_logger("xuanshu.notifier")
@@ -76,6 +77,8 @@ def build_notifier_service(
         runtime_store=runtime_store,
         snapshot_store=snapshot_store,
         history_store=history_store,
+        entry_gap_provider=build_entry_gap_reporter(),
+        fixed_strategy_snapshot=load_fixed_strategy_snapshot(settings.fixed_strategy_snapshot_path),
     )
 
 
