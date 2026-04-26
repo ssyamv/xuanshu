@@ -15,12 +15,6 @@ _MODE_LABELS: dict[RunMode, str] = {
     RunMode.REDUCE_ONLY: "只减仓",
     RunMode.HALTED: "停止运行",
 }
-_RUN_MODE_PRIORITY: dict[RunMode, int] = {
-    RunMode.NORMAL: 0,
-    RunMode.DEGRADED: 1,
-    RunMode.REDUCE_ONLY: 2,
-    RunMode.HALTED: 3,
-}
 _RETRY_PRIORITY: dict[NotificationSeverity, int] = {
     "CRITICAL": 0,
     "WARN": 1,
@@ -38,18 +32,12 @@ _PROACTIVE_CATEGORY_PRIORITY: dict[str, int] = {
 TELEGRAM_BOT_COMMANDS: tuple[TelegramBotCommand, ...] = (
     TelegramBotCommand(command="help", description="查看支持的命令"),
     TelegramBotCommand(command="status", description="查看服务、策略、权益和持仓摘要"),
-    TelegramBotCommand(command="mode", description="查看当前运行模式"),
-    TelegramBotCommand(command="market", description="查看行情摘要"),
     TelegramBotCommand(command="entrygap", description="查看行情距离开仓条件的差距"),
-    TelegramBotCommand(command="positions", description="查看当前运行态持仓"),
     TelegramBotCommand(command="orders", description="查看最近订单"),
     TelegramBotCommand(command="risk", description="查看最近风控事件"),
     TelegramBotCommand(command="pause", description="暂停交易，可附原因"),
     TelegramBotCommand(command="start", description="请求恢复交易到 normal，可附原因"),
     TelegramBotCommand(command="resume", description="同 start，请求恢复交易"),
-    TelegramBotCommand(command="takeover", description="请求人工接管到保守模式"),
-    TelegramBotCommand(command="release", description="请求人工解除到 degraded"),
-    TelegramBotCommand(command="capital", description="调整当前策略总金额"),
     TelegramBotCommand(command="withdraw", description="将 USDT 从交易账户转到资金账户"),
     TelegramBotCommand(command="deposit", description="将 USDT 从资金账户转到交易账户"),
 )
@@ -231,28 +219,16 @@ class NotifierService:
             return render_text_message(self._render_help())
         if command == "/status":
             return render_text_message(self._render_status())
-        if command == "/mode":
-            return render_text_message(self._render_mode())
-        if command == "/market":
-            return render_text_message(self._render_market())
         if command in {"/entrygap", "/entry_gap", "/gap"}:
             return render_text_message(await self._render_entry_gap())
-        if command in {"/positions", "/position"}:
-            return render_text_message(self._render_positions())
         if command == "/orders":
             return render_text_message(self._render_orders())
         if command == "/risk":
             return render_text_message(self._render_risk())
-        if command == "/takeover":
-            return render_text_message(self._handle_takeover_command(text))
-        if command == "/release":
-            return render_text_message(self._handle_release_command(text))
         if command == "/pause":
             return render_text_message(self._handle_pause_command(text))
         if command in {"/start", "/resume"}:
             return render_text_message(self._handle_start_command(text))
-        if command in {"/capital", "/amount"}:
-            return render_text_message(self._handle_capital_command(text))
         if command == "/withdraw":
             return render_text_message(await self._handle_account_transfer_command(text, direction="withdraw"))
         if command == "/deposit":
@@ -348,47 +324,15 @@ class NotifierService:
             [
                 "支持的命令：",
                 "/status - 查看服务状态、策略、账户权益和持仓摘要",
-                "/positions - 查看当前运行态持仓",
                 "/orders - 查看最近订单",
                 "/risk - 查看最近风控事件",
-                "/market - 查看行情摘要",
                 "/entrygap - 查看当前行情距离开仓条件的差距",
                 "/pause [reason] - 暂停交易并切换为 halted",
                 "/start [reason] - 请求恢复交易到 normal",
-                "/capital <amount> [reason] - 调整当前策略总金额",
                 "/withdraw <amount> [reason] - 将 USDT 从交易账户转到资金账户",
                 "/deposit <amount> [reason] - 将 USDT 从资金账户转到交易账户",
             ]
         )
-
-    def _handle_takeover_command(self, text: str) -> str:
-        parts = text.strip().split(maxsplit=2)
-        if len(parts) < 2:
-            return "用法：/takeover <degraded|reduce_only|halted> [reason]"
-        requested_mode = parts[1].lower()
-        if requested_mode not in {"degraded", "reduce_only", "halted"}:
-            return "用法：/takeover <degraded|reduce_only|halted> [reason]"
-        reason = parts[2].strip() if len(parts) >= 3 and parts[2].strip() else "operator requested"
-        target_mode = RunMode(requested_mode)
-        current_mode = self._runtime_store.get_run_mode() or RunMode.NORMAL
-        effective_mode = max(current_mode, target_mode, key=lambda mode: _RUN_MODE_PRIORITY[mode])
-
-        fault_flags = dict(self._runtime_store.get_fault_flags() or {})
-        fault_flags["manual_takeover"] = {
-            "requested_mode": effective_mode.value,
-            "reason": reason,
-        }
-
-        self._runtime_store.set_run_mode(effective_mode)
-        self._runtime_store.set_fault_flags(fault_flags)
-        self._history_store.append_risk_event(
-            {
-                "event_type": "manual_takeover_requested",
-                "symbol": "system",
-                "detail": f"requested {effective_mode.value}: {reason}",
-            }
-        )
-        return f"已请求人工接管：{effective_mode.value}（原因：{reason}）"
 
     def _handle_pause_command(self, text: str) -> str:
         parts = text.strip().split(maxsplit=1)
@@ -426,45 +370,6 @@ class NotifierService:
             }
         )
         return f"已请求启动交易：normal（原因：{reason}）"
-
-    def _handle_release_command(self, text: str) -> str:
-        parts = text.strip().split(maxsplit=2)
-        if len(parts) < 2:
-            return "用法：/release <degraded> [reason]"
-        requested_mode = parts[1].lower()
-        if requested_mode != "degraded":
-            return "用法：/release <degraded> [reason]"
-        reason = parts[2].strip() if len(parts) >= 3 and parts[2].strip() else "operator approved release"
-        self._runtime_store.set_manual_release_target(requested_mode)
-        self._history_store.append_risk_event(
-            {
-                "event_type": "manual_release_requested",
-                "symbol": "system",
-                "detail": f"requested {requested_mode}: {reason}",
-            }
-        )
-        return f"已请求人工解除：{requested_mode}（原因：{reason}）"
-
-    def _handle_capital_command(self, text: str) -> str:
-        parts = text.strip().split(maxsplit=2)
-        if len(parts) < 2:
-            return "用法：/capital <amount> [reason]"
-        amount = self._parse_positive_float(parts[1])
-        if amount is None:
-            return "用法：/capital <amount> [reason]"
-        reason = parts[2].strip() if len(parts) >= 3 and parts[2].strip() else "operator adjusted strategy capital"
-        summary = dict(self._runtime_store.get_budget_pool_summary() or {})
-        summary["strategy_total_amount"] = amount
-        summary["manual_strategy_total_amount_override"] = True
-        self._runtime_store.set_budget_pool_summary(summary)
-        self._history_store.append_risk_event(
-            {
-                "event_type": "manual_strategy_capital_adjusted",
-                "symbol": "system",
-                "detail": f"strategy_total_amount={amount}: {reason}",
-            }
-        )
-        return f"已调整当前策略总金额：{amount}（原因：{reason}）"
 
     async def _handle_account_transfer_command(self, text: str, *, direction: str) -> str:
         if self._funds_transfer_client is None:
@@ -623,12 +528,6 @@ class NotifierService:
         mode = self._runtime_store.get_run_mode()
         return f"模式：{_MODE_LABELS[mode] if mode is not None else '未知'}"
 
-    def _render_market(self) -> str:
-        lines = list(self._render_symbol_summaries())
-        if not lines:
-            return "行情：暂无运行摘要"
-        return "\n".join(lines)
-
     async def _render_entry_gap(self) -> str:
         if self._entry_gap_provider is None:
             return "开仓差距：当前通知服务未配置行情计算器"
@@ -639,31 +538,6 @@ class NotifierService:
 
     def _latest_strategy_snapshot(self) -> object | None:
         return self._fixed_strategy_snapshot or self._snapshot_store.get_latest_snapshot()
-
-    def _render_positions(self) -> str:
-        runtime_lines = []
-        for symbol in self._okx_symbols:
-            summary = self._runtime_store.get_symbol_runtime_summary(symbol)
-            if summary is None:
-                continue
-            runtime_lines.append(
-                f"{symbol}: 当前净持仓={summary.get('net_quantity', 'n/a')} "
-                f"中间价={summary.get('mid_price', 'n/a')} "
-                f"运行模式={summary.get('run_mode', 'n/a')} "
-                f"挂单数={summary.get('open_order_count', 'n/a')}"
-            )
-        if runtime_lines:
-            return "\n".join(runtime_lines)
-        rows = self._history_store.list_recent_rows("positions", limit=5)
-        if not rows:
-            return "持仓：暂无当前运行态或最近仓位记录"
-        return "\n".join(
-            f"{row.get('symbol', 'unknown')}: "
-            f"净持仓={row.get('net_quantity', row.get('quantity', 'n/a'))} "
-            f"均价={row.get('average_price', 'n/a')} "
-            f"未实现盈亏={row.get('unrealized_pnl', 'n/a')}"
-            for row in rows
-        )
 
     def _render_orders(self) -> str:
         rows = self._history_store.list_recent_rows("orders", limit=5)

@@ -142,7 +142,7 @@ class _FakeFundsTransferClient:
 
 
 @pytest.mark.asyncio
-async def test_notifier_service_renders_status_and_market_queries_from_runtime_state() -> None:
+async def test_notifier_service_renders_status_and_durable_queries_from_runtime_state() -> None:
     history = PostgresRuntimeStore(dsn="postgresql://xuanshu:xuanshu@localhost:5432/xuanshu")
     history.append_position_fact(
         {
@@ -168,8 +168,6 @@ async def test_notifier_service_renders_status_and_market_queries_from_runtime_s
     )
 
     status = await service.handle_command("/status")
-    market = await service.handle_command("/market")
-    positions = await service.handle_command("/positions")
     orders = await service.handle_command("/orders")
     risk = await service.handle_command("/risk")
 
@@ -183,10 +181,8 @@ async def test_notifier_service_renders_status_and_market_queries_from_runtime_s
     assert "available_balance" not in status.text
     assert "当前策略：vol_breakout, risk_pause" in status.text
     assert "参数：risk_multiplier=0.25 per_symbol_max_position=0.12 max_leverage=1" in status.text
-    assert "BTC-USDT-SWAP" in market.text
-    assert "ETH-USDT-SWAP" in market.text
-    assert "BTC-USDT-SWAP: 当前净持仓=1.25" in positions.text
-    assert "ETH-USDT-SWAP: 当前净持仓=0.0" in positions.text
+    assert "BTC-USDT-SWAP: mid=100.1 net=1.25" in status.text
+    assert "ETH-USDT-SWAP: mid=200.2 net=0.0" in status.text
     assert "BTC-USDT-SWAP buy live cid=btc-breakout-000001" in orders.text
     assert "预算：" not in risk.text
 
@@ -268,12 +264,15 @@ async def test_entry_gap_reporter_calculates_vol_breakout_distance() -> None:
 
     text = await reporter.render(snapshot=snapshot, symbols=("BTC-USDT-SWAP",))
 
-    assert "开仓条件差距：" in text
-    assert "BTC-USDT-SWAP: close=103.00" in text
-    assert "EMA3=" in text
-    assert "突破价=102.00（已满足）" in text
-    assert "还差=0.00 / 0.00%" in text
-    assert "公式=前收 100.00 + k1 * ATR2 2.00" in text
+    assert "开仓条件差距\n快照：fixed-test" in text
+    assert "状态：模式 normal；审批 approved" in text
+    assert "结论：价格条件 1/1 已满足；所有可计算标的已达到开仓条件。" in text
+    assert "BTC-USDT-SWAP（价格条件已满足）" in text
+    assert "- 现价：103.00" in text
+    assert "- 趋势：EMA3 101.50，已满足" in text
+    assert "- 突破：目标 102.00，已满足" in text
+    assert "- 差距：0.00（0.00%）" in text
+    assert "- 计算：前收 100.00 + k1 * ATR2 2.00" in text
 
 
 @pytest.mark.asyncio
@@ -287,13 +286,19 @@ async def test_notifier_service_returns_chinese_help_for_english_commands() -> N
 
     payload = await service.handle_command("/help")
 
-    assert "/positions - 查看当前运行态持仓" in payload.text
+    assert "/status - 查看服务状态、策略、账户权益和持仓摘要" in payload.text
+    assert "/orders - 查看最近订单" in payload.text
+    assert "/risk - 查看最近风控事件" in payload.text
     assert "/pause [reason] - 暂停交易并切换为 halted" in payload.text
     assert "/start [reason] - 请求恢复交易到 normal" in payload.text
-    assert "/capital <amount> [reason] - 调整当前策略总金额" in payload.text
     assert "/withdraw <amount> [reason] - 将 USDT 从交易账户转到资金账户" in payload.text
     assert "/deposit <amount> [reason] - 将 USDT 从资金账户转到交易账户" in payload.text
     assert "/entrygap - 查看当前行情距离开仓条件的差距" in payload.text
+    assert "/positions" not in payload.text
+    assert "/market" not in payload.text
+    assert "/capital" not in payload.text
+    assert "/takeover" not in payload.text
+    assert "/release" not in payload.text
     assert "/budget" not in payload.text
 
 
@@ -309,17 +314,38 @@ def test_notifier_service_exposes_telegram_bot_commands() -> None:
 
     assert TelegramBotCommand(command="status", description="查看服务、策略、权益和持仓摘要") in commands
     assert TelegramBotCommand(command="entrygap", description="查看行情距离开仓条件的差距") in commands
-    assert TelegramBotCommand(command="takeover", description="请求人工接管到保守模式") in commands
     assert TelegramBotCommand(command="withdraw", description="将 USDT 从交易账户转到资金账户") in commands
     assert TelegramBotCommand(command="deposit", description="将 USDT 从资金账户转到交易账户") in commands
+    command_names = {command.command for command in commands}
+    assert {
+        "mode",
+        "market",
+        "positions",
+        "takeover",
+        "release",
+        "capital",
+    }.isdisjoint(command_names)
     assert all(command.command == command.command.lower() for command in commands)
     assert all(not command.command.startswith("/") for command in commands)
 
 
 @pytest.mark.asyncio
-async def test_notifier_service_accepts_manual_takeover_command_and_records_audit_trail() -> None:
+@pytest.mark.parametrize(
+    "text",
+    [
+        "/mode",
+        "/market",
+        "/positions",
+        "/position",
+        "/takeover reduce_only flatten risk manually",
+        "/release degraded operator approved first release",
+        "/capital 5000 operator cap",
+        "/amount 5000 operator cap",
+    ],
+)
+async def test_notifier_service_returns_help_for_removed_commands(text: str) -> None:
     runtime = _RuntimeStore()
-    runtime.mode = RunMode.NORMAL
+    runtime.mode = RunMode.DEGRADED
     runtime.faults = {}
     history = PostgresRuntimeStore(dsn="postgresql://xuanshu:xuanshu@localhost:5432/xuanshu")
     service = NotifierService(
@@ -329,40 +355,12 @@ async def test_notifier_service_accepts_manual_takeover_command_and_records_audi
         history_store=history,
     )
 
-    payload = await service.handle_command("/takeover reduce_only flatten risk manually")
+    payload = await service.handle_command(text)
 
-    assert payload.text == "已请求人工接管：reduce_only（原因：flatten risk manually）"
-    assert runtime.mode == RunMode.REDUCE_ONLY
-    assert runtime.faults == {
-        "manual_takeover": {
-            "requested_mode": "reduce_only",
-            "reason": "flatten risk manually",
-        }
-    }
-    assert history.list_recent_rows("risk_events", limit=1) == [
-        {
-            "event_type": "manual_takeover_requested",
-            "symbol": "system",
-            "detail": "requested reduce_only: flatten risk manually",
-        }
-    ]
-
-
-@pytest.mark.asyncio
-async def test_notifier_service_rejects_manual_takeover_without_supported_mode() -> None:
-    runtime = _RuntimeStore()
-    history = PostgresRuntimeStore(dsn="postgresql://xuanshu:xuanshu@localhost:5432/xuanshu")
-    service = NotifierService(
-        okx_symbols=("BTC-USDT-SWAP",),
-        runtime_store=runtime,
-        snapshot_store=_SnapshotStore(),
-        history_store=history,
-    )
-
-    payload = await service.handle_command("/takeover normal")
-
-    assert payload.text == "用法：/takeover <degraded|reduce_only|halted> [reason]"
+    assert payload.text.startswith("支持的命令：")
     assert runtime.mode == RunMode.DEGRADED
+    assert runtime.faults == {}
+    assert runtime.manual_release_target is None
     assert history.list_recent_rows("risk_events", limit=1) == []
 
 
@@ -399,32 +397,6 @@ async def test_notifier_service_accepts_pause_and_start_commands() -> None:
             "detail": "requested halted: maintenance",
         },
     ]
-
-
-@pytest.mark.asyncio
-async def test_notifier_service_adjusts_strategy_total_amount_from_english_command() -> None:
-    runtime = _RuntimeStore()
-    history = PostgresRuntimeStore(dsn="postgresql://xuanshu:xuanshu@localhost:5432/xuanshu")
-    service = NotifierService(
-        okx_symbols=("BTC-USDT-SWAP",),
-        runtime_store=runtime,
-        snapshot_store=_SnapshotStore(),
-        history_store=history,
-    )
-
-    payload = await service.handle_command("/capital 5000 operator cap")
-
-    assert payload.text == "已调整当前策略总金额：5000.0（原因：operator cap）"
-    assert runtime.budget["strategy_total_amount"] == 5000.0
-    assert runtime.budget["manual_strategy_total_amount_override"] is True
-    assert history.list_recent_rows("risk_events", limit=1) == [
-        {
-            "event_type": "manual_strategy_capital_adjusted",
-            "symbol": "system",
-            "detail": "strategy_total_amount=5000.0: operator cap",
-        }
-    ]
-
 
 @pytest.mark.asyncio
 async def test_notifier_service_transfers_funds_to_funding_account_from_withdraw_command() -> None:
@@ -554,31 +526,6 @@ async def test_notifier_status_falls_back_to_checkpoint_and_order_strategy_conte
     assert "BTC-USDT-SWAP: BTC-USDT-SWAP 12H 波动率突破" in status.text
     assert "ETH-USDT-SWAP: ETH 4H 波动率突破" in status.text
     assert "运行摘要：" in status.text
-
-
-@pytest.mark.asyncio
-async def test_notifier_service_accepts_manual_release_to_degraded() -> None:
-    runtime = _RuntimeStore()
-    history = PostgresRuntimeStore(dsn="postgresql://xuanshu:xuanshu@localhost:5432/xuanshu")
-    service = NotifierService(
-        okx_symbols=("BTC-USDT-SWAP",),
-        runtime_store=runtime,
-        snapshot_store=_SnapshotStore(),
-        history_store=history,
-    )
-
-    payload = await service.handle_command("/release degraded operator approved first release")
-
-    assert payload.text == "已请求人工解除：degraded（原因：operator approved first release）"
-    assert runtime.manual_release_target == "degraded"
-    assert history.list_recent_rows("risk_events", limit=1) == [
-        {
-            "event_type": "manual_release_requested",
-            "symbol": "system",
-            "detail": "requested degraded: operator approved first release",
-        }
-    ]
-
 
 @pytest.mark.asyncio
 async def test_notifier_service_records_failed_critical_delivery_for_retry() -> None:
@@ -1007,9 +954,9 @@ async def test_notifier_service_ignores_manual_command_audit_risk_events_for_pro
     history = PostgresRuntimeStore(dsn="postgresql://xuanshu:xuanshu@localhost:5432/xuanshu")
     history.append_risk_event(
         {
-            "event_type": "manual_strategy_capital_adjusted",
+            "event_type": "manual_start_requested",
             "symbol": "system",
-            "detail": "strategy_total_amount=5000.0: verify",
+            "detail": "requested normal: verify",
         }
     )
     history.append_risk_event(

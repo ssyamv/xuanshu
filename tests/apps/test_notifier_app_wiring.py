@@ -152,7 +152,7 @@ def test_notifier_runtime_processes_one_command_poll(monkeypatch) -> None:
                 notifier_app.TelegramInboundMessage(
                     update_id=offset or 1,
                     chat_id="123456",
-                    text="/mode",
+                    text="/status",
                 )
             ]
 
@@ -181,11 +181,11 @@ def test_notifier_runtime_processes_one_command_poll(monkeypatch) -> None:
 
     asyncio.run(notifier_app._poll_notifier_once(runtime))
 
-    assert adapter.sent == ["模式：只减仓"]
+    assert adapter.sent[0].startswith("模式：只减仓")
     assert runtime.next_update_offset == 2
 
 
-def test_notifier_runtime_processes_manual_takeover_command(monkeypatch) -> None:
+def test_notifier_runtime_processes_manual_pause_command(monkeypatch) -> None:
     _set_required_settings_env(monkeypatch)
     _clear_unrelated_settings_env(monkeypatch)
     fake_redis = _FakeRedis()
@@ -202,7 +202,7 @@ def test_notifier_runtime_processes_manual_takeover_command(monkeypatch) -> None
                 notifier_app.TelegramInboundMessage(
                     update_id=offset or 1,
                     chat_id="123456",
-                    text="/takeover halted operator requested stop",
+                    text="/pause operator requested stop",
                 )
             ]
 
@@ -225,11 +225,11 @@ def test_notifier_runtime_processes_manual_takeover_command(monkeypatch) -> None
 
     asyncio.run(notifier_app._poll_notifier_once(runtime))
 
-    assert adapter.sent == ["已请求人工接管：halted（原因：operator requested stop）"]
+    assert adapter.sent == ["已暂停交易：halted（原因：operator requested stop）"]
     assert runtime.runtime_store.get_run_mode() == RunMode.HALTED
     assert store.list_recent_rows("risk_events", limit=1) == [
         {
-            "event_type": "manual_takeover_requested",
+            "event_type": "manual_pause_requested",
             "symbol": "system",
             "detail": "requested halted: operator requested stop",
         }

@@ -32,11 +32,10 @@ The expected compose runtime is:
 After deploy, use Telegram:
 
 - `/status` to verify snapshot version, mode, fault flags, account equity, strategy total amount, strategy logic, and runtime summaries.
-- `/positions` to verify current runtime positions.
 - `/risk` and `/orders` to verify recent durable facts.
-- `/start <reason>` or `/release normal <reason>` only after checks pass.
+- `/start <reason>` only after checks pass.
 
-`/pause` and stricter mode changes are expected to take effect immediately through Redis. Mode relaxation is only applied by trader when the active snapshot is approved, checkpoint state allows new risk, and fault flags are clean.
+`/pause` is expected to take effect immediately through Redis. Mode relaxation is requested with `/start` and only applied by trader when the active snapshot is approved, checkpoint state allows new risk, and fault flags are clean.
 
 ## Notes
 

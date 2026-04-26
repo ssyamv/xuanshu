@@ -34,9 +34,9 @@ class EntryGapReporter:
         if not isinstance(snapshot, StrategyConfigSnapshot):
             return "开仓差距：暂无有效策略快照"
         lines = [
-            "开仓条件差距：",
+            "开仓条件差距",
             f"快照：{snapshot.version_id}",
-            f"模式：{snapshot.market_mode.value}；审批：{snapshot.approval_state.value}",
+            f"状态：模式 {snapshot.market_mode.value}；审批 {snapshot.approval_state.value}",
         ]
         if not snapshot.is_strategy_enabled("vol_breakout"):
             lines.append("vol_breakout 当前未启用，系统不会按波动率突破开仓。")
@@ -46,21 +46,29 @@ class EntryGapReporter:
         if snapshot.approval_state != ApprovalState.APPROVED:
             lines.append("当前快照未批准，阻止新开仓。")
 
+        reports: list[str] = []
+        metrics: list[tuple[str, dict[str, object]]] = []
         for symbol in symbols:
             binding = snapshot.strategy_binding_for(symbol, "vol_breakout")
             if binding is None:
-                lines.append(f"{symbol}: 无 vol_breakout 绑定")
+                reports.append(f"{symbol}\n- 状态：无 vol_breakout 绑定")
                 continue
             parameters = _parse_fixed_vol_breakout_parameters(binding)
             if parameters is None:
-                lines.append(f"{symbol}: 无法解析策略参数 {binding.strategy_def_id}")
+                reports.append(f"{symbol}\n- 状态：无法解析策略参数 {binding.strategy_def_id}")
                 continue
             try:
                 metric = await self._compute_symbol_gap(symbol=symbol, parameters=parameters)
             except Exception as exc:
-                lines.append(f"{symbol}: 行情计算失败：{exc}")
+                reports.append(f"{symbol}\n- 状态：行情计算失败：{exc}")
                 continue
-            lines.append(_format_symbol_gap(symbol, parameters, metric))
+            metrics.append((symbol, metric))
+            reports.append(_format_symbol_gap(symbol, parameters, metric))
+        summary = _format_entry_summary(metrics)
+        if summary is not None:
+            lines.append(summary)
+        if reports:
+            lines.extend(["", "\n\n".join(reports)])
         return "\n".join(lines)
 
     async def _compute_symbol_gap(
@@ -116,14 +124,46 @@ def _format_symbol_gap(
     parameters: FixedVolBreakoutParameters,
     metric: dict[str, object],
 ) -> str:
+    entry_condition = bool(metric["ema_condition"]) and bool(metric["breakout_condition"])
     gap_pct = metric["gap_pct"]
     gap_pct_text = "n/a" if gap_pct is None else f"{float(gap_pct):.2f}%"
+    return "\n".join(
+        [
+            f"{symbol}（{'价格条件已满足' if entry_condition else '价格条件未满足'}）",
+            f"- 现价：{float(metric['close']):.2f}",
+            f"- 趋势：EMA{parameters.ema_period} {float(metric['ema']):.2f}，{'已满足' if metric['ema_condition'] else '未满足'}",
+            f"- 突破：目标 {float(metric['breakout_level']):.2f}，{'已满足' if metric['breakout_condition'] else '未满足'}",
+            f"- 差距：{float(metric['gap_abs']):.2f}（{gap_pct_text}）",
+            (
+                f"- 计算：前收 {float(metric['previous_close']):.2f} + "
+                f"k{parameters.k:g} * ATR{parameters.atr_period} {float(metric['previous_atr']):.2f}"
+            ),
+        ]
+    )
+
+
+def _format_entry_summary(metrics: list[tuple[str, dict[str, object]]]) -> str | None:
+    if not metrics:
+        return None
+    satisfied_count = sum(
+        1 for _, metric in metrics if bool(metric["ema_condition"]) and bool(metric["breakout_condition"])
+    )
+    if satisfied_count == len(metrics):
+        return f"结论：价格条件 {satisfied_count}/{len(metrics)} 已满足；所有可计算标的已达到开仓条件。"
+
+    pending = [
+        (symbol, float(metric["gap_abs"]), metric["gap_pct"])
+        for symbol, metric in metrics
+        if not (bool(metric["ema_condition"]) and bool(metric["breakout_condition"]))
+    ]
+    closest_symbol, closest_abs, closest_pct = min(
+        pending,
+        key=lambda item: (float("inf") if item[2] is None else float(item[2]), item[1]),
+    )
+    closest_pct_text = "n/a" if closest_pct is None else f"{float(closest_pct):.2f}%"
     return (
-        f"{symbol}: close={float(metric['close']):.2f}，"
-        f"EMA{parameters.ema_period}={float(metric['ema']):.2f}（{'已满足' if metric['ema_condition'] else '未满足'}），"
-        f"突破价={float(metric['breakout_level']):.2f}（{'已满足' if metric['breakout_condition'] else '未满足'}），"
-        f"还差={float(metric['gap_abs']):.2f} / {gap_pct_text}；"
-        f"公式=前收 {float(metric['previous_close']):.2f} + k{parameters.k:g} * ATR{parameters.atr_period} {float(metric['previous_atr']):.2f}"
+        f"结论：价格条件 {satisfied_count}/{len(metrics)} 已满足；"
+        f"最近 {closest_symbol} 还差 {closest_abs:.2f}（{closest_pct_text}）。"
     )
 
 

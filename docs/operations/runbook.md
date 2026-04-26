@@ -26,14 +26,13 @@ Telegram command handling is the supported operator control surface:
 
 - `/help`: show supported commands.
 - `/status`: show mode, fixed snapshot version, fault flags, equity, strategy total amount, strategy logic, and runtime symbol summaries.
-- `/positions` or `/position`: show current Redis runtime positions first, then fall back to recent durable position facts.
 - `/orders`: show recent durable order facts.
 - `/risk`: show recent risk events without internal budget noise.
-- `/market`: show latest runtime market summaries.
 - `/pause [reason]`: request `halted` and record a `manual_pause` fault flag.
-- `/start [reason]` or `/resume [reason]`: clear manual pause/takeover flags and request release to `normal`.
-- `/release <mode> [reason]`: request a release target such as `normal` or `degraded`; trader applies it only when the checkpoint and fault state allow new risk.
-- `/capital <amount> [reason]`: override the current strategy total amount for trader risk NAV.
+- `/start [reason]` or `/resume [reason]`: clear manual pause and legacy takeover flags, then request release to `normal`.
+- `/entrygap`: show the live gap to entry conditions.
+- `/withdraw <amount> [reason]`: transfer USDT from trading to funding.
+- `/deposit <amount> [reason]`: transfer USDT from funding to trading.
 
 Manual commands write Redis runtime controls and durable audit events. They do not call OKX directly. Trader reads those controls during event dispatch and symbol evaluation, then republishes the effective mode, budget summary, fault flags, and symbol summaries.
 
@@ -51,8 +50,8 @@ Manual commands write Redis runtime controls and durable audit events. They do n
 - If startup recovery fails, do not release trading.
 - Inspect recent `risk_events`, `execution_checkpoints`, and notifier alerts.
 - Keep the runtime in `halted` until state is understood.
-- Use `/status`, `/positions`, `/orders`, and `/risk` to inspect the runtime view before release.
-- Use `/start` or `/release normal` only after the active fixed snapshot, checkpoint, and fault flags are clean.
+- Use `/status`, `/orders`, and `/risk` to inspect the runtime view before release.
+- Use `/start` only after the active fixed snapshot, checkpoint, and fault flags are clean.
 
 ## Rollback
 
