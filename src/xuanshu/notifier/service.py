@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
+from datetime import UTC, datetime
+import math
 from typing import Literal, Protocol
 
 from xuanshu.core.enums import RunMode
@@ -48,7 +50,13 @@ TELEGRAM_BOT_COMMANDS: tuple[TelegramBotCommand, ...] = (
     TelegramBotCommand(command="takeover", description="请求人工接管到保守模式"),
     TelegramBotCommand(command="release", description="请求人工解除到 degraded"),
     TelegramBotCommand(command="capital", description="调整当前策略总金额"),
+    TelegramBotCommand(command="withdraw", description="将 USDT 从交易账户转到资金账户"),
+    TelegramBotCommand(command="deposit", description="将 USDT 从资金账户转到交易账户"),
 )
+
+_FUNDING_ACCOUNT = "6"
+_TRADING_ACCOUNT = "18"
+_TRANSFER_CURRENCY = "USDT"
 
 
 def format_mode_change(mode: RunMode) -> str:
@@ -155,6 +163,31 @@ class EntryGapProvider(Protocol):
         ...
 
 
+class FundsTransferClient(Protocol):
+    async def transfer_funds(
+        self,
+        *,
+        currency: str,
+        amount: str,
+        from_account: str,
+        to_account: str,
+        timestamp: str,
+        transfer_type: str = "0",
+        client_id: str | None = None,
+    ) -> list[dict[str, object]]:
+        ...
+
+    async def fetch_transfer_state(
+        self,
+        *,
+        timestamp: str,
+        transfer_id: str | None = None,
+        client_id: str | None = None,
+        transfer_type: str = "0",
+    ) -> list[dict[str, object]]:
+        ...
+
+
 class NotificationHistoryStore(Protocol):
     def append_risk_event(self, payload: dict[str, object]) -> None:
         ...
@@ -179,6 +212,7 @@ class NotifierService:
         history_store: NotificationHistoryStore,
         entry_gap_provider: EntryGapProvider | None = None,
         fixed_strategy_snapshot: object | None = None,
+        funds_transfer_client: FundsTransferClient | None = None,
     ) -> None:
         self._okx_symbols = okx_symbols
         self._runtime_store = runtime_store
@@ -186,6 +220,7 @@ class NotifierService:
         self._history_store = history_store
         self._entry_gap_provider = entry_gap_provider
         self._fixed_strategy_snapshot = fixed_strategy_snapshot
+        self._funds_transfer_client = funds_transfer_client
 
     def telegram_bot_commands(self) -> list[TelegramBotCommand]:
         return list(TELEGRAM_BOT_COMMANDS)
@@ -218,6 +253,10 @@ class NotifierService:
             return render_text_message(self._handle_start_command(text))
         if command in {"/capital", "/amount"}:
             return render_text_message(self._handle_capital_command(text))
+        if command == "/withdraw":
+            return render_text_message(await self._handle_account_transfer_command(text, direction="withdraw"))
+        if command == "/deposit":
+            return render_text_message(await self._handle_account_transfer_command(text, direction="deposit"))
         return render_text_message(self._render_help())
 
     async def flush_pending_notifications(self, *, adapter: object, limit: int = 20) -> int:
@@ -317,6 +356,8 @@ class NotifierService:
                 "/pause [reason] - 暂停交易并切换为 halted",
                 "/start [reason] - 请求恢复交易到 normal",
                 "/capital <amount> [reason] - 调整当前策略总金额",
+                "/withdraw <amount> [reason] - 将 USDT 从交易账户转到资金账户",
+                "/deposit <amount> [reason] - 将 USDT 从资金账户转到交易账户",
             ]
         )
 
@@ -425,13 +466,132 @@ class NotifierService:
         )
         return f"已调整当前策略总金额：{amount}（原因：{reason}）"
 
+    async def _handle_account_transfer_command(self, text: str, *, direction: str) -> str:
+        if self._funds_transfer_client is None:
+            return "资金划转不可用：通知服务未配置 OKX API"
+        parts = text.strip().split(maxsplit=2)
+        if len(parts) < 2:
+            return self._account_transfer_usage(direction)
+        amount = self._parse_positive_float(parts[1])
+        if amount is None:
+            return self._account_transfer_usage(direction)
+        reason = parts[2].strip() if len(parts) >= 3 and parts[2].strip() else "operator requested account transfer"
+        amount_text = f"{amount:g}"
+        if direction == "withdraw":
+            from_account = _TRADING_ACCOUNT
+            to_account = _FUNDING_ACCOUNT
+            direction_label = "交易账户 → 资金账户"
+            event_type = "manual_funds_withdraw_requested"
+            client_id = self._build_transfer_client_id(prefix="XSWD")
+        else:
+            from_account = _FUNDING_ACCOUNT
+            to_account = _TRADING_ACCOUNT
+            direction_label = "资金账户 → 交易账户"
+            event_type = "manual_funds_deposit_requested"
+            client_id = self._build_transfer_client_id(prefix="XSDP")
+        self._history_store.append_risk_event(
+            {
+                "event_type": event_type,
+                "symbol": "system",
+                "detail": f"{direction_label} {amount_text} {_TRANSFER_CURRENCY}: {reason}",
+            }
+        )
+        timestamp = self._now_timestamp()
+        try:
+            response = await self._funds_transfer_client.transfer_funds(
+                currency=_TRANSFER_CURRENCY,
+                amount=amount_text,
+                from_account=from_account,
+                to_account=to_account,
+                timestamp=timestamp,
+                client_id=client_id,
+            )
+        except Exception as exc:
+            self._history_store.append_risk_event(
+                {
+                    "event_type": "manual_funds_transfer_failed",
+                    "symbol": "system",
+                    "detail": f"{direction_label} {amount_text} {_TRANSFER_CURRENCY}: {exc}",
+                }
+            )
+            return f"资金划转失败：{direction_label}\n金额：{amount_text} {_TRANSFER_CURRENCY}\n原因：{exc}"
+        transfer_id = self._extract_transfer_id(response)
+        state = await self._fetch_transfer_state(
+            transfer_id=transfer_id,
+            client_id=client_id,
+        )
+        state_label = self._format_transfer_state(state)
+        self._history_store.append_risk_event(
+            {
+                "event_type": "manual_funds_transfer_submitted",
+                "symbol": "system",
+                "detail": f"{direction_label} {amount_text} {_TRANSFER_CURRENCY}: transId={transfer_id or client_id} state={state_label}",
+            }
+        )
+        return (
+            f"已提交资金划转：{direction_label}\n"
+            f"金额：{amount_text} {_TRANSFER_CURRENCY}\n"
+            f"状态：{state_label}\n"
+            f"流水：{transfer_id or client_id}\n"
+            f"原因：{reason}"
+        )
+
+    async def _fetch_transfer_state(self, *, transfer_id: str | None, client_id: str) -> list[dict[str, object]]:
+        if self._funds_transfer_client is None:
+            return []
+        try:
+            return await self._funds_transfer_client.fetch_transfer_state(
+                timestamp=self._now_timestamp(),
+                transfer_id=transfer_id,
+                client_id=None if transfer_id else client_id,
+            )
+        except Exception:
+            return []
+
+    def _account_transfer_usage(self, direction: str) -> str:
+        if direction == "withdraw":
+            return "用法：/withdraw <amount> [reason]，将 USDT 从交易账户转到资金账户"
+        return "用法：/deposit <amount> [reason]，将 USDT 从资金账户转到交易账户"
+
+    @staticmethod
+    def _build_transfer_client_id(*, prefix: str) -> str:
+        timestamp = datetime.now(UTC).strftime("%Y%m%d%H%M%S%f")
+        return f"{prefix}{timestamp}"[:32]
+
+    @staticmethod
+    def _extract_transfer_id(rows: list[dict[str, object]]) -> str | None:
+        if not rows:
+            return None
+        for key in ("transId", "trans_id"):
+            value = rows[0].get(key)
+            if value:
+                return str(value)
+        return None
+
+    @staticmethod
+    def _format_transfer_state(rows: list[dict[str, object]]) -> str:
+        if not rows:
+            return "已提交，未取得确认状态"
+        state = str(rows[0].get("state") or rows[0].get("status") or "").strip()
+        if state == "success":
+            return "成功"
+        if state == "pending":
+            return "处理中"
+        if state == "failed":
+            return "失败"
+        return state or "已提交，未取得确认状态"
+
+    @staticmethod
+    def _now_timestamp() -> str:
+        return datetime.now(UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
     @staticmethod
     def _parse_positive_float(raw: str) -> float | None:
         try:
             value = float(raw)
         except ValueError:
             return None
-        if value <= 0:
+        if not math.isfinite(value) or value <= 0:
             return None
         return value
 

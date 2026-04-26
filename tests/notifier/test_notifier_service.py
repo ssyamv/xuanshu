@@ -93,6 +93,54 @@ class _EntryGapProvider:
         return "开仓条件差距：BTC-USDT-SWAP 还差 5.0%"
 
 
+class _FakeFundsTransferClient:
+    def __init__(self) -> None:
+        self.transfer_calls: list[dict[str, object]] = []
+        self.state_calls: list[dict[str, object]] = []
+
+    async def transfer_funds(
+        self,
+        *,
+        currency: str,
+        amount: str,
+        from_account: str,
+        to_account: str,
+        timestamp: str,
+        transfer_type: str = "0",
+        client_id: str | None = None,
+    ) -> list[dict[str, object]]:
+        self.transfer_calls.append(
+            {
+                "currency": currency,
+                "amount": amount,
+                "from_account": from_account,
+                "to_account": to_account,
+                "timestamp": timestamp,
+                "transfer_type": transfer_type,
+                "client_id": client_id,
+            }
+        )
+        return [{"transId": "transfer-1"}]
+
+    async def fetch_transfer_state(
+        self,
+        *,
+        timestamp: str,
+        transfer_id: str | None = None,
+        client_id: str | None = None,
+        transfer_type: str = "0",
+    ) -> list[dict[str, object]]:
+        self.state_calls.append(
+            {
+                "timestamp": timestamp,
+                "transfer_id": transfer_id,
+                "client_id": client_id,
+                "transfer_type": transfer_type,
+            }
+        )
+        return [{"transId": transfer_id, "state": "success"}]
+
+
 @pytest.mark.asyncio
 async def test_notifier_service_renders_status_and_market_queries_from_runtime_state() -> None:
     history = PostgresRuntimeStore(dsn="postgresql://xuanshu:xuanshu@localhost:5432/xuanshu")
@@ -243,6 +291,8 @@ async def test_notifier_service_returns_chinese_help_for_english_commands() -> N
     assert "/pause [reason] - 暂停交易并切换为 halted" in payload.text
     assert "/start [reason] - 请求恢复交易到 normal" in payload.text
     assert "/capital <amount> [reason] - 调整当前策略总金额" in payload.text
+    assert "/withdraw <amount> [reason] - 将 USDT 从交易账户转到资金账户" in payload.text
+    assert "/deposit <amount> [reason] - 将 USDT 从资金账户转到交易账户" in payload.text
     assert "/entrygap - 查看当前行情距离开仓条件的差距" in payload.text
     assert "/budget" not in payload.text
 
@@ -260,6 +310,8 @@ def test_notifier_service_exposes_telegram_bot_commands() -> None:
     assert TelegramBotCommand(command="status", description="查看服务、策略、权益和持仓摘要") in commands
     assert TelegramBotCommand(command="entrygap", description="查看行情距离开仓条件的差距") in commands
     assert TelegramBotCommand(command="takeover", description="请求人工接管到保守模式") in commands
+    assert TelegramBotCommand(command="withdraw", description="将 USDT 从交易账户转到资金账户") in commands
+    assert TelegramBotCommand(command="deposit", description="将 USDT 从资金账户转到交易账户") in commands
     assert all(command.command == command.command.lower() for command in commands)
     assert all(not command.command.startswith("/") for command in commands)
 
@@ -372,6 +424,74 @@ async def test_notifier_service_adjusts_strategy_total_amount_from_english_comma
             "detail": "strategy_total_amount=5000.0: operator cap",
         }
     ]
+
+
+@pytest.mark.asyncio
+async def test_notifier_service_transfers_funds_to_funding_account_from_withdraw_command() -> None:
+    history = PostgresRuntimeStore(dsn="postgresql://xuanshu:xuanshu@localhost:5432/xuanshu")
+    client = _FakeFundsTransferClient()
+    service = NotifierService(
+        okx_symbols=("BTC-USDT-SWAP",),
+        runtime_store=_RuntimeStore(),
+        snapshot_store=_SnapshotStore(),
+        history_store=history,
+        funds_transfer_client=client,
+    )
+
+    payload = await service.handle_command("/withdraw 120 profit reserve")
+
+    assert "已提交资金划转：交易账户 → 资金账户" in payload.text
+    assert "金额：120 USDT" in payload.text
+    assert "状态：成功" in payload.text
+    assert client.transfer_calls[0]["currency"] == "USDT"
+    assert client.transfer_calls[0]["amount"] == "120"
+    assert client.transfer_calls[0]["from_account"] == "18"
+    assert client.transfer_calls[0]["to_account"] == "6"
+    assert client.state_calls[0]["transfer_id"] == "transfer-1"
+    assert history.list_recent_rows("risk_events", limit=2)[0]["event_type"] == "manual_funds_transfer_submitted"
+    assert history.list_recent_rows("risk_events", limit=2)[1]["event_type"] == "manual_funds_withdraw_requested"
+
+
+@pytest.mark.asyncio
+async def test_notifier_service_transfers_funds_to_trading_account_from_deposit_command() -> None:
+    history = PostgresRuntimeStore(dsn="postgresql://xuanshu:xuanshu@localhost:5432/xuanshu")
+    client = _FakeFundsTransferClient()
+    service = NotifierService(
+        okx_symbols=("BTC-USDT-SWAP",),
+        runtime_store=_RuntimeStore(),
+        snapshot_store=_SnapshotStore(),
+        history_store=history,
+        funds_transfer_client=client,
+    )
+
+    payload = await service.handle_command("/deposit 50 add margin")
+
+    assert "已提交资金划转：资金账户 → 交易账户" in payload.text
+    assert client.transfer_calls[0]["from_account"] == "6"
+    assert client.transfer_calls[0]["to_account"] == "18"
+    assert history.list_recent_rows("risk_events", limit=2)[1]["event_type"] == "manual_funds_deposit_requested"
+
+
+@pytest.mark.asyncio
+async def test_notifier_service_rejects_transfer_command_without_amount_or_client() -> None:
+    service = NotifierService(
+        okx_symbols=("BTC-USDT-SWAP",),
+        runtime_store=_RuntimeStore(),
+        snapshot_store=_SnapshotStore(),
+        history_store=PostgresRuntimeStore(dsn="postgresql://xuanshu:xuanshu@localhost:5432/xuanshu"),
+    )
+
+    assert (await service.handle_command("/withdraw")).text == "资金划转不可用：通知服务未配置 OKX API"
+
+    service = NotifierService(
+        okx_symbols=("BTC-USDT-SWAP",),
+        runtime_store=_RuntimeStore(),
+        snapshot_store=_SnapshotStore(),
+        history_store=PostgresRuntimeStore(dsn="postgresql://xuanshu:xuanshu@localhost:5432/xuanshu"),
+        funds_transfer_client=_FakeFundsTransferClient(),
+    )
+
+    assert (await service.handle_command("/deposit 0")).text == "用法：/deposit <amount> [reason]，将 USDT 从资金账户转到交易账户"
 
 
 @pytest.mark.asyncio

@@ -4,6 +4,7 @@ import base64
 import hashlib
 import hmac
 import json
+import math
 from urllib.parse import urlencode
 
 import httpx
@@ -13,6 +14,8 @@ _SUPPORTED_ORDER_SIDES = frozenset({"buy", "sell"})
 _PLACE_ORDER_REQUIRED_FIELDS = frozenset({"instId", "tdMode", "side", "posSide", "ordType", "sz", "clOrdId"})
 _PLACE_ORDER_OPTIONAL_FIELDS = frozenset({"px", "reduceOnly"})
 _PLACE_ORDER_ALLOWED_FIELDS = _PLACE_ORDER_REQUIRED_FIELDS | _PLACE_ORDER_OPTIONAL_FIELDS
+_TRANSFER_ACCOUNT_TYPES = frozenset({"6", "18"})
+_TRANSFER_TYPES = frozenset({"0", "1", "2", "3", "4"})
 
 
 class OkxBusinessError(RuntimeError):
@@ -128,6 +131,91 @@ class OkxRestClient:
 
     async def fetch_account_summary(self, timestamp: str) -> list[dict[str, object]]:
         return await self._signed_get("/api/v5/account/balance", timestamp)
+
+    async def transfer_funds(
+        self,
+        *,
+        currency: str,
+        amount: str,
+        from_account: str,
+        to_account: str,
+        timestamp: str,
+        transfer_type: str = "0",
+        client_id: str | None = None,
+    ) -> list[dict[str, object]]:
+        payload = self.build_transfer_payload(
+            currency=currency,
+            amount=amount,
+            from_account=from_account,
+            to_account=to_account,
+            transfer_type=transfer_type,
+            client_id=client_id,
+        )
+        body = json.dumps(payload, separators=(",", ":"))
+        headers = self.build_signed_headers("POST", "/api/v5/asset/transfer", body, timestamp)
+        response = await self.client.post("/api/v5/asset/transfer", content=body, headers=headers)
+        response.raise_for_status()
+        return self._extract_data_payload(response.json())
+
+    def build_transfer_payload(
+        self,
+        *,
+        currency: str,
+        amount: str,
+        from_account: str,
+        to_account: str,
+        transfer_type: str = "0",
+        client_id: str | None = None,
+    ) -> dict[str, str]:
+        self._validate_non_blank_fields(
+            {
+                "ccy": currency,
+                "amt": amount,
+                "from": from_account,
+                "to": to_account,
+                "type": transfer_type,
+            }
+        )
+        if from_account not in _TRANSFER_ACCOUNT_TYPES:
+            raise ValueError(f"unsupported transfer from account: {from_account}")
+        if to_account not in _TRANSFER_ACCOUNT_TYPES:
+            raise ValueError(f"unsupported transfer to account: {to_account}")
+        if from_account == to_account:
+            raise ValueError("transfer from and to accounts must differ")
+        if transfer_type not in _TRANSFER_TYPES:
+            raise ValueError(f"unsupported transfer type: {transfer_type}")
+        amount_value = self._parse_positive_decimal_string(amount, field_name="amt")
+        payload = {
+            "ccy": currency.upper(),
+            "amt": amount_value,
+            "from": from_account,
+            "to": to_account,
+            "type": transfer_type,
+        }
+        if client_id is not None:
+            self._validate_non_blank_fields({"clientId": client_id})
+            payload["clientId"] = client_id
+        return payload
+
+    async def fetch_transfer_state(
+        self,
+        *,
+        timestamp: str,
+        transfer_id: str | None = None,
+        client_id: str | None = None,
+        transfer_type: str = "0",
+    ) -> list[dict[str, object]]:
+        params = {"type": transfer_type}
+        if transfer_id is not None:
+            self._validate_non_blank_fields({"transId": transfer_id})
+            params["transId"] = transfer_id
+        if client_id is not None:
+            self._validate_non_blank_fields({"clientId": client_id})
+            params["clientId"] = client_id
+        if "transId" not in params and "clientId" not in params:
+            raise ValueError("transfer_id or client_id is required")
+        path = self._build_query_path("/api/v5/asset/transfer-state", params)
+        return await self._signed_get(path, timestamp)
 
     async def fetch_history_candles(
         self,
@@ -280,3 +368,12 @@ class OkxRestClient:
         for field_name, value in fields.items():
             if not value.strip():
                 raise ValueError(f"blank {field_name} is not allowed")
+
+    def _parse_positive_decimal_string(self, value: str, *, field_name: str) -> str:
+        try:
+            numeric = float(value)
+        except ValueError as exc:
+            raise ValueError(f"{field_name} must be a positive number") from exc
+        if not math.isfinite(numeric) or numeric <= 0:
+            raise ValueError(f"{field_name} must be a positive number")
+        return f"{numeric:g}"

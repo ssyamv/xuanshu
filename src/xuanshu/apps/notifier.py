@@ -5,7 +5,8 @@ from dataclasses import dataclass
 from typing import Protocol
 
 from xuanshu.config.settings import NotifierRuntimeSettings
-from xuanshu.core.enums import RunMode
+from xuanshu.core.enums import OkxAccountMode, RunMode
+from xuanshu.infra.okx.rest import OkxRestClient
 from xuanshu.infra.notifier.telegram import TelegramBotCommand, TelegramInboundMessage, TextMessagePayload
 from xuanshu.ops.runtime_logging import configure_runtime_logger
 from xuanshu.infra.storage.postgres_store import PostgresRuntimeStore
@@ -14,6 +15,7 @@ from xuanshu.notifier.entry_gap import build_entry_gap_reporter, load_fixed_stra
 from xuanshu.notifier.service import NotifierService
 
 _LOGGER = configure_runtime_logger("xuanshu.notifier")
+_OKX_REST_BASE_URL = "https://www.okx.com"
 
 
 class NotifierAdapter(Protocol):
@@ -65,6 +67,18 @@ def build_history_store(settings: NotifierRuntimeSettings) -> PostgresRuntimeSto
     return PostgresRuntimeStore(dsn=str(settings.postgres_dsn))
 
 
+def build_okx_rest_client(settings: NotifierRuntimeSettings) -> OkxRestClient | None:
+    if settings.okx_api_key is None or settings.okx_api_secret is None or settings.okx_api_passphrase is None:
+        return None
+    return OkxRestClient(
+        base_url=_OKX_REST_BASE_URL,
+        api_key=settings.okx_api_key.get_secret_value(),
+        api_secret=settings.okx_api_secret.get_secret_value(),
+        passphrase=settings.okx_api_passphrase.get_secret_value(),
+        simulated_trading=settings.okx_account_mode == OkxAccountMode.DEMO,
+    )
+
+
 def build_notifier_service(
     settings: NotifierRuntimeSettings,
     *,
@@ -79,6 +93,7 @@ def build_notifier_service(
         history_store=history_store,
         entry_gap_provider=build_entry_gap_reporter(),
         fixed_strategy_snapshot=load_fixed_strategy_snapshot(settings.fixed_strategy_snapshot_path),
+        funds_transfer_client=build_okx_rest_client(settings),
     )
 
 

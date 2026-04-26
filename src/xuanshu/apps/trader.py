@@ -328,6 +328,7 @@ def _now_timestamp() -> str:
 
 
 def _build_runtime_budget_summary(runtime: TraderRuntime) -> dict[str, object]:
+    synced_strategy_total = _account_synced_strategy_total(runtime)
     summary = {
         "max_daily_loss": runtime.startup_checkpoint.budget_state.max_daily_loss,
         "remaining_daily_loss": runtime.startup_checkpoint.budget_state.remaining_daily_loss,
@@ -335,11 +336,15 @@ def _build_runtime_budget_summary(runtime: TraderRuntime) -> dict[str, object]:
         "remaining_order_count": runtime.startup_checkpoint.budget_state.remaining_order_count,
         "current_mode": runtime.current_mode.value,
         "starting_nav": runtime.starting_nav,
-        "strategy_total_amount": runtime.components.risk_kernel.nav,
+        "strategy_total_amount": synced_strategy_total or runtime.components.risk_kernel.nav,
         **runtime.components.state_engine.build_budget_pool_summary(),
     }
     existing = runtime.runtime_store.get_budget_pool_summary()
-    if isinstance(existing, dict) and existing.get("manual_strategy_total_amount_override") is True:
+    if (
+        synced_strategy_total is None
+        and isinstance(existing, dict)
+        and existing.get("manual_strategy_total_amount_override") is True
+    ):
         if "strategy_total_amount" in existing:
             summary["strategy_total_amount"] = existing["strategy_total_amount"]
         summary["manual_strategy_total_amount_override"] = True
@@ -1453,7 +1458,21 @@ def _positive_float(value: object) -> float | None:
     return parsed
 
 
-def _sync_manual_strategy_capital(runtime: TraderRuntime) -> None:
+def _account_synced_strategy_total(runtime: TraderRuntime) -> float | None:
+    account_state = runtime.components.state_engine.account_state
+    if account_state.equity > 0.0:
+        return account_state.equity
+    if account_state.available_balance > 0.0:
+        return account_state.available_balance
+    return None
+
+
+def _sync_strategy_capital(runtime: TraderRuntime) -> None:
+    account_strategy_total = _account_synced_strategy_total(runtime)
+    if account_strategy_total is not None:
+        runtime.starting_nav = account_strategy_total
+        runtime.components.risk_kernel.nav = account_strategy_total
+        return
     summary = runtime.runtime_store.get_budget_pool_summary()
     if not isinstance(summary, dict):
         return
@@ -1467,7 +1486,7 @@ def _sync_manual_strategy_capital(runtime: TraderRuntime) -> None:
 
 
 def _sync_manual_runtime_controls(runtime: TraderRuntime) -> None:
-    _sync_manual_strategy_capital(runtime)
+    _sync_strategy_capital(runtime)
     requested_mode = runtime.runtime_store.get_run_mode()
     if requested_mode is not None and _RUN_MODE_PRIORITY[requested_mode] > _RUN_MODE_PRIORITY[runtime.current_mode]:
         _tighten_runtime_mode(runtime, requested_mode)

@@ -988,6 +988,131 @@ def test_okx_rest_client_place_order_posts_signed_body() -> None:
     asyncio.run(client.aclose())
 
 
+def test_okx_rest_client_transfer_funds_posts_signed_body() -> None:
+    client = OkxRestClient(
+        base_url="https://www.okx.com",
+        api_key="api-key",
+        api_secret="api-secret",
+        passphrase="api-passphrase",
+    )
+    timestamp = "2026-04-26T00:00:00.000Z"
+    payload = client.build_transfer_payload(
+        currency="usdt",
+        amount="120.00",
+        from_account="18",
+        to_account="6",
+        client_id="XSWD20260426000000000000",
+    )
+    expected_body = json.dumps(payload, separators=(",", ":"))
+    expected_signature = base64.b64encode(
+        hmac.new(
+            b"api-secret",
+            f"{timestamp}POST/api/v5/asset/transfer{expected_body}".encode(),
+            hashlib.sha256,
+        ).digest()
+    ).decode()
+    captured: dict[str, object] = {}
+
+    class DummyResponse:
+        def raise_for_status(self) -> None:
+            captured["raise_for_status_called"] = True
+
+        def json(self) -> dict[str, object]:
+            return {"code": "0", "data": [{"transId": "12345"}]}
+
+    async def fake_post(path: str, *, content: str, headers: dict[str, str]) -> DummyResponse:
+        captured["path"] = path
+        captured["content"] = content
+        captured["headers"] = headers
+        return DummyResponse()
+
+    client.client.post = fake_post  # type: ignore[method-assign]
+
+    result = asyncio.run(
+        client.transfer_funds(
+            currency="usdt",
+            amount="120.00",
+            from_account="18",
+            to_account="6",
+            timestamp=timestamp,
+            client_id="XSWD20260426000000000000",
+        )
+    )
+
+    assert payload == {
+        "ccy": "USDT",
+        "amt": "120",
+        "from": "18",
+        "to": "6",
+        "type": "0",
+        "clientId": "XSWD20260426000000000000",
+    }
+    assert result == [{"transId": "12345"}]
+    assert captured["path"] == "/api/v5/asset/transfer"
+    assert captured["content"] == expected_body
+    assert captured["headers"]["OK-ACCESS-SIGN"] == expected_signature
+    assert captured["raise_for_status_called"] is True
+
+    asyncio.run(client.aclose())
+
+
+def test_okx_rest_client_fetches_transfer_state_by_transfer_id() -> None:
+    client = OkxRestClient(
+        base_url="https://www.okx.com",
+        api_key="api-key",
+        api_secret="api-secret",
+        passphrase="api-passphrase",
+    )
+    captured: dict[str, object] = {}
+
+    class DummyResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, object]:
+            return {"code": "0", "data": [{"transId": "12345", "state": "success"}]}
+
+    async def fake_get(path: str, *, headers: dict[str, str]) -> DummyResponse:
+        captured["path"] = path
+        captured["headers"] = headers
+        return DummyResponse()
+
+    client.client.get = fake_get  # type: ignore[method-assign]
+
+    result = asyncio.run(
+        client.fetch_transfer_state(
+            timestamp="2026-04-26T00:00:00.000Z",
+            transfer_id="12345",
+        )
+    )
+
+    assert result == [{"transId": "12345", "state": "success"}]
+    assert captured["path"] == "/api/v5/asset/transfer-state?type=0&transId=12345"
+    assert "OK-ACCESS-SIGN" in captured["headers"]
+
+    asyncio.run(client.aclose())
+
+
+def test_okx_rest_client_rejects_invalid_transfer_payload() -> None:
+    client = OkxRestClient(
+        base_url="https://www.okx.com",
+        api_key="api-key",
+        api_secret="api-secret",
+        passphrase="api-passphrase",
+    )
+
+    with pytest.raises(ValueError, match="unsupported transfer from account"):
+        client.build_transfer_payload(currency="USDT", amount="1", from_account="8", to_account="6")
+    with pytest.raises(ValueError, match="must differ"):
+        client.build_transfer_payload(currency="USDT", amount="1", from_account="6", to_account="6")
+    with pytest.raises(ValueError, match="positive number"):
+        client.build_transfer_payload(currency="USDT", amount="0", from_account="6", to_account="18")
+    with pytest.raises(ValueError, match="transfer_id or client_id is required"):
+        asyncio.run(client.fetch_transfer_state(timestamp="2026-04-26T00:00:00.000Z"))
+
+    asyncio.run(client.aclose())
+
+
 def test_okx_rest_client_treats_top_level_non_zero_code_as_failure() -> None:
     client = OkxRestClient(
         base_url="https://www.okx.com",

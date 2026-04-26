@@ -228,6 +228,47 @@ def test_trader_syncs_manual_runtime_controls_from_redis(monkeypatch) -> None:
     assert runtime.components.risk_kernel.nav == 5_000.0
 
 
+def test_trader_syncs_strategy_capital_from_account_balance(monkeypatch) -> None:
+    _set_required_settings_env(monkeypatch)
+    fake_redis = _FakeRedis()
+    monkeypatch.setattr(
+        trader_app,
+        "build_snapshot_store",
+        lambda settings: RedisSnapshotStore(redis_client=fake_redis),
+    )
+    monkeypatch.setattr(
+        trader_app,
+        "build_runtime_state_store",
+        lambda settings: RedisRuntimeStateStore(redis_client=fake_redis),
+    )
+    runtime = trader_app.build_trader_runtime()
+    runtime.runtime_store.set_budget_pool_summary(
+        {
+            "strategy_total_amount": 5_000.0,
+            "manual_strategy_total_amount_override": True,
+        }
+    )
+    runtime.components.state_engine.on_account_snapshot(
+        AccountSnapshotEvent(
+            event_type=TraderEventType.ACCOUNT_SNAPSHOT,
+            exchange="okx",
+            generated_at=datetime.now(UTC),
+            private_sequence="pri-1",
+            equity=1_300.0,
+            available_balance=1_250.0,
+            margin_ratio=0.0,
+        )
+    )
+
+    trader_app._sync_manual_runtime_controls(runtime)
+    summary = trader_app._build_runtime_budget_summary(runtime)
+
+    assert runtime.starting_nav == 1_300.0
+    assert runtime.components.risk_kernel.nav == 1_300.0
+    assert summary["strategy_total_amount"] == 1_300.0
+    assert "manual_strategy_total_amount_override" not in summary
+
+
 def test_trader_entrypoint_threads_demo_account_mode_into_okx_clients(monkeypatch) -> None:
     _set_required_settings_env(monkeypatch)
     monkeypatch.setenv("XUANSHU_OKX_ACCOUNT_MODE", "demo")
@@ -2088,7 +2129,7 @@ def test_trader_runtime_blocks_open_when_available_margin_is_too_low(monkeypatch
         "symbol": "ETH-USDT-SWAP",
         "detail": "insufficient_available_margin",
         "strategy_id": "short_momentum",
-        "requested_size": 875.0,
+        "requested_size": 2.3345000000000002,
         "available_balance": 50.0,
     }
 
