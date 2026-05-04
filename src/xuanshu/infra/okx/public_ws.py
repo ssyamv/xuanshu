@@ -54,6 +54,8 @@ class OkxPublicStream:
         event = payload.get("event")
         if event == "error":
             return (self._build_fault(payload),)
+        if "data" not in payload:
+            return ()
 
         envelope = self._normalize_envelope(payload)
         if isinstance(envelope, FaultEvent):

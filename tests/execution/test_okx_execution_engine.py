@@ -145,6 +145,22 @@ def test_okx_public_stream_ignores_empty_data_batches() -> None:
     assert events == ()
 
 
+def test_okx_public_stream_ignores_data_less_control_messages() -> None:
+    stream = OkxPublicStream(url="wss://ws.okx.com:8443/ws/v5/public")
+
+    subscribe_events = stream.decode_message(
+        {"event": "subscribe", "arg": "tickers"},
+        sequence="pub-1",
+    )
+    heartbeat_events = stream.decode_message(
+        {"event": "pong"},
+        sequence="pub-2",
+    )
+
+    assert subscribe_events == ()
+    assert heartbeat_events == ()
+
+
 def test_okx_public_stream_normalizes_malformed_and_unknown_envelopes_into_faults() -> None:
     stream = OkxPublicStream(url="wss://ws.okx.com:8443/ws/v5/public")
 

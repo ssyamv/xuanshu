@@ -1,5 +1,5 @@
 import asyncio
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -1257,6 +1257,70 @@ def test_trader_runtime_recovers_reduce_only_after_private_stream_resumes(monkey
         "event_type": "runtime_fault_recovered",
         "symbol": "system",
         "detail": "okxprivatestream_stream_failed",
+    } in history_store.written_rows["risk_events"]
+
+
+def test_trader_runtime_recovers_degraded_after_public_stream_resumes(monkeypatch) -> None:
+    _set_required_settings_env(monkeypatch)
+    fake_redis = _FakeRedis()
+    history_store = PostgresRuntimeStore(dsn="postgresql://xuanshu:xuanshu@localhost:5432/xuanshu")
+
+    monkeypatch.setattr(
+        trader_app,
+        "build_snapshot_store",
+        lambda settings: RedisSnapshotStore(redis_client=fake_redis),
+    )
+    monkeypatch.setattr(
+        trader_app,
+        "build_runtime_state_store",
+        lambda settings: RedisRuntimeStateStore(redis_client=fake_redis),
+    )
+    monkeypatch.setattr(trader_app, "build_history_store", lambda settings: history_store)
+
+    runtime = trader_app.build_trader_runtime()
+
+    async def _exercise_runtime() -> None:
+        try:
+            await trader_app._dispatch_runtime_event(
+                runtime,
+                FaultEvent(
+                    event_type=TraderEventType.RUNTIME_FAULT,
+                    exchange="okx",
+                    generated_at=datetime.now(UTC),
+                    severity="warn",
+                    code="public_ws_malformed_envelope",
+                    detail="public websocket envelope arg must be an object",
+                ),
+            )
+            assert runtime.current_mode == RunMode.DEGRADED
+
+            await trader_app._dispatch_runtime_event(
+                runtime,
+                OrderbookTopEvent(
+                    event_type=TraderEventType.ORDERBOOK_TOP,
+                    symbol="BTC-USDT-SWAP",
+                    exchange="okx",
+                    generated_at=datetime.now(UTC),
+                    public_sequence="pub-recovered",
+                    bid_price=100.0,
+                    ask_price=100.1,
+                    bid_size=1.0,
+                    ask_size=1.0,
+                ),
+            )
+        finally:
+            await runtime.components.aclose()
+
+    asyncio.run(_exercise_runtime())
+
+    assert runtime.current_mode == RunMode.NORMAL
+    assert runtime.components.state_engine.fault_flags == {}
+    assert runtime.runtime_store.get_run_mode() == RunMode.NORMAL
+    assert runtime.runtime_store.get_fault_flags() == {}
+    assert {
+        "event_type": "runtime_fault_recovered",
+        "symbol": "system",
+        "detail": "public_ws_malformed_envelope",
     } in history_store.written_rows["risk_events"]
 
 
@@ -2584,6 +2648,19 @@ def test_trader_runtime_reuses_fixed_vol_breakout_history_cache(monkeypatch) -> 
 
     assert len(fake_rest.history_candle_calls) == 1
     assert fake_rest.placed_orders == []
+
+
+def test_fixed_vol_breakout_history_cache_ttl_is_short_for_live_entry_gap_alignment() -> None:
+    parameters = trader_app.FixedVolBreakoutParameters(
+        bar="1D",
+        k=0.9,
+        trailing_atr=1.5,
+        max_hold_bars=48,
+        atr_period=7,
+        ema_period=100,
+    )
+
+    assert trader_app._fixed_vol_breakout_cache_ttl(parameters) <= timedelta(seconds=30)
 
 
 def test_trader_runtime_backs_off_fixed_vol_breakout_history_failures(monkeypatch) -> None:

@@ -80,6 +80,8 @@ _DEFAULT_VOL_BREAKOUT_MAX_HOLD_BARS = 12
 _LONG_ENTRY_CONFIRMATION_TICKS = 2
 _OPEN_EXECUTION_FAILURE_COOLDOWN = timedelta(minutes=15)
 _POST_CLOSE_ENTRY_COOLDOWN = timedelta(minutes=15)
+_FIXED_VOL_BREAKOUT_CACHE_MIN_TTL = timedelta(seconds=15)
+_FIXED_VOL_BREAKOUT_CACHE_MAX_TTL = timedelta(seconds=30)
 _MARGIN_USAGE_BUFFER = 0.80
 _CONTRACT_VALUE_BY_SYMBOL = {
     "BTC-USDT-SWAP": 0.01,
@@ -104,6 +106,9 @@ _PUBLIC_STREAM_FAULT_CODES = frozenset(
     {
         "okxpublicstream_stream_failed",
         "public_ws_disconnected",
+        "public_ws_error",
+        "public_ws_malformed_envelope",
+        "public_ws_unknown_channel",
     }
 )
 _PRIVATE_STREAM_FAULT_CODES = frozenset(
@@ -865,7 +870,10 @@ def _fixed_vol_breakout_cache_key(symbol: str, parameters: FixedVolBreakoutParam
 
 def _fixed_vol_breakout_cache_ttl(parameters: FixedVolBreakoutParameters) -> timedelta:
     bar_duration = _extract_bar_duration(parameters.bar)
-    return min(max(bar_duration / 20, timedelta(minutes=1)), timedelta(minutes=15))
+    return min(
+        max(bar_duration / 20, _FIXED_VOL_BREAKOUT_CACHE_MIN_TTL),
+        _FIXED_VOL_BREAKOUT_CACHE_MAX_TTL,
+    )
 
 
 def _fixed_vol_breakout_failure_cooldown(parameters: FixedVolBreakoutParameters) -> timedelta:
