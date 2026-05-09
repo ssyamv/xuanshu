@@ -35,6 +35,8 @@ def _build_snapshot(
     strategy_enable_flags: dict[str, bool] | None = None,
     approval_state: ApprovalState = ApprovalState.APPROVED,
     market_mode: RunMode = RunMode.NORMAL,
+    risk_multiplier: float = 0.8,
+    per_symbol_max_position: float = 0.12,
 ) -> StrategyConfigSnapshot:
     now = datetime.now(UTC)
     return StrategyConfigSnapshot(
@@ -49,8 +51,8 @@ def _build_snapshot(
             StrategyId.SHORT_MOMENTUM.value: True,
             StrategyId.RISK_PAUSE.value: True,
         },
-        risk_multiplier=0.8,
-        per_symbol_max_position=0.12,
+        risk_multiplier=risk_multiplier,
+        per_symbol_max_position=per_symbol_max_position,
         max_leverage=3,
         market_mode=market_mode,
         approval_state=approval_state,
@@ -110,3 +112,13 @@ def test_risk_kernel_allows_enabled_short_momentum_sell_signal() -> None:
 
     assert decision.allow_open is True
     assert decision.reason_codes == []
+
+
+def test_risk_kernel_does_not_apply_legacy_nav_fraction_order_cap() -> None:
+    decision = RiskKernel(nav=965.0).evaluate(
+        _build_signal(strategy_id=StrategyId.VOL_BREAKOUT, side=OrderSide.BUY),
+        _build_snapshot(risk_multiplier=0.25, per_symbol_max_position=0.12),
+    )
+
+    assert decision.max_position == 28.95
+    assert decision.max_order_size == 28.95

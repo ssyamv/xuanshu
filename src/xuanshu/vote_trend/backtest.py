@@ -343,13 +343,7 @@ def _signal_side(
 
 
 def _requested_size(*, account: _AccountState, config: VoteTrendConfig) -> float:
-    return max(
-        1.0,
-        min(
-            account.equity * config.per_symbol_max_position * config.risk_fraction,
-            account.equity * 0.0035,
-        ),
-    )
+    return max(1.0, account.equity * config.per_symbol_max_position * config.risk_fraction)
 
 
 def _active_return(*, position: _Position, close: float) -> float:

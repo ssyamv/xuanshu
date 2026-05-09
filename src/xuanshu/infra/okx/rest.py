@@ -11,6 +11,8 @@ import httpx
 
 _SUPPORTED_ORDER_TYPES = frozenset({"market", "limit"})
 _SUPPORTED_ORDER_SIDES = frozenset({"buy", "sell"})
+_SUPPORTED_MARGIN_MODES = frozenset({"cross", "isolated"})
+_SUPPORTED_POSITION_SIDES = frozenset({"long", "short", "net"})
 _PLACE_ORDER_REQUIRED_FIELDS = frozenset({"instId", "tdMode", "side", "posSide", "ordType", "sz", "clOrdId"})
 _PLACE_ORDER_OPTIONAL_FIELDS = frozenset({"px", "reduceOnly"})
 _PLACE_ORDER_ALLOWED_FIELDS = _PLACE_ORDER_REQUIRED_FIELDS | _PLACE_ORDER_OPTIONAL_FIELDS
@@ -131,6 +133,52 @@ class OkxRestClient:
 
     async def fetch_account_summary(self, timestamp: str) -> list[dict[str, object]]:
         return await self._signed_get("/api/v5/account/balance", timestamp)
+
+    async def set_leverage(
+        self,
+        *,
+        symbol: str,
+        leverage: int,
+        margin_mode: str,
+        position_side: str | None,
+        timestamp: str,
+    ) -> list[dict[str, object]]:
+        payload = self.build_set_leverage_payload(
+            symbol=symbol,
+            leverage=leverage,
+            margin_mode=margin_mode,
+            position_side=position_side,
+        )
+        body = json.dumps(payload, separators=(",", ":"))
+        headers = self.build_signed_headers("POST", "/api/v5/account/set-leverage", body, timestamp)
+        response = await self.client.post("/api/v5/account/set-leverage", content=body, headers=headers)
+        response.raise_for_status()
+        return self._extract_data_payload(response.json())
+
+    def build_set_leverage_payload(
+        self,
+        *,
+        symbol: str,
+        leverage: int,
+        margin_mode: str,
+        position_side: str | None,
+    ) -> dict[str, str]:
+        self._validate_non_blank_fields({"instId": symbol, "mgnMode": margin_mode})
+        if type(leverage) is not int or leverage < 1:
+            raise ValueError(f"unsupported leverage: {leverage!r}")
+        if margin_mode not in _SUPPORTED_MARGIN_MODES:
+            raise ValueError(f"unsupported mgnMode: {margin_mode}")
+        payload = {
+            "instId": symbol,
+            "lever": str(leverage),
+            "mgnMode": margin_mode,
+        }
+        if position_side is not None:
+            self._validate_non_blank_fields({"posSide": position_side})
+            if position_side not in _SUPPORTED_POSITION_SIDES:
+                raise ValueError(f"unsupported posSide: {position_side}")
+            payload["posSide"] = position_side
+        return payload
 
     async def transfer_funds(
         self,

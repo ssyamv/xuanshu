@@ -157,13 +157,7 @@ def evaluate_vol_breakout(
 
         breakout_level = closes[index - 1] + parameters.k * atr_values[index - 1]
         if close > ema_values[index] and close > breakout_level and index < len(rows) - 1:
-            requested_size = max(
-                1.0,
-                min(
-                    account.equity * config.per_symbol_max_position * config.risk_fraction,
-                    account.equity * 0.0035,
-                ),
-            )
+            requested_size = max(1.0, account.equity * config.per_symbol_max_position * config.risk_fraction)
             sizing = calculate_open_order_size(
                 OpenOrderSizingInput(
                     symbol=config.symbol,

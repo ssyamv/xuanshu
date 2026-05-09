@@ -49,7 +49,7 @@ class RiskKernel:
             allow_open=allow_open,
             allow_close=True,
             max_position=max_position,
-            max_order_size=min(max_position, self.nav * 0.0035),
+            max_order_size=max_position,
             risk_mode=snapshot.market_mode,
             reason_codes=reason_codes,
         )

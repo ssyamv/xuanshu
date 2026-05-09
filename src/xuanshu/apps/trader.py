@@ -1274,6 +1274,20 @@ async def _submit_signal_open(runtime: TraderRuntime, signal: CandidateSignal) -
             }
         )
         return False
+    try:
+        await _ensure_open_order_leverage(runtime, signal)
+    except Exception as exc:
+        cooldown_until = _start_open_execution_failure_cooldown(runtime, signal)
+        runtime.history_store.append_risk_event(
+            {
+                "event_type": "execution_submission_failed",
+                "symbol": signal.symbol,
+                "detail": _format_execution_error(exc),
+                "cooldown_until": cooldown_until,
+                "strategy_id": signal.strategy_id.value,
+            }
+        )
+        return False
     strategy_logic = _build_strategy_logic(signal, runtime.startup_snapshot)
     runtime.components.state_engine.stage_order_submission(
         signal.symbol,
@@ -1374,6 +1388,17 @@ def _margin_adjusted_open_order_size(
         )
     )
     return result.order_size, result.block_reason
+
+
+async def _ensure_open_order_leverage(runtime: TraderRuntime, signal: CandidateSignal) -> None:
+    position_side = "long" if signal.side == OrderSide.BUY else "short"
+    await runtime.components.okx_rest_client.set_leverage(
+        symbol=signal.symbol,
+        leverage=int(runtime.startup_snapshot.max_leverage),
+        margin_mode="cross",
+        position_side=position_side,
+        timestamp=_now_timestamp(),
+    )
 
 
 async def _submit_position_close(

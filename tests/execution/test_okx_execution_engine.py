@@ -1004,6 +1004,65 @@ def test_okx_rest_client_place_order_posts_signed_body() -> None:
     asyncio.run(client.aclose())
 
 
+def test_okx_rest_client_set_leverage_posts_signed_body() -> None:
+    client = OkxRestClient(
+        base_url="https://www.okx.com",
+        api_key="api-key",
+        api_secret="api-secret",
+        passphrase="api-passphrase",
+    )
+    timestamp = "2026-04-19T00:00:00.000Z"
+    payload = {"instId": "BTC-USDT-SWAP", "lever": "3", "mgnMode": "cross", "posSide": "long"}
+    expected_body = json.dumps(payload, separators=(",", ":"))
+    expected_signature = base64.b64encode(
+        hmac.new(
+            b"api-secret",
+            f"{timestamp}POST/api/v5/account/set-leverage{expected_body}".encode(),
+            hashlib.sha256,
+        ).digest()
+    ).decode()
+    captured: dict[str, object] = {}
+
+    class DummyResponse:
+        def raise_for_status(self) -> None:
+            captured["raise_for_status_called"] = True
+
+        def json(self) -> dict[str, object]:
+            return {"code": "0", "data": [{"instId": "BTC-USDT-SWAP", "lever": "3", "mgnMode": "cross"}]}
+
+    async def fake_post(path: str, *, content: str, headers: dict[str, str]) -> DummyResponse:
+        captured["path"] = path
+        captured["content"] = content
+        captured["headers"] = headers
+        return DummyResponse()
+
+    client.client.post = fake_post  # type: ignore[method-assign]
+
+    result = asyncio.run(
+        client.set_leverage(
+            symbol="BTC-USDT-SWAP",
+            leverage=3,
+            margin_mode="cross",
+            position_side="long",
+            timestamp=timestamp,
+        )
+    )
+
+    assert result == [{"instId": "BTC-USDT-SWAP", "lever": "3", "mgnMode": "cross"}]
+    assert captured["path"] == "/api/v5/account/set-leverage"
+    assert captured["content"] == expected_body
+    assert captured["headers"] == {
+        "OK-ACCESS-KEY": "api-key",
+        "OK-ACCESS-PASSPHRASE": "api-passphrase",
+        "OK-ACCESS-TIMESTAMP": timestamp,
+        "OK-ACCESS-SIGN": expected_signature,
+        "Content-Type": "application/json",
+    }
+    assert captured["raise_for_status_called"] is True
+
+    asyncio.run(client.aclose())
+
+
 def test_okx_rest_client_transfer_funds_posts_signed_body() -> None:
     client = OkxRestClient(
         base_url="https://www.okx.com",

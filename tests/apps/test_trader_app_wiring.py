@@ -41,6 +41,8 @@ class _FakeRedis:
 class _FakeRestClient:
     def __init__(self) -> None:
         self.placed_orders: list[tuple[dict[str, str], str]] = []
+        self.leverage_updates: list[dict[str, object]] = []
+        self.set_leverage_error: Exception | None = None
         self.open_orders_calls: list[tuple[str, str]] = []
         self.positions_calls: list[tuple[str, str]] = []
         self.history_candles: list[dict[str, object]] = []
@@ -50,6 +52,28 @@ class _FakeRestClient:
     async def place_order(self, payload: dict[str, str], timestamp: str) -> list[dict[str, object]]:
         self.placed_orders.append((payload, timestamp))
         return [{"ordId": "ord-1", "clOrdId": payload["clOrdId"], "sCode": "0"}]
+
+    async def set_leverage(
+        self,
+        *,
+        symbol: str,
+        leverage: int,
+        margin_mode: str,
+        position_side: str | None,
+        timestamp: str,
+    ) -> list[dict[str, object]]:
+        self.leverage_updates.append(
+            {
+                "symbol": symbol,
+                "leverage": leverage,
+                "margin_mode": margin_mode,
+                "position_side": position_side,
+                "timestamp": timestamp,
+            }
+        )
+        if self.set_leverage_error is not None:
+            raise self.set_leverage_error
+        return [{"instId": symbol, "lever": str(leverage), "mgnMode": margin_mode, "posSide": position_side or ""}]
 
     async def fetch_open_orders(self, symbol: str, timestamp: str) -> list[dict[str, object]]:
         self.open_orders_calls.append((symbol, timestamp))
@@ -2193,7 +2217,7 @@ def test_trader_runtime_blocks_open_when_available_margin_is_too_low(monkeypatch
         "symbol": "ETH-USDT-SWAP",
         "detail": "insufficient_available_margin",
         "strategy_id": "short_momentum",
-        "requested_size": 2.3345000000000002,
+        "requested_size": 40.019999999999996,
         "available_balance": 50.0,
     }
 
@@ -2294,7 +2318,7 @@ def test_trader_runtime_shrinks_open_size_to_available_margin(monkeypatch) -> No
     asyncio.run(_exercise_runtime())
 
     assert len(fake_rest.placed_orders) == 1
-    assert fake_rest.placed_orders[0][0]["sz"] == "1.19"
+    assert fake_rest.placed_orders[0][0]["sz"] == "1.41"
     assert fake_rest.placed_orders[0][0]["side"] == "sell"
     assert fake_rest.placed_orders[0][0]["posSide"] == "short"
 
@@ -2578,6 +2602,113 @@ def _fixed_vote_snapshot(runtime: trader_app.TraderRuntime, *, strategy_def_id: 
             },
         }
     )
+
+
+def test_trader_runtime_sets_snapshot_leverage_before_live_open(monkeypatch) -> None:
+    _set_required_settings_env(monkeypatch)
+    fake_rest = _FakeRestClient()
+    runtime = trader_app.build_trader_runtime()
+    runtime.components = trader_app.TraderComponents(
+        state_engine=runtime.components.state_engine,
+        risk_kernel=runtime.components.risk_kernel,
+        checkpoint_service=runtime.components.checkpoint_service,
+        okx_rest_client=fake_rest,
+        okx_public_stream=runtime.components.okx_public_stream,
+        okx_private_stream=runtime.components.okx_private_stream,
+        client_order_id_builder=runtime.components.client_order_id_builder,
+    )
+    runtime.execution_coordinator = trader_app.ExecutionCoordinator(rest_client=fake_rest)
+    runtime.startup_snapshot = _fixed_vote_snapshot(
+        runtime,
+        strategy_def_id="vote-trend-btc-usdt-swap-12h-f3-s5-lb2-ch3-th0-v4-sl75-tp100-h4-both",
+    ).model_copy(update={"max_leverage": 3})
+    runtime.components.state_engine.on_bbo("BTC-USDT-SWAP", bid=100.0, ask=100.2)
+    runtime.components.state_engine.on_account_snapshot(
+        AccountSnapshotEvent(
+            event_type=TraderEventType.ACCOUNT_SNAPSHOT,
+            exchange="okx",
+            generated_at=datetime.now(UTC),
+            private_sequence="pri-1",
+            equity=1_000.0,
+            available_balance=1_000.0,
+            margin_ratio=0.0,
+        )
+    )
+    signal = CandidateSignal(
+        symbol="BTC-USDT-SWAP",
+        strategy_id=StrategyId.VOTE_TREND,
+        side=OrderSide.BUY,
+        entry_type=EntryType.MARKET,
+        urgency=SignalUrgency.HIGH,
+        confidence=0.75,
+        max_hold_ms=3000,
+        cancel_after_ms=750,
+        risk_tag="vote_trend",
+    )
+
+    assert asyncio.run(trader_app._submit_signal_open(runtime, signal)) is True
+
+    assert fake_rest.leverage_updates == [
+        {
+            "symbol": "BTC-USDT-SWAP",
+            "leverage": 3,
+            "margin_mode": "cross",
+            "position_side": "long",
+            "timestamp": fake_rest.leverage_updates[0]["timestamp"],
+        }
+    ]
+    assert len(fake_rest.placed_orders) == 1
+
+
+def test_trader_runtime_blocks_open_when_snapshot_leverage_cannot_be_set(monkeypatch) -> None:
+    _set_required_settings_env(monkeypatch)
+    fake_rest = _FakeRestClient()
+    fake_rest.set_leverage_error = RuntimeError("set leverage failed")
+    runtime = trader_app.build_trader_runtime()
+    runtime.components = trader_app.TraderComponents(
+        state_engine=runtime.components.state_engine,
+        risk_kernel=runtime.components.risk_kernel,
+        checkpoint_service=runtime.components.checkpoint_service,
+        okx_rest_client=fake_rest,
+        okx_public_stream=runtime.components.okx_public_stream,
+        okx_private_stream=runtime.components.okx_private_stream,
+        client_order_id_builder=runtime.components.client_order_id_builder,
+    )
+    runtime.execution_coordinator = trader_app.ExecutionCoordinator(rest_client=fake_rest)
+    runtime.startup_snapshot = _fixed_vote_snapshot(
+        runtime,
+        strategy_def_id="vote-trend-btc-usdt-swap-12h-f3-s5-lb2-ch3-th0-v4-sl75-tp100-h4-both",
+    ).model_copy(update={"max_leverage": 3})
+    runtime.components.state_engine.on_bbo("BTC-USDT-SWAP", bid=100.0, ask=100.2)
+    runtime.components.state_engine.on_account_snapshot(
+        AccountSnapshotEvent(
+            event_type=TraderEventType.ACCOUNT_SNAPSHOT,
+            exchange="okx",
+            generated_at=datetime.now(UTC),
+            private_sequence="pri-1",
+            equity=1_000.0,
+            available_balance=1_000.0,
+            margin_ratio=0.0,
+        )
+    )
+    signal = CandidateSignal(
+        symbol="BTC-USDT-SWAP",
+        strategy_id=StrategyId.VOTE_TREND,
+        side=OrderSide.BUY,
+        entry_type=EntryType.MARKET,
+        urgency=SignalUrgency.HIGH,
+        confidence=0.75,
+        max_hold_ms=3000,
+        cancel_after_ms=750,
+        risk_tag="vote_trend",
+    )
+
+    assert asyncio.run(trader_app._submit_signal_open(runtime, signal)) is False
+
+    assert fake_rest.leverage_updates
+    assert fake_rest.placed_orders == []
+    assert runtime.history_store.written_rows["risk_events"][-1]["event_type"] == "execution_submission_failed"
+    assert "set leverage failed" in runtime.history_store.written_rows["risk_events"][-1]["detail"]
 
 
 def test_trader_runtime_uses_fixed_vol_breakout_candles_for_live_open(monkeypatch) -> None:

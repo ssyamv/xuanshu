@@ -7,6 +7,7 @@ from xuanshu.core.enums import ApprovalState
 from xuanshu.core.enums import RunMode
 from xuanshu.infra.storage.postgres_store import PostgresRuntimeStore
 from xuanshu.infra.notifier.telegram import TelegramBotCommand, TelegramNotifier, TextMessagePayload, render_text_message
+from xuanshu.notifier import entry_gap
 from xuanshu.notifier.entry_gap import EntryGapReporter
 from xuanshu.notifier.service import NotifierService, format_mode_change
 
@@ -336,10 +337,28 @@ async def test_entry_gap_reporter_calculates_vote_trend_votes() -> None:
     assert "开仓条件差距\n快照：fixed-vote-trend-test" in text
     assert "结论：BTC-USDT-SWAP 当前投票已满足开仓条件。" in text
     assert "BTC-USDT-SWAP（已满足开仓条件）" in text
-    assert "- 策略：vote_trend 12H，需要 4/5 票；允许做空" in text
-    assert "- 投票：多头 5/4；空头 0/4" in text
+    assert "- 策略：vote_trend 12H，阈值 4/5 票；允许做空" in text
+    assert "- 投票：多头 5/5；空头 0/5" in text
     assert "- 多头价格差距：0.00（0.00%）" in text
     assert "vol_breakout 当前未启用" not in text
+
+
+def test_vote_trend_summary_uses_total_votes_and_threshold() -> None:
+    summary = entry_gap._format_vote_trend_summary(
+        [
+            (
+                "BTC-USDT-SWAP",
+                {
+                    "long_votes": 3,
+                    "short_votes": 1,
+                    "required_votes": 4,
+                    "total_votes": 5,
+                },
+            )
+        ]
+    )
+
+    assert summary == "结论：当前未触发开仓；最近 BTC-USDT-SWAP 多头为 3/5 票，阈值 4/5。"
 
 
 @pytest.mark.asyncio

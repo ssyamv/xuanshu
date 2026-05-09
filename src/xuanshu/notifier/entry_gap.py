@@ -230,6 +230,7 @@ class EntryGapReporter:
             "long_conditions": long_conditions,
             "short_conditions": short_conditions,
             "required_votes": parameters.required_votes,
+            "total_votes": len(long_conditions),
             "long_votes": sum(long_conditions.values()),
             "short_votes": sum(short_conditions.values()),
             "long_price_gap_abs": max(max(long_required["slow_ema"], long_required["momentum_close"], long_required["channel"]) - close, 0.0),
@@ -308,15 +309,16 @@ def _format_vote_trend_gap(
     long_votes = int(metric["long_votes"])
     short_votes = int(metric["short_votes"])
     required_votes = parameters.required_votes
+    total_votes = int(metric["total_votes"])
     long_ready = long_votes >= required_votes
     short_ready = parameters.allow_short and short_votes >= required_votes
     long_gap_pct = float(metric["long_price_gap_pct"])
     short_gap_pct = float(metric["short_price_gap_pct"])
     lines = [
         f"{symbol}（{'已满足开仓条件' if long_ready or short_ready else '未满足开仓条件'}）",
-        f"- 策略：vote_trend {parameters.bar}，需要 {required_votes}/5 票；{'允许做空' if parameters.allow_short else '仅做多'}",
+        f"- 策略：vote_trend {parameters.bar}，阈值 {required_votes}/{total_votes} 票；{'允许做空' if parameters.allow_short else '仅做多'}",
         f"- 现价：{float(metric['close']):.2f}",
-        f"- 投票：多头 {long_votes}/{required_votes}；空头 {short_votes}/{required_votes}",
+        f"- 投票：多头 {long_votes}/{total_votes}；空头 {short_votes}/{total_votes}",
         (
             f"- EMA：fast{parameters.fast_ema_period} {float(metric['fast_ema']):.2f} / "
             f"slow{parameters.slow_ema_period} {float(metric['slow_ema']):.2f}"
@@ -355,8 +357,14 @@ def _format_vote_trend_summary(metrics: list[tuple[str, dict[str, object]]]) -> 
         metrics,
         key=lambda item: max(int(item[1]["long_votes"]), int(item[1]["short_votes"])),
     )
-    best_votes = max(int(closest_metric["long_votes"]), int(closest_metric["short_votes"]))
-    return f"结论：当前未触发开仓；最近 {closest_symbol} 为 {best_votes}/{int(closest_metric['required_votes'])} 票。"
+    long_votes = int(closest_metric["long_votes"])
+    short_votes = int(closest_metric["short_votes"])
+    best_side = "多头" if long_votes >= short_votes else "空头"
+    best_votes = max(long_votes, short_votes)
+    return (
+        f"结论：当前未触发开仓；最近 {closest_symbol} {best_side}为 "
+        f"{best_votes}/{int(closest_metric['total_votes'])} 票，阈值 {int(closest_metric['required_votes'])}/{int(closest_metric['total_votes'])}。"
+    )
 
 
 _LONG_VOTE_LABELS = {
