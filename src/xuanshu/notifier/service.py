@@ -79,6 +79,8 @@ def _format_logic_line(strategy_logic: object) -> str:
 
 def _infer_strategy_id_from_client_order_id(client_order_id: object) -> str | None:
     normalized = str(client_order_id or "").strip().lower()
+    if "vote_trend" in normalized or "votetrend" in normalized:
+        return "vote_trend"
     if "short_momentum" in normalized or "shortmomentum" in normalized:
         return "short_momentum"
     if "vol_breakout" in normalized or "volbreakout" in normalized:
@@ -93,6 +95,8 @@ def _infer_strategy_id_from_client_order_id(client_order_id: object) -> str | No
 
 
 def _default_strategy_logic(strategy_id: object) -> str | None:
+    if strategy_id == "vote_trend":
+        return "多因子趋势投票，EMA/动量/通道/RSI 达到阈值后顺势开仓。"
     if strategy_id == "vol_breakout":
         return "波动率突破，价格突破 ATR 阈值后顺势开多。"
     if strategy_id == "short_momentum":

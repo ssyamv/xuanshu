@@ -2558,6 +2558,28 @@ def _fixed_vol_snapshot(runtime: trader_app.TraderRuntime, *, strategy_def_id: s
     )
 
 
+def _fixed_vote_snapshot(runtime: trader_app.TraderRuntime, *, strategy_def_id: str):
+    return runtime.startup_snapshot.model_copy(
+        update={
+            "version_id": "snap-vote-trend",
+            "market_mode": RunMode.NORMAL,
+            "approval_state": ApprovalState.APPROVED,
+            "strategy_enable_flags": {"vote_trend": True, "risk_pause": True},
+            "symbol_strategy_bindings": {
+                "BTC-USDT-SWAP": trader_app.ApprovedStrategyBinding(
+                    strategy_def_id=strategy_def_id,
+                    strategy_package_id=f"fixed-{strategy_def_id}",
+                    backtest_report_id="bt-fixed-vote-trend",
+                    score=3733.5,
+                    score_basis="backtest_return_percent",
+                    approval_record_id=f"fixed-{strategy_def_id}",
+                    activated_at=datetime.now(UTC),
+                )
+            },
+        }
+    )
+
+
 def test_trader_runtime_uses_fixed_vol_breakout_candles_for_live_open(monkeypatch) -> None:
     _set_required_settings_env(monkeypatch)
     fake_rest = _FakeRestClient()
@@ -2586,6 +2608,38 @@ def test_trader_runtime_uses_fixed_vol_breakout_candles_for_live_open(monkeypatc
     assert fake_rest.placed_orders[0][0]["side"] == "buy"
     assert fake_rest.history_candle_calls[0]["bar"] == "1D"
     assert runtime.vol_breakout_entry_candles["BTC-USDT-SWAP"] == runtime.vol_breakout_signal_candles["BTC-USDT-SWAP"]
+
+
+def test_trader_runtime_uses_fixed_vote_trend_candles_for_live_open(monkeypatch) -> None:
+    _set_required_settings_env(monkeypatch)
+    fake_rest = _FakeRestClient()
+    fake_rest.history_candles = _okx_candles([100 + index * 0.2 for index in range(20)] + [112, 116, 121])
+    runtime = trader_app.build_trader_runtime()
+    runtime.components = trader_app.TraderComponents(
+        state_engine=runtime.components.state_engine,
+        risk_kernel=runtime.components.risk_kernel,
+        checkpoint_service=runtime.components.checkpoint_service,
+        okx_rest_client=fake_rest,
+        okx_public_stream=runtime.components.okx_public_stream,
+        okx_private_stream=runtime.components.okx_private_stream,
+        client_order_id_builder=runtime.components.client_order_id_builder,
+    )
+    runtime.execution_coordinator = trader_app.ExecutionCoordinator(rest_client=fake_rest)
+    runtime.startup_snapshot = _fixed_vote_snapshot(
+        runtime,
+        strategy_def_id="vote-trend-btc-usdt-swap-12h-f3-s5-lb2-ch3-th0-v4-sl75-tp100-h4-both",
+    )
+    runtime.current_mode = RunMode.NORMAL
+    runtime.components.state_engine.set_run_mode(RunMode.NORMAL)
+
+    asyncio.run(trader_app._evaluate_symbol(runtime, "BTC-USDT-SWAP"))
+
+    assert len(fake_rest.placed_orders) == 1
+    assert fake_rest.placed_orders[0][0]["side"] == "buy"
+    assert fake_rest.placed_orders[0][0]["posSide"] == "long"
+    assert fake_rest.history_candle_calls[0]["bar"] == "12H"
+    assert runtime.vote_trend_entry_candles["BTC-USDT-SWAP"] == runtime.vote_trend_signal_candles["BTC-USDT-SWAP"]
+    assert runtime.history_store.written_rows["orders"][0]["strategy_id"] == "vote_trend"
 
 
 def test_trader_runtime_does_not_fallback_to_realtime_signal_when_fixed_vol_breakout_does_not_trigger(
@@ -3311,6 +3365,80 @@ def test_trader_runtime_closes_short_on_short_momentum_take_profit(monkeypatch) 
     assert runtime.history_store.written_rows["orders"][-1]["intent"] == "close"
     assert runtime.history_store.written_rows["orders"][-1]["strategy_id"] == "short_momentum"
     assert "short_momentum_take_profit" in runtime.history_store.written_rows["orders"][-1]["strategy_logic"]
+
+
+def test_trader_runtime_closes_vote_trend_short_on_linear_take_profit(monkeypatch) -> None:
+    _set_required_settings_env(monkeypatch)
+    fake_redis = _FakeRedis()
+    fake_rest = _FakeRestClient()
+    monkeypatch.setattr(
+        trader_app,
+        "build_snapshot_store",
+        lambda settings: RedisSnapshotStore(redis_client=fake_redis),
+    )
+    monkeypatch.setattr(
+        trader_app,
+        "build_runtime_state_store",
+        lambda settings: RedisRuntimeStateStore(redis_client=fake_redis),
+    )
+
+    runtime = trader_app.build_trader_runtime()
+    runtime.components = trader_app.TraderComponents(
+        state_engine=runtime.components.state_engine,
+        risk_kernel=runtime.components.risk_kernel,
+        checkpoint_service=runtime.components.checkpoint_service,
+        okx_rest_client=fake_rest,
+        okx_public_stream=runtime.components.okx_public_stream,
+        okx_private_stream=runtime.components.okx_private_stream,
+        client_order_id_builder=runtime.components.client_order_id_builder,
+    )
+    runtime.execution_coordinator = trader_app.ExecutionCoordinator(rest_client=fake_rest)
+    runtime.startup_snapshot = _fixed_vote_snapshot(
+        runtime,
+        strategy_def_id="vote-trend-btc-usdt-swap-12h-f20-s200-lb6-ch24-th0-v4-sl75-tp2400-h36-both",
+    )
+
+    async def _exercise_runtime() -> None:
+        now = datetime.now(UTC)
+        await trader_app._dispatch_runtime_event(
+            runtime,
+            PositionUpdateEvent(
+                event_type=TraderEventType.POSITION_UPDATE,
+                symbol="BTC-USDT-SWAP",
+                exchange="okx",
+                generated_at=now,
+                private_sequence="pri-1",
+                position_side="short",
+                net_quantity=3.5,
+                average_price=100.0,
+                mark_price=75.0,
+                unrealized_pnl=25.0,
+            ),
+        )
+        await trader_app._dispatch_runtime_event(
+            runtime,
+            OrderbookTopEvent(
+                event_type=TraderEventType.ORDERBOOK_TOP,
+                symbol="BTC-USDT-SWAP",
+                exchange="okx",
+                generated_at=now,
+                public_sequence="pub-1",
+                bid_price=74.9,
+                ask_price=75.1,
+                bid_size=5.0,
+                ask_size=6.0,
+            ),
+        )
+
+    asyncio.run(_exercise_runtime())
+
+    assert len(fake_rest.placed_orders) == 1
+    assert fake_rest.placed_orders[0][0]["side"] == "buy"
+    assert fake_rest.placed_orders[0][0]["posSide"] == "short"
+    assert fake_rest.placed_orders[0][0]["reduceOnly"] == "true"
+    assert runtime.history_store.written_rows["orders"][-1]["intent"] == "close"
+    assert runtime.history_store.written_rows["orders"][-1]["strategy_id"] == "vote_trend"
+    assert "vote_trend_take_profit_2400bps" in runtime.history_store.written_rows["orders"][-1]["strategy_logic"]
 
 
 def test_trader_runtime_records_trade_notification_metadata_for_order_and_position_events(monkeypatch) -> None:

@@ -48,11 +48,13 @@ from xuanshu.infra.storage.redis_store import (
     SnapshotStore,
 )
 from xuanshu.risk.kernel import RiskKernel
+from xuanshu.sizing.position_sizer import OpenOrderSizingInput, calculate_open_order_size
 from xuanshu.state.engine import StateEngine
 from xuanshu.strategies.signals import build_candidate_signals
 from xuanshu.ops.runtime_logging import configure_runtime_logger
 from xuanshu.trader.dispatcher import build_strategy_handover_event_order, dispatch_event
 from xuanshu.trader.recovery import RecoverySupervisor
+from xuanshu.vote_trend.backtest import VoteTrendParameters, latest_vote_trend_side
 from xuanshu.risk.kernel import is_stronger_strategy_replacement
 
 _OKX_REST_BASE_URL = "https://www.okx.com"
@@ -72,6 +74,12 @@ _FIXED_VOL_BREAKOUT_PATTERN = re.compile(
     r"(?:^|-)vol-breakout-.+-(?P<bar>\d+[mhd])-k(?P<k>\d+)-ta(?P<trailing>\d+)-h(?P<hold>\d+)-atr(?P<atr>\d+)-ema(?P<ema>\d+)(?:-|$)",
     re.IGNORECASE,
 )
+_FIXED_VOTE_TREND_PATTERN = re.compile(
+    r"(?:^|-)vote-trend-.+-(?P<bar>\d+[mhd])-f(?P<fast>\d+)-s(?P<slow>\d+)"
+    r"-lb(?P<lookback>\d+)-ch(?P<channel>\d+)-th(?P<threshold>\d+)-v(?P<votes>\d+)"
+    r"-sl(?P<stop>\d+)-tp(?P<take>\d+)-h(?P<hold>\d+)(?:-(?P<mode>both|longonly))?(?:-|$)",
+    re.IGNORECASE,
+)
 _BAR_PATTERN = re.compile(r"(?P<count>\d+)(?P<unit>[mhd])", re.IGNORECASE)
 _DEFAULT_VOL_BREAKOUT_STOP_LOSS_BPS = 300
 _DEFAULT_VOL_BREAKOUT_TAKE_PROFIT_BPS = 800
@@ -82,16 +90,8 @@ _OPEN_EXECUTION_FAILURE_COOLDOWN = timedelta(minutes=15)
 _POST_CLOSE_ENTRY_COOLDOWN = timedelta(minutes=15)
 _FIXED_VOL_BREAKOUT_CACHE_MIN_TTL = timedelta(seconds=15)
 _FIXED_VOL_BREAKOUT_CACHE_MAX_TTL = timedelta(seconds=30)
-_MARGIN_USAGE_BUFFER = 0.80
-_CONTRACT_VALUE_BY_SYMBOL = {
-    "BTC-USDT-SWAP": 0.01,
-    "ETH-USDT-SWAP": 0.1,
-}
-_LOT_SIZE_BY_SYMBOL = {
-    "BTC-USDT-SWAP": 0.01,
-    "ETH-USDT-SWAP": 0.01,
-}
-_PORTFOLIO_MARGIN_FRACTION_PER_SYMBOL = 0.5
+_FIXED_VOTE_TREND_CACHE_MIN_TTL = timedelta(seconds=30)
+_FIXED_VOTE_TREND_CACHE_MAX_TTL = timedelta(minutes=5)
 _PUBLIC_STREAM_RECONNECT_MARKERS = (
     "closed",
     "connection closed",
@@ -170,6 +170,10 @@ class TraderRuntime:
     vol_breakout_entry_candles: dict[str, str] = field(default_factory=dict)
     vol_breakout_rows_cache: dict[str, tuple[datetime, list[dict[str, object]]]] = field(default_factory=dict)
     vol_breakout_history_fetch_cooldowns: dict[str, datetime] = field(default_factory=dict)
+    vote_trend_signal_candles: dict[str, str] = field(default_factory=dict)
+    vote_trend_entry_candles: dict[str, str] = field(default_factory=dict)
+    vote_trend_rows_cache: dict[str, tuple[datetime, list[dict[str, object]]]] = field(default_factory=dict)
+    vote_trend_history_fetch_cooldowns: dict[str, datetime] = field(default_factory=dict)
     current_mode: RunMode = RunMode.NORMAL
     opening_allowed: bool = True
     execution_sequence: int = 0
@@ -546,7 +550,22 @@ def _closing_order_side(position_side: str) -> OrderSide:
     return OrderSide.SELL if position_side == "long" else OrderSide.BUY
 
 
-def _strategy_id_for_position_side(position_side: str) -> StrategyId:
+def _snapshot_uses_vote_trend(snapshot: StrategyConfigSnapshot, symbol: str) -> bool:
+    return (
+        snapshot.is_strategy_enabled(StrategyId.VOTE_TREND.value)
+        and _parse_fixed_vote_trend_parameters(snapshot.strategy_binding_for(symbol, StrategyId.VOTE_TREND.value))
+        is not None
+    )
+
+
+def _strategy_id_for_position_side(
+    position_side: str,
+    *,
+    snapshot: StrategyConfigSnapshot | None = None,
+    symbol: str | None = None,
+) -> StrategyId:
+    if snapshot is not None and symbol is not None and _snapshot_uses_vote_trend(snapshot, symbol):
+        return StrategyId.VOTE_TREND
     return StrategyId.VOL_BREAKOUT if position_side == "long" else StrategyId.SHORT_MOMENTUM
 
 
@@ -555,7 +574,8 @@ def _binding_for_position_side(
     symbol: str,
     position_side: str,
 ) -> ApprovedStrategyBinding | None:
-    return snapshot.strategy_binding_for(symbol, _strategy_id_for_position_side(position_side).value)
+    strategy_id = _strategy_id_for_position_side(position_side, snapshot=snapshot, symbol=symbol)
+    return snapshot.strategy_binding_for(symbol, strategy_id.value)
 
 
 def _extract_short_momentum_exit_rules(binding: ApprovedStrategyBinding | None) -> tuple[int, int, int] | None:
@@ -593,6 +613,35 @@ class FixedVolBreakoutParameters:
     ema_period: int
 
 
+@dataclass(frozen=True, slots=True)
+class FixedVoteTrendParameters:
+    bar: str
+    fast_ema_period: int
+    slow_ema_period: int
+    lookback_bars: int
+    channel_bars: int
+    threshold_bps: int
+    required_votes: int
+    stop_loss_bps: int
+    take_profit_bps: int
+    max_hold_bars: int
+    allow_short: bool
+
+    def to_vote_trend_parameters(self) -> VoteTrendParameters:
+        return VoteTrendParameters(
+            fast_ema_period=self.fast_ema_period,
+            slow_ema_period=self.slow_ema_period,
+            lookback_bars=self.lookback_bars,
+            channel_bars=self.channel_bars,
+            threshold_bps=self.threshold_bps,
+            required_votes=self.required_votes,
+            stop_loss_bps=self.stop_loss_bps,
+            take_profit_bps=self.take_profit_bps,
+            max_hold_bars=self.max_hold_bars,
+            allow_short=self.allow_short,
+        )
+
+
 def _decode_compact_decimal(value: str) -> float:
     if len(value) <= 1:
         return float(value)
@@ -616,6 +665,27 @@ def _parse_fixed_vol_breakout_parameters(binding: ApprovedStrategyBinding | None
         max_hold_bars=int(match.group("hold")),
         atr_period=int(match.group("atr")),
         ema_period=int(match.group("ema")),
+    )
+
+
+def _parse_fixed_vote_trend_parameters(binding: ApprovedStrategyBinding | None) -> FixedVoteTrendParameters | None:
+    if binding is None:
+        return None
+    match = _FIXED_VOTE_TREND_PATTERN.search(binding.strategy_def_id)
+    if match is None:
+        return None
+    return FixedVoteTrendParameters(
+        bar=match.group("bar").upper(),
+        fast_ema_period=int(match.group("fast")),
+        slow_ema_period=int(match.group("slow")),
+        lookback_bars=int(match.group("lookback")),
+        channel_bars=int(match.group("channel")),
+        threshold_bps=int(match.group("threshold")),
+        required_votes=int(match.group("votes")),
+        stop_loss_bps=int(match.group("stop")),
+        take_profit_bps=int(match.group("take")),
+        max_hold_bars=int(match.group("hold")),
+        allow_short=(match.group("mode") or "both").lower() != "longonly",
     )
 
 
@@ -656,6 +726,21 @@ def _active_position_return(position: object, position_side: str) -> float | Non
         return None
     if position_side == "short":
         return (average / mark) - 1.0
+    return (mark / average) - 1.0
+
+
+def _linear_active_position_return(position: object, position_side: str) -> float | None:
+    average_price = getattr(position, "average_price", 0.0)
+    mark_price = getattr(position, "mark_price", 0.0)
+    try:
+        average = float(average_price)
+        mark = float(mark_price)
+    except (TypeError, ValueError):
+        return None
+    if average <= 0.0 or mark <= 0.0:
+        return None
+    if position_side == "short":
+        return (average - mark) / average
     return (mark / average) - 1.0
 
 
@@ -703,6 +788,27 @@ async def _fixed_vol_breakout_exit_reason(
     return None
 
 
+def _fixed_vote_trend_exit_reason(
+    *,
+    parameters: FixedVoteTrendParameters,
+    position: object,
+    position_side: str,
+    context: PositionEntryContext | None,
+) -> str | None:
+    active_return = _linear_active_position_return(position, position_side)
+    if active_return is None:
+        return None
+    if active_return <= -(parameters.stop_loss_bps / 10_000):
+        return f"vote_trend_stop_loss_{parameters.stop_loss_bps}bps"
+    if active_return >= parameters.take_profit_bps / 10_000:
+        return f"vote_trend_take_profit_{parameters.take_profit_bps}bps"
+    if context is not None:
+        max_hold = _extract_bar_duration(parameters.bar) * parameters.max_hold_bars
+        if datetime.now(UTC) - context.entered_at >= max_hold:
+            return f"vote_trend_max_hold_{parameters.max_hold_bars}bars"
+    return None
+
+
 async def _position_exit_reason(runtime: TraderRuntime, symbol: str, position: object) -> str | None:
     position_side = str(getattr(position, "position_side", "long") or "long")
     position_quantity = float(getattr(position, "net_quantity", 0.0) or 0.0)
@@ -710,6 +816,14 @@ async def _position_exit_reason(runtime: TraderRuntime, symbol: str, position: o
         return None
     binding = _binding_for_position_side(runtime.startup_snapshot, symbol, position_side)
     context = runtime.position_entry_contexts.get(symbol)
+    vote_trend_parameters = _parse_fixed_vote_trend_parameters(binding)
+    if vote_trend_parameters is not None:
+        return _fixed_vote_trend_exit_reason(
+            parameters=vote_trend_parameters,
+            position=position,
+            position_side=position_side,
+            context=context,
+        )
     if position_side == "long":
         if binding is not None:
             return await _fixed_vol_breakout_exit_reason(
@@ -739,10 +853,16 @@ def _opposite_signal(
     signals: list[CandidateSignal],
     snapshot: StrategyConfigSnapshot,
 ) -> CandidateSignal | None:
-    if position_side == "short":
-        return None
     for signal in signals:
         signal_position_side = _position_side_for_signal(signal)
+        if (
+            signal.entry_type == EntryType.MARKET
+            and signal_position_side is not None
+            and signal_position_side != position_side
+            and signal.strategy_id == StrategyId.VOTE_TREND
+            and snapshot.is_strategy_enabled(signal.strategy_id.value)
+        ):
+            return signal
         if (
             signal.entry_type == EntryType.MARKET
             and signal_position_side is not None
@@ -756,8 +876,9 @@ def _opposite_signal(
 
 def _prioritize_strategy_signals(signals: list[CandidateSignal]) -> list[CandidateSignal]:
     priority = {
-        StrategyId.SHORT_MOMENTUM: 0,
-        StrategyId.VOL_BREAKOUT: 1,
+        StrategyId.VOTE_TREND: 0,
+        StrategyId.SHORT_MOMENTUM: 1,
+        StrategyId.VOL_BREAKOUT: 2,
     }
     return sorted(signals, key=lambda signal: priority.get(signal.strategy_id, 10))
 
@@ -774,10 +895,10 @@ def _enabled_candidate_signals(
 
 
 def _long_entry_confirmed(runtime: TraderRuntime, signal: CandidateSignal) -> bool:
-    if signal.strategy_id != StrategyId.VOL_BREAKOUT or signal.side != OrderSide.BUY:
+    if signal.strategy_id not in {StrategyId.VOL_BREAKOUT, StrategyId.VOTE_TREND} or signal.side != OrderSide.BUY:
         runtime.long_entry_confirmations.pop(signal.symbol, None)
         return True
-    if signal.symbol in runtime.vol_breakout_signal_candles:
+    if signal.symbol in runtime.vol_breakout_signal_candles or signal.symbol in runtime.vote_trend_signal_candles:
         runtime.long_entry_confirmations.pop(signal.symbol, None)
         return True
     confirmations = runtime.long_entry_confirmations.get(signal.symbol, 0) + 1
@@ -954,6 +1075,106 @@ async def _get_fixed_vol_breakout_rows(
     return rows
 
 
+def _fixed_vote_trend_rows_limit(parameters: FixedVoteTrendParameters) -> int:
+    warmup = max(parameters.slow_ema_period, parameters.lookback_bars, parameters.channel_bars, 14)
+    return min(max(warmup + parameters.max_hold_bars + 3, 240), 300)
+
+
+def _fixed_vote_trend_cache_key(symbol: str, parameters: FixedVoteTrendParameters) -> str:
+    return (
+        f"{symbol}:{parameters.bar}:limit={_fixed_vote_trend_rows_limit(parameters)}:"
+        f"f={parameters.fast_ema_period}:s={parameters.slow_ema_period}:"
+        f"lb={parameters.lookback_bars}:ch={parameters.channel_bars}:"
+        f"th={parameters.threshold_bps}:v={parameters.required_votes}:short={parameters.allow_short}"
+    )
+
+
+def _fixed_vote_trend_cache_ttl(parameters: FixedVoteTrendParameters) -> timedelta:
+    bar_duration = _extract_bar_duration(parameters.bar)
+    return min(
+        max(bar_duration / 20, _FIXED_VOTE_TREND_CACHE_MIN_TTL),
+        _FIXED_VOTE_TREND_CACHE_MAX_TTL,
+    )
+
+
+def _fixed_vote_trend_failure_cooldown(parameters: FixedVoteTrendParameters) -> timedelta:
+    bar_duration = _extract_bar_duration(parameters.bar)
+    return min(max(bar_duration / 10, timedelta(minutes=5)), timedelta(minutes=15))
+
+
+async def _fetch_fixed_vote_trend_rows(
+    runtime: TraderRuntime,
+    *,
+    symbol: str,
+    parameters: FixedVoteTrendParameters,
+) -> list[dict[str, object]]:
+    limit = _fixed_vote_trend_rows_limit(parameters)
+    rows_by_timestamp: dict[datetime, dict[str, object]] = {}
+    after: str | None = None
+    remaining = limit
+    while remaining > 0:
+        request_limit = min(100, remaining)
+        batch = await runtime.components.okx_rest_client.fetch_history_candles(
+            symbol,
+            bar=parameters.bar,
+            after=after,
+            limit=request_limit,
+        )
+        if not batch:
+            break
+        for item in batch:
+            row = _normalize_okx_candle(item)
+            rows_by_timestamp[row["timestamp"]] = row
+        remaining = limit - len(rows_by_timestamp)
+        oldest_ts = min(str(item["ts"]) for item in batch if "ts" in item)
+        if after == oldest_ts or len(batch) < request_limit:
+            break
+        after = oldest_ts
+    return [rows_by_timestamp[key] for key in sorted(rows_by_timestamp)]
+
+
+async def _get_fixed_vote_trend_rows(
+    runtime: TraderRuntime,
+    *,
+    symbol: str,
+    parameters: FixedVoteTrendParameters,
+    failure_detail_prefix: str,
+) -> list[dict[str, object]] | None:
+    now = datetime.now(UTC)
+    cache_key = _fixed_vote_trend_cache_key(symbol, parameters)
+    cached = runtime.vote_trend_rows_cache.get(cache_key)
+    if cached is not None:
+        expires_at, rows = cached
+        if now < expires_at:
+            return rows
+        runtime.vote_trend_rows_cache.pop(cache_key, None)
+
+    failure_cooldown_until = runtime.vote_trend_history_fetch_cooldowns.get(cache_key)
+    if failure_cooldown_until is not None:
+        if now < failure_cooldown_until:
+            return None
+        runtime.vote_trend_history_fetch_cooldowns.pop(cache_key, None)
+
+    try:
+        rows = await _fetch_fixed_vote_trend_rows(runtime, symbol=symbol, parameters=parameters)
+    except Exception as exc:
+        cooldown_until = now + _fixed_vote_trend_failure_cooldown(parameters)
+        runtime.vote_trend_history_fetch_cooldowns[cache_key] = cooldown_until
+        runtime.history_store.append_risk_event(
+            {
+                "event_type": "signal_blocked",
+                "symbol": symbol,
+                "detail": f"{failure_detail_prefix}: {_format_execution_error(exc)}",
+                "strategy_id": StrategyId.VOTE_TREND.value,
+                "cooldown_until": cooldown_until.isoformat(),
+            }
+        )
+        return None
+
+    runtime.vote_trend_rows_cache[cache_key] = (now + _fixed_vote_trend_cache_ttl(parameters), rows)
+    return rows
+
+
 def _ema(values: list[float], period: int) -> list[float]:
     alpha = 2 / (period + 1)
     output = [values[0]]
@@ -1017,6 +1238,42 @@ async def _fixed_vol_breakout_signals(runtime: TraderRuntime, symbol: str) -> li
             max_hold_ms=3000,
             cancel_after_ms=750,
             risk_tag="vol_breakout",
+        )
+    ]
+
+
+async def _fixed_vote_trend_signals(runtime: TraderRuntime, symbol: str) -> list[CandidateSignal] | None:
+    binding = runtime.startup_snapshot.strategy_binding_for(symbol, StrategyId.VOTE_TREND.value)
+    parameters = _parse_fixed_vote_trend_parameters(binding)
+    if parameters is None:
+        return None
+    rows = await _get_fixed_vote_trend_rows(
+        runtime,
+        symbol=symbol,
+        parameters=parameters,
+        failure_detail_prefix="fixed_vote_trend_history_fetch_failed",
+    )
+    if rows is None:
+        return []
+    signal_side = latest_vote_trend_side(parameters.to_vote_trend_parameters(), rows)
+    if signal_side is None:
+        return []
+    index = len(rows) - 1
+    candle_key = str(rows[index]["timestamp"])
+    runtime.vote_trend_signal_candles[symbol] = candle_key
+    if runtime.vote_trend_entry_candles.get(symbol) == candle_key:
+        return []
+    return [
+        CandidateSignal(
+            symbol=symbol,
+            strategy_id=StrategyId.VOTE_TREND,
+            side=OrderSide.BUY if signal_side == "long" else OrderSide.SELL,
+            entry_type=EntryType.MARKET,
+            urgency=SignalUrgency.HIGH,
+            confidence=0.75,
+            max_hold_ms=3000,
+            cancel_after_ms=750,
+            risk_tag="vote_trend",
         )
     ]
 
@@ -1119,13 +1376,11 @@ async def _submit_signal_open(runtime: TraderRuntime, signal: CandidateSignal) -
         candle_key = runtime.vol_breakout_signal_candles.get(signal.symbol)
         if candle_key is not None:
             runtime.vol_breakout_entry_candles[signal.symbol] = candle_key
+    if signal.strategy_id == StrategyId.VOTE_TREND:
+        candle_key = runtime.vote_trend_signal_candles.get(signal.symbol)
+        if candle_key is not None:
+            runtime.vote_trend_entry_candles[signal.symbol] = candle_key
     return True
-
-
-def _floor_to_lot_size(size: float, lot_size: float) -> float:
-    if lot_size <= 0.0:
-        return size
-    return (size // lot_size) * lot_size
 
 
 def _margin_adjusted_open_order_size(
@@ -1133,31 +1388,20 @@ def _margin_adjusted_open_order_size(
     symbol: str,
     requested_size: float,
 ) -> tuple[float, str | None]:
-    if requested_size <= 0.0:
-        return 0.0, "non_positive_requested_size"
     account_state = runtime.components.state_engine.account_state
-    if account_state.equity <= 0.0 and account_state.available_balance <= 0.0:
-        return requested_size, None
-    if account_state.available_balance <= 0.0:
-        return 0.0, "insufficient_available_margin"
     market_snapshot = runtime.components.state_engine.snapshot(symbol)
-    mark_price = market_snapshot.mid_price
-    contract_value = _CONTRACT_VALUE_BY_SYMBOL.get(symbol)
-    if contract_value is None or mark_price <= 0.0:
-        return requested_size, None
-    max_leverage = max(float(runtime.startup_snapshot.max_leverage), 1.0)
-    margin_per_contract = mark_price * contract_value / max_leverage
-    if margin_per_contract <= 0.0:
-        return requested_size, None
-    target_margin_budget = max(account_state.equity, runtime.starting_nav) * _PORTFOLIO_MARGIN_FRACTION_PER_SYMBOL
-    target_notional = target_margin_budget * max_leverage
-    target_size = target_notional / (mark_price * contract_value)
-    max_affordable_size = account_state.available_balance * _MARGIN_USAGE_BUFFER / margin_per_contract
-    lot_size = _LOT_SIZE_BY_SYMBOL.get(symbol, 0.01)
-    adjusted_size = _floor_to_lot_size(min(requested_size, target_size, max_affordable_size), lot_size)
-    if adjusted_size < 1.0:
-        return 0.0, "insufficient_available_margin"
-    return adjusted_size, None
+    result = calculate_open_order_size(
+        OpenOrderSizingInput(
+            symbol=symbol,
+            requested_size=requested_size,
+            mark_price=market_snapshot.mid_price,
+            equity=account_state.equity,
+            available_balance=account_state.available_balance,
+            starting_nav=runtime.starting_nav,
+            max_leverage=runtime.startup_snapshot.max_leverage,
+        )
+    )
+    return result.order_size, result.block_reason
 
 
 async def _submit_position_close(
@@ -1259,6 +1503,12 @@ def _build_strategy_logic(signal: CandidateSignal, snapshot: StrategyConfigSnaps
         binding = snapshot.strategy_binding_for(signal.symbol, signal.strategy_id.value)
         bar = _extract_vol_breakout_bar(getattr(binding, "strategy_def_id", ""))
         return f"{signal.symbol} {bar} 波动率突破，价格突破 ATR 阈值后顺势开多。"
+    if signal.strategy_id == StrategyId.VOTE_TREND:
+        binding = snapshot.strategy_binding_for(signal.symbol, signal.strategy_id.value)
+        parameters = _parse_fixed_vote_trend_parameters(binding)
+        bar = parameters.bar if parameters is not None else "12H"
+        direction = "开多" if signal.side == OrderSide.BUY else "开空"
+        return f"{signal.symbol} {bar} 多因子趋势投票，EMA/动量/通道/RSI 达到阈值后顺势{direction}。"
     if signal.strategy_id == StrategyId.SHORT_MOMENTUM:
         return f"{signal.symbol} 4H 空头动量破位，价格跌破回看阈值后顺势开空。"
     if signal.strategy_id == StrategyId.BREAKOUT:
@@ -1269,7 +1519,7 @@ def _build_strategy_logic(signal: CandidateSignal, snapshot: StrategyConfigSnaps
 
 
 def _build_position_strategy_logic(symbol: str, position_side: str, snapshot: StrategyConfigSnapshot) -> tuple[str, str]:
-    strategy_id = _strategy_id_for_position_side(position_side)
+    strategy_id = _strategy_id_for_position_side(position_side, snapshot=snapshot, symbol=symbol)
     signal_side = OrderSide.BUY if position_side == "long" else OrderSide.SELL
     signal = CandidateSignal(
         symbol=symbol,
@@ -1304,7 +1554,11 @@ def _state_trade_context_for_position(
     trade_context = runtime.components.state_engine.trade_context_by_symbol.get(symbol, {})
     strategy_id = trade_context.get("strategy_id")
     strategy_logic = trade_context.get("strategy_logic")
-    expected_strategy_id = _strategy_id_for_position_side(position_side).value
+    expected_strategy_id = _strategy_id_for_position_side(
+        position_side,
+        snapshot=runtime.startup_snapshot,
+        symbol=symbol,
+    ).value
     if (
         strategy_id != expected_strategy_id
         or strategy_logic is None
@@ -1543,11 +1797,12 @@ async def _evaluate_symbol(runtime: TraderRuntime, symbol: str) -> None:
     if runtime.startup_snapshot.version_id == "bootstrap":
         return
     snapshot = runtime.components.state_engine.snapshot(symbol)
-    fixed_vol_signals = await _fixed_vol_breakout_signals(runtime, symbol)
-    if fixed_vol_signals is None:
+    fixed_vote_signals = await _fixed_vote_trend_signals(runtime, symbol)
+    fixed_vol_signals = None if fixed_vote_signals is not None else await _fixed_vol_breakout_signals(runtime, symbol)
+    if fixed_vote_signals is None and fixed_vol_signals is None:
         signals = _enabled_candidate_signals(build_candidate_signals(snapshot), runtime.startup_snapshot)
     else:
-        signals = fixed_vol_signals
+        signals = fixed_vote_signals if fixed_vote_signals is not None else fixed_vol_signals
     open_orders = runtime.components.state_engine.open_orders_by_symbol.get(symbol, {})
     position = runtime.components.state_engine.positions_by_symbol.get(symbol)
     position_quantity = position.net_quantity if position is not None else 0.0
@@ -1585,7 +1840,11 @@ async def _evaluate_symbol(runtime: TraderRuntime, symbol: str) -> None:
                 runtime,
                 symbol=symbol,
                 position=position,
-                strategy_id=_strategy_id_for_position_side(position_side),
+                strategy_id=_strategy_id_for_position_side(
+                    position_side,
+                    snapshot=runtime.startup_snapshot,
+                    symbol=symbol,
+                ),
                 strategy_logic=f"{symbol} {position_side} 持仓触发退出：{exit_reason}。",
             )
             return

@@ -28,6 +28,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--min-trades", type=int, default=10)
     parser.add_argument("--max-drawdown", type=float, default=15.0)
     parser.add_argument("--risk-fraction", type=float, default=0.25)
+    parser.add_argument("--initial-equity", type=float, default=1000.0)
+    parser.add_argument("--initial-available-balance", type=float, default=None)
     parser.add_argument("--k", type=float, default=0.8)
     parser.add_argument("--trailing-atr", type=float, default=2.5)
     parser.add_argument("--max-hold-bars", type=int, default=12)
@@ -42,6 +44,9 @@ async def run_backtest(argv: list[str] | None = None) -> int:
         min_trade_count=args.min_trades,
         max_drawdown_percent=args.max_drawdown,
         risk_fraction=args.risk_fraction,
+        symbol=args.symbol,
+        initial_equity=args.initial_equity,
+        initial_available_balance=args.initial_available_balance,
     )
     parameters = VolBreakoutParameters(
         k=args.k,
@@ -89,7 +94,8 @@ def _print_summary(result) -> None:
         f"bar={p.bar} k={p.k} trailing_atr={p.trailing_atr} max_hold_bars={p.max_hold_bars} "
         f"trades={result.trade_count} return={result.return_percent:.4f}% "
         f"drawdown={result.max_drawdown_percent:.4f}% win={result.win_rate:.4f} "
-        f"pf={result.profit_factor:.4f} stability={result.stability_score:.4f}"
+        f"pf={result.profit_factor:.4f} stability={result.stability_score:.4f} "
+        f"equity={result.initial_equity:.2f}->{result.final_equity:.2f} blocked={result.blocked_signal_count}"
     )
 
 

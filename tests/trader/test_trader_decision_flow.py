@@ -333,6 +333,28 @@ def test_trader_parses_fixed_vol_breakout_parameters() -> None:
     assert params.ema_period == 100
 
 
+def test_trader_parses_fixed_vote_trend_parameters() -> None:
+    binding = _build_binding(
+        strategy_def_id="vote-trend-btc-usdt-swap-12h-f20-s200-lb6-ch24-th0-v4-sl75-tp2400-h36-both",
+        strategy_package_id="pkg",
+    )
+
+    params = trader_app._parse_fixed_vote_trend_parameters(binding)
+
+    assert params is not None
+    assert params.bar == "12H"
+    assert params.fast_ema_period == 20
+    assert params.slow_ema_period == 200
+    assert params.lookback_bars == 6
+    assert params.channel_bars == 24
+    assert params.threshold_bps == 0
+    assert params.required_votes == 4
+    assert params.stop_loss_bps == 75
+    assert params.take_profit_bps == 2400
+    assert params.max_hold_bars == 36
+    assert params.allow_short is True
+
+
 def test_trader_fixed_vol_breakout_exit_uses_strategy_trailing_atr(monkeypatch) -> None:
     monkeypatch.setenv("XUANSHU_OKX_SYMBOLS", "BTC-USDT-SWAP")
     monkeypatch.setenv("XUANSHU_TRADER_STARTING_NAV", "250000")

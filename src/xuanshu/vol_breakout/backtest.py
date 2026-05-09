@@ -8,6 +8,7 @@ from numbers import Real
 
 from xuanshu.contracts.strategy import ApprovedStrategyBinding, StrategyConfigSnapshot
 from xuanshu.core.enums import ApprovalState, RunMode
+from xuanshu.sizing.position_sizer import CONTRACT_VALUE_BY_SYMBOL, OpenOrderSizingInput, calculate_open_order_size
 
 
 @dataclass(frozen=True, slots=True)
@@ -38,6 +39,11 @@ class VolBreakoutConfig:
     max_drawdown_percent: float = 15.0
     risk_fraction: float = 0.25
     fee_bps: float = 4.0
+    symbol: str = "ETH-USDT-SWAP"
+    initial_equity: float = 1_000.0
+    initial_available_balance: float | None = None
+    per_symbol_max_position: float = 0.12
+    max_leverage: int = 3
 
     def __post_init__(self) -> None:
         if self.min_trade_count <= 0:
@@ -48,6 +54,16 @@ class VolBreakoutConfig:
             raise ValueError("risk_fraction must be > 0 and <= 1")
         if self.fee_bps < 0 or not math.isfinite(self.fee_bps):
             raise ValueError("fee_bps must be finite and non-negative")
+        if self.initial_equity <= 0 or not math.isfinite(self.initial_equity):
+            raise ValueError("initial_equity must be finite and positive")
+        if self.initial_available_balance is not None and (
+            self.initial_available_balance < 0 or not math.isfinite(self.initial_available_balance)
+        ):
+            raise ValueError("initial_available_balance must be finite and non-negative")
+        if self.per_symbol_max_position < 0 or self.per_symbol_max_position > 1:
+            raise ValueError("per_symbol_max_position must be >= 0 and <= 1")
+        if self.max_leverage < 1:
+            raise ValueError("max_leverage must be positive")
 
 
 @dataclass(frozen=True, slots=True)
@@ -60,6 +76,9 @@ class VolBreakoutResult:
     win_rate: float
     profit_factor: float
     stability_score: float
+    initial_equity: float = 0.0
+    final_equity: float = 0.0
+    blocked_signal_count: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -67,6 +86,15 @@ class _Position:
     entry_index: int
     entry_close: float
     highest_close: float
+    size: float
+    reserved_margin: float
+    entry_fee: float
+
+
+@dataclass(frozen=True, slots=True)
+class _AccountState:
+    equity: float
+    available_balance: float
 
 
 def evaluate_vol_breakout(
@@ -85,9 +113,18 @@ def evaluate_vol_breakout(
     lows = [row["low"] for row in rows]
     ema_values = _ema(closes, parameters.ema_period)
     atr_values = _atr(highs=highs, lows=lows, closes=closes, period=parameters.atr_period)
-    fee = config.fee_bps / 10_000
+    fee_rate = config.fee_bps / 10_000
+    contract_value = CONTRACT_VALUE_BY_SYMBOL.get(config.symbol)
+    if contract_value is None:
+        raise ValueError(f"unsupported contract symbol for vol_breakout backtest: {config.symbol}")
+    initial_available_balance = (
+        config.initial_equity if config.initial_available_balance is None else config.initial_available_balance
+    )
+    account = _AccountState(equity=config.initial_equity, available_balance=initial_available_balance)
+    equity_points = [account.equity]
     trades: list[float] = []
     position: _Position | None = None
+    blocked_signal_count = 0
 
     for index in range(warmup, len(rows)):
         close = closes[index]
@@ -96,25 +133,90 @@ def evaluate_vol_breakout(
             trailing_stop = highest_close - parameters.trailing_atr * atr_values[index]
             max_hold_reached = index - position.entry_index >= parameters.max_hold_bars
             if close < trailing_stop or max_hold_reached:
-                trades.append((close / position.entry_close) - 1.0 - 2 * fee)
+                trade_return, account = _close_position(
+                    position=position,
+                    close=close,
+                    account=account,
+                    contract_value=contract_value,
+                    fee_rate=fee_rate,
+                    initial_equity=config.initial_equity,
+                )
+                trades.append(trade_return)
+                equity_points.append(account.equity)
                 position = None
                 continue
             position = _Position(
                 entry_index=position.entry_index,
                 entry_close=position.entry_close,
                 highest_close=highest_close,
+                size=position.size,
+                reserved_margin=position.reserved_margin,
+                entry_fee=position.entry_fee,
             )
             continue
 
         breakout_level = closes[index - 1] + parameters.k * atr_values[index - 1]
         if close > ema_values[index] and close > breakout_level and index < len(rows) - 1:
-            position = _Position(entry_index=index, entry_close=close, highest_close=close)
+            requested_size = max(
+                1.0,
+                min(
+                    account.equity * config.per_symbol_max_position * config.risk_fraction,
+                    account.equity * 0.0035,
+                ),
+            )
+            sizing = calculate_open_order_size(
+                OpenOrderSizingInput(
+                    symbol=config.symbol,
+                    requested_size=requested_size,
+                    mark_price=close,
+                    equity=account.equity,
+                    available_balance=account.available_balance,
+                    starting_nav=account.equity,
+                    max_leverage=config.max_leverage,
+                )
+            )
+            if sizing.block_reason is not None:
+                blocked_signal_count += 1
+                continue
+            notional = close * sizing.order_size * contract_value
+            reserved_margin = notional / max(float(config.max_leverage), 1.0)
+            entry_fee = notional * fee_rate
+            account = _AccountState(
+                equity=account.equity - entry_fee,
+                available_balance=account.available_balance - reserved_margin - entry_fee,
+            )
+            equity_points.append(account.equity)
+            position = _Position(
+                entry_index=index,
+                entry_close=close,
+                highest_close=close,
+                size=sizing.order_size,
+                reserved_margin=reserved_margin,
+                entry_fee=entry_fee,
+            )
 
     if position is not None:
         final_close = closes[-1]
-        trades.append((final_close / position.entry_close) - 1.0 - 2 * fee)
+        trade_return, account = _close_position(
+            position=position,
+            close=final_close,
+            account=account,
+            contract_value=contract_value,
+            fee_rate=fee_rate,
+            initial_equity=config.initial_equity,
+        )
+        trades.append(trade_return)
+        equity_points.append(account.equity)
 
-    return _build_result(parameters=parameters, sample_count=len(rows), trade_returns=trades)
+    return _build_result(
+        parameters=parameters,
+        sample_count=len(rows),
+        trade_returns=trades,
+        equity_points=equity_points,
+        initial_equity=config.initial_equity,
+        final_equity=account.equity,
+        blocked_signal_count=blocked_signal_count,
+    )
 
 
 def candidate_passes(result: VolBreakoutResult, *, config: VolBreakoutConfig) -> bool:
@@ -145,8 +247,8 @@ def build_vol_breakout_snapshot(
         symbol_whitelist=[symbol],
         strategy_enable_flags={"vol_breakout": True},
         risk_multiplier=config.risk_fraction,
-        per_symbol_max_position=0.12,
-        max_leverage=3,
+        per_symbol_max_position=config.per_symbol_max_position,
+        max_leverage=config.max_leverage,
         market_mode=RunMode.HALTED,
         approval_state=ApprovalState.APPROVED,
         source_reason=f"fixed {symbol} {selected.parameters.bar} volatility breakout backtest",
@@ -227,15 +329,38 @@ def _atr(*, highs: list[float], lows: list[float], closes: list[float], period: 
     return _ema(true_ranges, period)
 
 
+def _close_position(
+    *,
+    position: _Position,
+    close: float,
+    account: _AccountState,
+    contract_value: float,
+    fee_rate: float,
+    initial_equity: float,
+) -> tuple[float, _AccountState]:
+    pnl = (close - position.entry_close) * position.size * contract_value
+    exit_fee = close * position.size * contract_value * fee_rate
+    net_pnl = pnl - position.entry_fee - exit_fee
+    account = _AccountState(
+        equity=account.equity + pnl - exit_fee,
+        available_balance=account.available_balance + position.reserved_margin + pnl - exit_fee,
+    )
+    return net_pnl / initial_equity, account
+
+
 def _build_result(
     *,
     parameters: VolBreakoutParameters,
     sample_count: int,
     trade_returns: list[float],
+    equity_points: list[float],
+    initial_equity: float,
+    final_equity: float,
+    blocked_signal_count: int,
 ) -> VolBreakoutResult:
     trade_count = len(trade_returns)
-    return_percent = round(sum(trade_returns) * 100, 6)
-    max_drawdown_percent = round(_max_drawdown(trade_returns) * 100, 6)
+    return_percent = round(((final_equity / initial_equity) - 1.0) * 100, 6)
+    max_drawdown_percent = round(_max_drawdown(equity_points) * 100, 6)
     wins = [value for value in trade_returns if value > 0]
     losses = [value for value in trade_returns if value < 0]
     win_rate = round(len(wins) / trade_count, 6) if trade_count else 0.0
@@ -255,6 +380,9 @@ def _build_result(
         win_rate=win_rate,
         profit_factor=profit_factor,
         stability_score=stability_score,
+        initial_equity=round(initial_equity, 6),
+        final_equity=round(final_equity, 6),
+        blocked_signal_count=blocked_signal_count,
     )
 
 
@@ -268,17 +396,19 @@ def _empty_result(*, parameters: VolBreakoutParameters, sample_count: int) -> Vo
         win_rate=0.0,
         profit_factor=0.0,
         stability_score=0.0,
+        blocked_signal_count=0,
     )
 
 
-def _max_drawdown(trade_returns: list[float]) -> float:
-    equity = 0.0
-    peak = 0.0
+def _max_drawdown(equity_points: list[float]) -> float:
+    if not equity_points:
+        return 0.0
+    peak = equity_points[0]
     max_drawdown = 0.0
-    for trade_return in trade_returns:
-        equity += trade_return
+    for equity in equity_points:
         peak = max(peak, equity)
-        max_drawdown = max(max_drawdown, peak - equity)
+        if peak > 0:
+            max_drawdown = max(max_drawdown, (peak - equity) / peak)
     return max_drawdown
 
 

@@ -276,6 +276,73 @@ async def test_entry_gap_reporter_calculates_vol_breakout_distance() -> None:
 
 
 @pytest.mark.asyncio
+async def test_entry_gap_reporter_calculates_vote_trend_votes() -> None:
+    class _FakeOkxRestClient:
+        def __init__(self) -> None:
+            start_ts = int(datetime(2026, 1, 1, tzinfo=UTC).timestamp() * 1000)
+            closes = [100 + index * 0.1 for index in range(30)]
+            closes.extend([110, 114, 119, 125])
+            self.rows = [
+                {
+                    "ts": str(start_ts + index * 43_200_000),
+                    "open": str(close - 0.5),
+                    "high": str(close + 1.0),
+                    "low": str(close - 1.0),
+                    "close": str(close),
+                }
+                for index, close in enumerate(closes)
+            ]
+
+        async def fetch_history_candles(self, symbol, *, bar="1H", after=None, before=None, limit=100):
+            if after is None:
+                return self.rows[:limit]
+            timestamps = [row["ts"] for row in self.rows]
+            if after not in timestamps:
+                return []
+            start = timestamps.index(after) + 1
+            return self.rows[start : start + limit]
+
+    now = datetime.now(UTC)
+    snapshot = StrategyConfigSnapshot(
+        version_id="fixed-vote-trend-test",
+        generated_at=now,
+        effective_from=now - timedelta(minutes=1),
+        expires_at=now + timedelta(days=1),
+        symbol_whitelist=["BTC-USDT-SWAP"],
+        strategy_enable_flags={"vote_trend": True},
+        risk_multiplier=0.25,
+        per_symbol_max_position=0.12,
+        max_leverage=3,
+        market_mode=RunMode.NORMAL,
+        approval_state=ApprovalState.APPROVED,
+        source_reason="test",
+        ttl_sec=86_400,
+        symbol_strategy_bindings={
+            "BTC-USDT-SWAP": ApprovedStrategyBinding(
+                strategy_def_id="vote-trend-btc-usdt-swap-12h-f3-s5-lb2-ch3-th0-v4-sl75-tp2400-h36-both",
+                strategy_package_id="fixed-vote-trend-btc-usdt-swap-12h-f3-s5-lb2-ch3-th0-v4-sl75-tp2400-h36-both",
+                backtest_report_id="bt-vote-trend-btc",
+                score=1.0,
+                score_basis="backtest_return_percent",
+                approval_record_id="approval",
+                activated_at=now,
+            )
+        },
+    )
+    reporter = EntryGapReporter(_FakeOkxRestClient())
+
+    text = await reporter.render(snapshot=snapshot, symbols=("BTC-USDT-SWAP",))
+
+    assert "开仓条件差距\n快照：fixed-vote-trend-test" in text
+    assert "结论：BTC-USDT-SWAP 当前投票已满足开仓条件。" in text
+    assert "BTC-USDT-SWAP（已满足开仓条件）" in text
+    assert "- 策略：vote_trend 12H，需要 4/5 票；允许做空" in text
+    assert "- 投票：多头 5/4；空头 0/4" in text
+    assert "- 多头价格差距：0.00（0.00%）" in text
+    assert "vol_breakout 当前未启用" not in text
+
+
+@pytest.mark.asyncio
 async def test_notifier_service_returns_chinese_help_for_english_commands() -> None:
     service = NotifierService(
         okx_symbols=("BTC-USDT-SWAP",),

@@ -17,6 +17,7 @@ class StrategyId(StrEnum):
     BREAKOUT = "breakout"
     MEAN_REVERSION = "mean_reversion"
     VOL_BREAKOUT = "vol_breakout"
+    VOTE_TREND = "vote_trend"
     SHORT_MOMENTUM = "short_momentum"
     RISK_PAUSE = "risk_pause"
 
