@@ -87,7 +87,6 @@ _DEFAULT_VOL_BREAKOUT_TRAILING_DRAWDOWN_BPS = 250
 _DEFAULT_VOL_BREAKOUT_MAX_HOLD_BARS = 12
 _LONG_ENTRY_CONFIRMATION_TICKS = 2
 _OPEN_EXECUTION_FAILURE_COOLDOWN = timedelta(minutes=15)
-_POST_CLOSE_ENTRY_COOLDOWN = timedelta(minutes=15)
 _FIXED_VOL_BREAKOUT_CACHE_MIN_TTL = timedelta(seconds=15)
 _FIXED_VOL_BREAKOUT_CACHE_MAX_TTL = timedelta(seconds=30)
 _FIXED_VOTE_TREND_CACHE_MIN_TTL = timedelta(seconds=30)
@@ -165,7 +164,6 @@ class TraderRuntime:
     pending_reverse_signals: dict[str, CandidateSignal] = field(default_factory=dict)
     long_entry_confirmations: dict[str, int] = field(default_factory=dict)
     open_execution_failure_cooldowns: dict[str, datetime] = field(default_factory=dict)
-    post_close_entry_cooldowns: dict[str, datetime] = field(default_factory=dict)
     vol_breakout_signal_candles: dict[str, str] = field(default_factory=dict)
     vol_breakout_entry_candles: dict[str, str] = field(default_factory=dict)
     vol_breakout_rows_cache: dict[str, tuple[datetime, list[dict[str, object]]]] = field(default_factory=dict)
@@ -927,32 +925,6 @@ def _start_open_execution_failure_cooldown(runtime: TraderRuntime, signal: Candi
     return cooldown_until.isoformat()
 
 
-def _is_post_close_entry_cooling_down(runtime: TraderRuntime, symbol: str) -> bool:
-    cooldown_until = runtime.post_close_entry_cooldowns.get(symbol)
-    if cooldown_until is None:
-        return False
-    if datetime.now(UTC) < cooldown_until:
-        return True
-    runtime.post_close_entry_cooldowns.pop(symbol, None)
-    return False
-
-
-def _start_post_close_entry_cooldown(runtime: TraderRuntime, symbol: str) -> str:
-    cooldown_until = datetime.now(UTC) + _POST_CLOSE_ENTRY_COOLDOWN
-    runtime.post_close_entry_cooldowns[symbol] = cooldown_until
-    runtime.pending_reverse_signals.pop(symbol, None)
-    runtime.long_entry_confirmations.pop(symbol, None)
-    runtime.history_store.append_risk_event(
-        {
-            "event_type": "post_close_entry_cooldown_started",
-            "symbol": symbol,
-            "detail": "position closed flat; suppressing immediate re-entry",
-            "cooldown_until": cooldown_until.isoformat(),
-        }
-    )
-    return cooldown_until.isoformat()
-
-
 def _format_execution_error(exc: Exception) -> str:
     if not isinstance(exc, OkxBusinessError):
         return str(exc)
@@ -1580,7 +1552,7 @@ def _sync_position_entry_context(runtime: TraderRuntime, event: PositionUpdateEv
         runtime.pending_position_actions.pop(event.symbol, None)
     elif pending_action == "close" and event.net_quantity == 0.0:
         runtime.pending_position_actions.pop(event.symbol, None)
-        _start_post_close_entry_cooldown(runtime, event.symbol)
+        runtime.long_entry_confirmations.pop(event.symbol, None)
     if event.net_quantity == 0.0:
         runtime.position_entry_contexts.pop(event.symbol, None)
         return
@@ -1811,10 +1783,6 @@ async def _evaluate_symbol(runtime: TraderRuntime, symbol: str) -> None:
     if symbol in runtime.pending_position_actions:
         return
     has_exposure = has_open_orders or position_quantity != 0.0
-    if not has_exposure and _is_post_close_entry_cooling_down(runtime, symbol):
-        runtime.pending_reverse_signals.pop(symbol, None)
-        runtime.long_entry_confirmations.pop(symbol, None)
-        return
     pending_reverse_signal = runtime.pending_reverse_signals.get(symbol)
     if pending_reverse_signal is not None:
         if has_exposure:

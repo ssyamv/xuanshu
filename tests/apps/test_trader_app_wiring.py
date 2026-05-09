@@ -2754,7 +2754,7 @@ def test_trader_runtime_backs_off_fixed_vol_breakout_history_failures(monkeypatc
     ]
 
 
-def test_trader_runtime_cools_down_after_closing_long_before_short_momentum_open(monkeypatch) -> None:
+def test_trader_runtime_opens_pending_reverse_after_closing_long(monkeypatch) -> None:
     _set_required_settings_env(monkeypatch)
     fake_redis = _FakeRedis()
     fake_rest = _FakeRestClient()
@@ -2874,15 +2874,21 @@ def test_trader_runtime_cools_down_after_closing_long_before_short_momentum_open
 
     asyncio.run(_exercise_runtime())
 
-    assert len(fake_rest.placed_orders) == 1
+    assert len(fake_rest.placed_orders) == 2
     assert fake_rest.placed_orders[0][0]["side"] == "sell"
     assert fake_rest.placed_orders[0][0]["posSide"] == "long"
     assert fake_rest.placed_orders[0][0]["reduceOnly"] == "true"
-    assert runtime.history_store.written_rows["orders"][-1]["intent"] == "close"
+    assert fake_rest.placed_orders[1][0]["side"] == "sell"
+    assert fake_rest.placed_orders[1][0]["posSide"] == "short"
+    assert "reduceOnly" not in fake_rest.placed_orders[1][0]
+    assert runtime.history_store.written_rows["orders"][-2]["intent"] == "close"
+    assert runtime.history_store.written_rows["orders"][-1]["intent"] == "open"
     assert runtime.history_store.written_rows["orders"][-1]["strategy_id"] == "short_momentum"
     assert runtime.pending_reverse_signals == {}
-    assert "BTC-USDT-SWAP" in runtime.post_close_entry_cooldowns
-    assert runtime.history_store.written_rows["risk_events"][-1]["event_type"] == "post_close_entry_cooldown_started"
+    assert all(
+        row["event_type"] != "post_close_entry_cooldown_started"
+        for row in runtime.history_store.written_rows["risk_events"]
+    )
 
 
 def test_trader_runtime_does_not_treat_existing_short_as_long_reversal(monkeypatch) -> None:
